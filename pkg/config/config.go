@@ -84,14 +84,15 @@ type RedisConfig struct {
 
 // ServicesConfig holds services addresses
 type ServicesConfig struct {
-	Gateway   string `yaml:"gateway"`
-	Chat      string `yaml:"chat"`
-	Knowledge string `yaml:"knowledge"`
-	Memory    string `yaml:"memory"`
-	A2A       string `yaml:"a2a"`
-	MCP       string `yaml:"mcp"`
-	Harness   string `yaml:"harness"`
-	Agent     string `yaml:"agent"` // Agent orchestration service
+	Gateway     string `yaml:"gateway"`
+	Chat        string `yaml:"chat"`
+	Knowledge   string `yaml:"knowledge"`
+	Memory      string `yaml:"memory"`
+	A2A         string `yaml:"a2a"`
+	MCP         string `yaml:"mcp"`
+	Harness     string `yaml:"harness"`
+	Agent       string `yaml:"agent"`        // Agent orchestration service
+	HarnessLoop string `yaml:"harness_loop"` // Harness loop FSM service
 }
 
 // LoggingConfig holds logging configuration

@@ -56,10 +56,10 @@ func (h *EvalHandler) GetResults(c *gin.Context) {
 			"tokens_used":  50000,
 			"cost":         0.1,
 			"score_by_category": gin.H{
-				"navigation": 0.9,
-				"interaction": 0.85,
+				"navigation":         0.9,
+				"interaction":        0.85,
 				"content_extraction": 0.8,
-				"form_submission": 0.85,
+				"form_submission":    0.85,
 			},
 			"results": []gin.H{
 				{
@@ -102,12 +102,12 @@ func (h *EvalHandler) GetResults(c *gin.Context) {
 			},
 			"regressions": []gin.H{},
 			"metrics_summary": gin.H{
-				"avg_steps":            2.5,
-				"avg_latency_ms":       4000,
-				"total_tool_calls":     15,
-				"tool_success_rate":    0.9,
-				"avg_tokens_per_test":  1500,
-				"avg_cost_per_test":    0.01,
+				"avg_steps":           2.5,
+				"avg_latency_ms":      4000,
+				"total_tool_calls":    15,
+				"tool_success_rate":   0.9,
+				"avg_tokens_per_test": 1500,
+				"avg_cost_per_test":   0.01,
 			},
 			"created_at": time.Now().Format(time.RFC3339),
 		},
@@ -130,8 +130,8 @@ func (h *EvalHandler) RunEval(c *gin.Context) {
 			"tokens_used":  50000,
 			"cost":         0.1,
 			"score_by_category": gin.H{
-				"navigation": 0.9,
-				"interaction": 0.85,
+				"navigation":         0.9,
+				"interaction":        0.85,
 				"content_extraction": 0.8,
 			},
 			"results": []gin.H{

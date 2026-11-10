@@ -24,6 +24,7 @@ services:
   mcp: mcp-service:50005
   harness: harness-service:50007
   agent: agent-service:50006
+  harness_loop: harnessloop-service:50008
 
 # Logging
 logging:

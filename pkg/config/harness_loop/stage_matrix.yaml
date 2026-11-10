@@ -1,0 +1,20 @@
+version: 1
+stages:
+  a:
+    read: [read_file, list_dir, grep]
+    write: []
+    exec: []
+  b:
+    read: [read_file, list_dir, grep]
+    write: []
+    exec: []
+  c:
+    read: [read_file, list_dir, grep]
+    write: [write_file, edit_file, apply_patch, mkdir]
+    exec: [go]
+  d:
+    read: [read_file, list_dir, grep]
+    write: []
+    exec: [go]
+  e:
+    deny_all: true

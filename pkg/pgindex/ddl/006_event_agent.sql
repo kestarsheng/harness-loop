@@ -1,0 +1,1 @@
+ALTER TABLE hlp_event.events ADD COLUMN IF NOT EXISTS agent_id text;

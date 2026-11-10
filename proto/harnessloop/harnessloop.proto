@@ -1,0 +1,259 @@
+syntax = "proto3";
+
+package harnessloop;
+
+option go_package = "agent-platform/pkg/pb/harnessloop";
+
+// P0 subset. Additional RPCs (subtask/DAG/handoff, model switch, policy snapshot,
+// approval proxy) are appended in P1 without changing field numbers.
+
+service HarnessLoopService {
+  rpc CreateTask(CreateTaskRequest) returns (CreateTaskResponse);
+  rpc GetTask(GetTaskRequest) returns (TaskView);
+  rpc ListTasks(ListTasksRequest) returns (ListTasksResponse);
+  rpc PauseTask(TaskCommand) returns (TaskView);
+  rpc ResumeTask(ResumeTaskRequest) returns (TaskView);
+  rpc AbortTask(TaskCommand) returns (TaskView);
+
+  rpc ListEvents(ListEventsRequest) returns (ListEventsResponse);
+  rpc WatchEvents(WatchEventsRequest) returns (stream HarnessEvent);
+
+  rpc ListCheckpoints(ListCheckpointsRequest) returns (ListCheckpointsResponse);
+  rpc RestoreFromCheckpoint(RestoreRequest) returns (TaskView);
+
+  rpc ListModels(ListModelsRequest) returns (ListModelsResponse);
+  rpc ResolveModel(ResolveModelRequest) returns (ResolveModelResponse);
+
+  rpc PreflightTool(PreflightToolRequest) returns (ToolDecision);
+}
+
+message Empty {}
+
+message StageCriteria {
+  string stage = 1;
+  repeated Criterion criteria = 2;
+}
+
+message Criterion {
+  string criterion_id = 1;
+  string type = 2;
+  string expr = 3;
+  bool required = 4;
+}
+
+message Budget {
+  int64 tokens = 1;
+  double cost = 2;
+  int64 wall_clock_seconds = 3;
+}
+
+message CreateTaskRequest {
+  string tenant_id = 1;
+  string project_id = 2;
+  string workspace_root = 3;
+  string goal = 4;
+  repeated StageCriteria stage_criteria = 5;
+  Budget budget = 6;
+  string user_id = 7;
+  string idempotency_key = 8;
+}
+
+message CreateTaskResponse {
+  TaskView task = 1;
+}
+
+message GetTaskRequest {
+  string tenant_id = 1;
+  string task_id = 2;
+}
+
+message ListTasksRequest {
+  string tenant_id = 1;
+  string project_id = 2;
+  repeated string status = 3;
+  int32 limit = 4;
+  string page_token = 5;
+}
+
+message ListTasksResponse {
+  repeated TaskView tasks = 1;
+  string next_page_token = 2;
+}
+
+message TaskCommand {
+  string tenant_id = 1;
+  string task_id = 2;
+  string reason = 3;
+  int64 abort_epoch = 4;
+}
+
+message ResumeTaskRequest {
+  string tenant_id = 1;
+  string task_id = 2;
+  string checkpoint_id = 3;
+}
+
+message TaskView {
+  string task_id = 1;
+  string tenant_id = 2;
+  string project_id = 3;
+  string workspace_root = 4;
+  string goal = 5;
+  string goal_hash = 6;
+  string current_stage = 7;
+  string status = 8;
+  string terminal_reason = 9;
+  map<string, int32> attempt_no_by_stage = 10;
+  int32 retry_count = 11;
+  int32 acceptance_fail_count = 12;
+  Budget budget = 13;
+  int64 consumed_tokens = 14;
+  double consumed_cost = 15;
+  bool fsm_enabled = 16;
+  int64 version = 17;
+  int64 created_at_ms = 18;
+  int64 updated_at_ms = 19;
+  string last_checkpoint_id = 20;
+  repeated StageAttemptView attempts = 21;
+}
+
+message StageAttemptView {
+  string attempt_id = 1;
+  string task_id = 2;
+  string stage = 3;
+  int32 attempt_no = 4;
+  string entry_reason = 5;
+  int64 started_at_ms = 6;
+  int64 ended_at_ms = 7;
+  bool finish_received = 8;
+  string acceptance_id = 9;
+}
+
+message HarnessEvent {
+  string event_id = 1;
+  string event_type = 2;
+  string schema_version = 3;
+  string task_id = 4;
+  string trace_id = 5;
+  string span_id = 6;
+  optional string stage = 7;
+  optional int32 attempt = 8;
+  int64 seq = 9;
+  int64 timestamp_ms = 10;
+  string severity = 11;
+  string tenant_id = 12;
+  string project_id = 13;
+  string agent_id = 14;
+  bytes payload = 15;
+  string payload_ref = 16;
+  string parent_task_id = 17;
+  string subtask_id = 18;
+  string handoff_id = 19;
+  string dag_id = 20;
+  string dag_node_id = 21;
+}
+
+message ListEventsRequest {
+  string tenant_id = 1;
+  string task_id = 2;
+  string stage = 3;
+  string event_type = 4;
+  string severity = 5;
+  int64 since_seq = 6;
+  int32 limit = 7;
+}
+
+message ListEventsResponse {
+  repeated HarnessEvent events = 1;
+  int64 next_since_seq = 2;
+}
+
+message WatchEventsRequest {
+  string tenant_id = 1;
+  int64 since_seq = 2;
+  repeated string task_ids = 3;
+}
+
+message CheckpointView {
+  string checkpoint_id = 1;
+  string task_id = 2;
+  string kind = 3;
+  string stage = 4;
+  int32 attempt = 5;
+  int64 created_at_ms = 6;
+  int64 event_seq_watermark = 7;
+  string payload_ref = 8;
+}
+
+message ListCheckpointsRequest {
+  string tenant_id = 1;
+  string task_id = 2;
+  int32 limit = 3;
+}
+
+message ListCheckpointsResponse {
+  repeated CheckpointView checkpoints = 1;
+}
+
+message RestoreRequest {
+  string tenant_id = 1;
+  string task_id = 2;
+  string checkpoint_id = 3;
+}
+
+message ModelEntry {
+  string id = 1;
+  string provider = 2;
+  int32 context_window = 3;
+  int32 max_output_tokens = 4;
+  bool tool_call = 5;
+  bool structured_output = 6;
+  double price_in_per_1k = 7;
+  double price_out_per_1k = 8;
+  string status = 9;
+  repeated string tags = 10;
+}
+
+message ListModelsRequest {
+  string tenant_id = 1;
+  string status = 2;
+}
+
+message ListModelsResponse {
+  repeated ModelEntry models = 1;
+  string registry_version = 2;
+}
+
+message ResolveModelRequest {
+  string tenant_id = 1;
+  string stage = 2;
+  string strategy = 3;
+  bool require_tool_call = 4;
+  int32 required_context_window = 5;
+}
+
+message ResolveModelResponse {
+  ModelEntry selected = 1;
+  string strategy = 2;
+  repeated string violations = 3;
+  repeated ModelEntry candidates = 4;
+}
+
+message PreflightToolRequest {
+  string tenant_id = 1;
+  string task_id = 2;
+  string stage = 3;
+  string tool_name = 4;
+  repeated string path_args = 5;
+  repeated string command_args = 6;
+}
+
+message ToolDecision {
+  bool allowed = 1;
+  string reason_code = 2;
+  string rule_id = 3;
+  string layer = 4;
+  bool requires_approval = 5;
+  string approval_id = 6;
+  string detail = 7;
+}

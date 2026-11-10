@@ -248,7 +248,7 @@ func (m *mockToolExecutor) ListTools(context.Context) (map[string]any, error) {
 // toolDef builds a minimal tool definition keyed by function name.
 func toolDef(name string) map[string]any {
 	return map[string]any{
-		"type": "function",
+		"type":     "function",
 		"function": map[string]any{"name": name, "description": "mock", "parameters": map[string]any{"type": "object"}},
 	}
 }

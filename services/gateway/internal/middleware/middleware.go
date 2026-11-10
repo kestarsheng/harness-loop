@@ -114,3 +114,21 @@ func Auth(jwtSecret string) gin.HandlerFunc {
 		c.Next()
 	}
 }
+
+// StrictTenant requires an explicit X-Tenant-ID header and rejects requests without it.
+func StrictTenant() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		tenantID := c.GetHeader("X-Tenant-ID")
+		if tenantID == "" {
+			c.AbortWithStatusJSON(401, gin.H{
+				"code":     "E_TENANT_REQUIRED",
+				"message":  "X-Tenant-ID header is required for this namespace",
+				"details":  gin.H{"namespace": "harness-loop"},
+				"trace_id": c.GetHeader("X-Trace-ID"),
+			})
+			return
+		}
+		c.Set("tenant_id", tenantID)
+		c.Next()
+	}
+}

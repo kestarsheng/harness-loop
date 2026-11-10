@@ -47,15 +47,15 @@ type Edge struct {
 
 // Workflow defines a directed acyclic graph workflow
 type Workflow struct {
-	ID          string   `json:"id" bson:"_id"`
-	Name        string   `json:"name" bson:"name"`
-	Description string   `json:"description,omitempty" bson:"description,omitempty"`
-	Nodes       []*Node  `json:"nodes" bson:"nodes"`
-	Edges       []*Edge  `json:"edges" bson:"edges"`
-	EntryNodeID string   `json:"entry_node_id" bson:"entry_node_id"`
-	TenantID    string   `json:"tenant_id,omitempty" bson:"tenant_id,omitempty"`
-	CreatedAt   int64    `json:"created_at" bson:"created_at"`
-	UpdatedAt   int64    `json:"updated_at" bson:"updated_at"`
+	ID          string  `json:"id" bson:"_id"`
+	Name        string  `json:"name" bson:"name"`
+	Description string  `json:"description,omitempty" bson:"description,omitempty"`
+	Nodes       []*Node `json:"nodes" bson:"nodes"`
+	Edges       []*Edge `json:"edges" bson:"edges"`
+	EntryNodeID string  `json:"entry_node_id" bson:"entry_node_id"`
+	TenantID    string  `json:"tenant_id,omitempty" bson:"tenant_id,omitempty"`
+	CreatedAt   int64   `json:"created_at" bson:"created_at"`
+	UpdatedAt   int64   `json:"updated_at" bson:"updated_at"`
 }
 
 // NewWorkflow creates a new workflow with defaults

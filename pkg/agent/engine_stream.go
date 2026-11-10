@@ -86,6 +86,7 @@ func (e *Engine) RunStream(ctx context.Context, req *ExecutionRequest, callback 
 	execCtx.TenantID = req.TenantID
 	execCtx.UserID = req.UserID
 	execCtx.EntryAgent = req.EntryAgent
+	execCtx.StageMode = req.StageMode
 	execCtx.MarkRunning()
 
 	// Set initial variables
@@ -197,8 +198,17 @@ func (e *Engine) executeLoopStream(ctx context.Context, execCtx *ExecutionContex
 
 		// Check for tool calls
 		if len(llmResp.ToolCalls) == 0 {
-			// No tool calls — we're done
+			// No tool calls — we're done, unless stage mode requires a stage_finish call.
 			execCtx.AddMessage("assistant", llmResp.Content)
+			if execCtx.StageMode {
+				execCtx.MarkError(ErrStageNotFinished.Error())
+				callback(StreamEvent{
+					Type:    EventError,
+					AgentID: currentAgent.ID,
+					Error:   ErrStageNotFinished.Error(),
+				})
+				return e.buildResult(execCtx, llmResp.Content), ErrStageNotFinished
+			}
 			execCtx.MarkCompleted()
 
 			callback(StreamEvent{

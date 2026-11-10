@@ -80,12 +80,12 @@ func (h *ChatHandler) Chat(c *gin.Context) {
 	c.JSON(200, gin.H{
 		"code": 0,
 		"data": gin.H{
-			"session_id":    resp.SessionId,
-			"content":       resp.Content,
-			"total_tokens":  resp.TotalTokens,
-			"cost":          resp.Cost,
-			"agent_states":  resp.AgentStates,
-			"tool_calls":    resp.ToolCalls,
+			"session_id":   resp.SessionId,
+			"content":      resp.Content,
+			"total_tokens": resp.TotalTokens,
+			"cost":         resp.Cost,
+			"agent_states": resp.AgentStates,
+			"tool_calls":   resp.ToolCalls,
 		},
 	})
 }

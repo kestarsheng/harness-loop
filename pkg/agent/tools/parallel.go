@@ -48,12 +48,12 @@ type ParallelRequest struct {
 
 // ParallelResult represents the result of parallel execution
 type ParallelResult struct {
-	TotalRequests  int                       `json:"total_requests"`
-	Successful     int                       `json:"successful"`
-	Failed         int                       `json:"failed"`
-	TotalDuration  int64                     `json:"total_duration_ms"`
-	Results        map[string]*ToolResult    `json:"results"`
-	Errors         map[string]string         `json:"errors"`
+	TotalRequests int                    `json:"total_requests"`
+	Successful    int                    `json:"successful"`
+	Failed        int                    `json:"failed"`
+	TotalDuration int64                  `json:"total_duration_ms"`
+	Results       map[string]*ToolResult `json:"results"`
+	Errors        map[string]string      `json:"errors"`
 }
 
 // Execute executes multiple requests in parallel
@@ -87,10 +87,10 @@ func (p *ParallelExecutor) Execute(ctx context.Context, requests []ParallelReque
 
 			// Create step
 			step := CompositionStep{
-				ID:          r.ID,
-				ToolName:    r.ToolName,
-				Parameters:  r.Parameters,
-				Timeout:     int(r.Timeout.Milliseconds()),
+				ID:         r.ID,
+				ToolName:   r.ToolName,
+				Parameters: r.Parameters,
+				Timeout:    int(r.Timeout.Milliseconds()),
 			}
 
 			// Execute with timeout
@@ -300,20 +300,20 @@ type CircuitState int
 
 const (
 	CircuitClosed   CircuitState = iota // Normal operation
-	CircuitOpen                          // Failing, reject all requests
-	CircuitHalfOpen                      // Testing if service recovered
+	CircuitOpen                         // Failing, reject all requests
+	CircuitHalfOpen                     // Testing if service recovered
 )
 
 // CircuitBreaker implements the circuit breaker pattern
 type CircuitBreaker struct {
-	name          string
-	maxFailures   int
-	timeout       time.Duration
-	state         CircuitState
-	failures      int
-	lastFailTime  time.Time
-	successCount  int
-	mu            sync.RWMutex
+	name         string
+	maxFailures  int
+	timeout      time.Duration
+	state        CircuitState
+	failures     int
+	lastFailTime time.Time
+	successCount int
+	mu           sync.RWMutex
 }
 
 // NewCircuitBreaker creates a new circuit breaker
@@ -600,21 +600,21 @@ func (r *ToolRegistry) GetMetadata(toolName string) map[string]interface{} {
 
 // ToolStats tracks tool usage statistics
 type ToolStats struct {
-	CallCount      int64         `json:"call_count"`
-	SuccessCount   int64         `json:"success_count"`
-	FailureCount   int64         `json:"failure_count"`
-	TotalDuration  int64         `json:"total_duration_ms"`
-	AvgDuration    float64       `json:"avg_duration_ms"`
-	MaxDuration    int64         `json:"max_duration_ms"`
-	MinDuration    int64         `json:"min_duration_ms"`
-	LastCalled     time.Time     `json:"last_called"`
-	LastError      string        `json:"last_error"`
+	CallCount     int64     `json:"call_count"`
+	SuccessCount  int64     `json:"success_count"`
+	FailureCount  int64     `json:"failure_count"`
+	TotalDuration int64     `json:"total_duration_ms"`
+	AvgDuration   float64   `json:"avg_duration_ms"`
+	MaxDuration   int64     `json:"max_duration_ms"`
+	MinDuration   int64     `json:"min_duration_ms"`
+	LastCalled    time.Time `json:"last_called"`
+	LastError     string    `json:"last_error"`
 }
 
 // StatsCollector collects tool statistics
 type StatsCollector struct {
-	stats    map[string]*ToolStats
-	mu       sync.RWMutex
+	stats map[string]*ToolStats
+	mu    sync.RWMutex
 }
 
 // NewStatsCollector creates a new stats collector

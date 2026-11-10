@@ -245,6 +245,7 @@ func (s *AgentService) Execute(ctx context.Context, req *pb.ExecuteRequest) (*pb
 		SystemPromptOverride: systemPromptOverride,
 		Goal:                 req.Goal,
 		SuccessCriteria:      req.SuccessCriteria,
+		StageMode:            isStageMode(contextVars),
 	}
 
 	// Execute
@@ -350,6 +351,7 @@ func (s *AgentService) ExecuteStream(req *pb.ExecuteStreamRequest, stream pb.Age
 		SystemPromptOverride: systemPromptOverride,
 		Goal:                 req.Goal,
 		SuccessCriteria:      req.SuccessCriteria,
+		StageMode:            isStageMode(contextVars),
 	}
 
 	// Run with streaming — each event is forwarded to the gRPC stream in real time
@@ -978,4 +980,20 @@ func (a *memoryAdapter) Write(ctx context.Context, sessionID, tenantID, agentID,
 		TenantId:   tenantID,
 	})
 	return err
+}
+func isStageMode(vars map[string]any) bool {
+	raw, ok := vars["__stage_mode__"]
+	if !ok {
+		return false
+	}
+	switch v := raw.(type) {
+	case bool:
+		return v
+	case string:
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "true", "1", "yes", "on":
+			return true
+		}
+	}
+	return false
 }

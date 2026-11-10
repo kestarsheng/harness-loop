@@ -65,8 +65,8 @@ type SaveRequest struct {
 type RecallRequest struct {
 	Query     string `json:"query"`
 	SessionId string `json:"session_id"`
-	AgentId   string  `json:"agent_id"`
-	TenantId  string  `json:"tenant_id"`
+	AgentId   string `json:"agent_id"`
+	TenantId  string `json:"tenant_id"`
 	TopK      int32  `json:"top_k"`
 }
 
@@ -107,7 +107,7 @@ func (h *MemoryHandler) Save(c *gin.Context) {
 		Type:       memType,
 		Content:    req.Content,
 		Importance: req.Importance,
-		TenantId: tenantIDOr(req.TenantId, c),
+		TenantId:   tenantIDOr(req.TenantId, c),
 	})
 
 	if err != nil {
@@ -150,7 +150,7 @@ func (h *MemoryHandler) Recall(c *gin.Context) {
 		Query:     req.Query,
 		SessionId: req.SessionId,
 		AgentId:   req.AgentId,
-		TenantId: tenantIDOr(req.TenantId, c),
+		TenantId:  tenantIDOr(req.TenantId, c),
 		TopK:      req.TopK,
 	})
 
@@ -163,13 +163,13 @@ func (h *MemoryHandler) Recall(c *gin.Context) {
 	memories := make([]gin.H, 0, len(resp.Memories))
 	for _, m := range resp.Memories {
 		memories = append(memories, gin.H{
-			"id":          m.Id,
-			"session_id":  m.SessionId,
-			"agent_id":    m.AgentId,
-			"type":        m.Type.String(),
-			"content":     m.Content,
-			"importance":  m.Importance,
-			"created_at":  m.CreatedAt,
+			"id":         m.Id,
+			"session_id": m.SessionId,
+			"agent_id":   m.AgentId,
+			"type":       m.Type.String(),
+			"content":    m.Content,
+			"importance": m.Importance,
+			"created_at": m.CreatedAt,
 		})
 	}
 
@@ -210,13 +210,13 @@ func (h *MemoryHandler) GetSessionMemory(c *gin.Context) {
 	memories := make([]gin.H, 0, len(resp.Memories))
 	for _, m := range resp.Memories {
 		memories = append(memories, gin.H{
-			"id":          m.Id,
-			"session_id":  m.SessionId,
-			"agent_id":    m.AgentId,
-			"type":        m.Type.String(),
-			"content":     m.Content,
-			"importance":  m.Importance,
-			"created_at":  m.CreatedAt,
+			"id":         m.Id,
+			"session_id": m.SessionId,
+			"agent_id":   m.AgentId,
+			"type":       m.Type.String(),
+			"content":    m.Content,
+			"importance": m.Importance,
+			"created_at": m.CreatedAt,
 		})
 	}
 
@@ -605,11 +605,11 @@ func (h *LayeredMemoryHandler) StoreConcept(c *gin.Context) {
 // StoreRelation stores a semantic relation
 func (h *LayeredMemoryHandler) StoreRelation(c *gin.Context) {
 	var req struct {
-		FromConcept string  `json:"from_concept"`
-		ToConcept   string  `json:"to_concept"`
-		RelationType string `json:"relation_type"`
-		Weight      float64 `json:"weight"`
-		Confidence  float64 `json:"confidence"`
+		FromConcept  string  `json:"from_concept"`
+		ToConcept    string  `json:"to_concept"`
+		RelationType string  `json:"relation_type"`
+		Weight       float64 `json:"weight"`
+		Confidence   float64 `json:"confidence"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"code": 1, "message": "invalid request: " + err.Error()})
@@ -987,10 +987,10 @@ func (h *LayeredMemoryHandler) GetForgettingConfig(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"code": 0,
 		"data": gin.H{
-			"time_decay_rate":         0.1,
-			"importance_threshold":    0.3,
-			"max_age_hours":           720,
-			"cleanup_interval_hours":  24,
+			"time_decay_rate":        0.1,
+			"importance_threshold":   0.3,
+			"max_age_hours":          720,
+			"cleanup_interval_hours": 24,
 		},
 	})
 }
