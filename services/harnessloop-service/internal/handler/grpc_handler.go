@@ -408,19 +408,8 @@ func (h *Handler) ResolveModel(ctx context.Context, req *harnesspb.ResolveModelR
 	}
 	m := res.Model
 	return &harnesspb.ResolveModelResponse{
-		Strategy: res.Strategy,
-		Candidates: []*harnesspb.ModelEntry{{
-			Id:               m.ID,
-			Provider:         m.Provider,
-			ContextWindow:    int32(m.ContextWindow),
-			MaxOutputTokens:  int32(m.MaxOutputTokens),
-			ToolCall:         m.ToolCall,
-			StructuredOutput: m.StructuredOutput,
-			PriceInPer_1K:    m.PriceInPer1K,
-			PriceOutPer_1K:   m.PriceOutPer1K,
-			Status:           m.Status,
-			Tags:             m.Tags,
-		}},
+		Strategy:   res.Strategy,
+		Candidates: []*harnesspb.ModelEntry{toModelEntry(m.View())},
 	}, nil
 }
 

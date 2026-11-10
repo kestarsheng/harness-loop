@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"agent-platform/pkg/harnessloop/policy/sandbox"
 )
@@ -18,11 +19,12 @@ const (
 )
 
 const (
-	CodeToolDenied   = "E_TOOL_DENIED"
-	CodePathEscape   = "E_PATH_ESCAPE"
-	CodeExecDenied   = "E_EXEC_DENIED"
-	CodeUnknownTool  = "E_UNKNOWN_TOOL"
-	CodeUnknownStage = "E_UNKNOWN_STAGE"
+	CodeToolDenied    = "E_TOOL_DENIED"
+	CodePathEscape    = "E_PATH_ESCAPE"
+	CodeExecDenied    = "E_EXEC_DENIED"
+	CodeUnknownTool   = "E_UNKNOWN_TOOL"
+	CodeUnknownStage  = "E_UNKNOWN_STAGE"
+	CodeSelfElevation = "E_SELF_ELEVATION"
 )
 
 var errInvalidTool = errors.New("policy: tool name is required")
@@ -135,11 +137,11 @@ func (e *Engine) Decide(ctx context.Context, req Request) Decision {
 				return base
 			}
 		case TagExec:
-			if !contains(rule.Exec, req.Tool) && req.Tool != "run_command" {
+			if len(rule.Exec) == 0 {
 				base.Layer = LayerSystem
 				base.RuleID = "stage_matrix." + req.Stage + ".exec"
 				base.Code = CodeToolDenied
-				base.Reason = "exec tools are not allowed in this stage"
+				base.Reason = "exec is not allowed in this stage"
 				return base
 			}
 		case TagNetwork:
@@ -179,6 +181,24 @@ func (e *Engine) Decide(ctx context.Context, req Request) Decision {
 	}
 
 	if len(req.Args.Paths) > 0 {
+		hasWrite := false
+		for _, tag := range tags {
+			if tag == TagWrite {
+				hasWrite = true
+			}
+		}
+		if hasWrite {
+			for _, p := range req.Args.Paths {
+				if isSelfElevationPath(p) {
+					base.Layer = LayerSystem
+					base.RuleID = "policy.self_elevation"
+					base.Code = CodeSelfElevation
+					base.RequestedPath = p
+					base.Reason = "agents must not modify policy or permission files"
+					return base
+				}
+			}
+		}
 		if req.WorkspaceRoot == "" {
 			base.Layer = LayerSystem
 			base.RuleID = "sandbox.workspace"
@@ -213,6 +233,22 @@ func (e *Engine) Decide(ctx context.Context, req Request) Decision {
 	base.RuleID = "default.allow"
 	base.Reason = "allowed"
 	return base
+}
+
+var policyPathFragments = []string{
+	"config/harness_loop/",
+	".harness/policy/",
+	".harness/config",
+}
+
+func isSelfElevationPath(p string) bool {
+	norm := strings.ToLower(strings.ReplaceAll(p, `\`, "/"))
+	for _, frag := range policyPathFragments {
+		if strings.Contains(norm, frag) {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *Engine) Guard(ctx context.Context, req Request, exec func() error) error {
