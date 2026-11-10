@@ -104,3 +104,7 @@ func IsLegalTarget(from, to Stage) bool {
 	_, ok := transitionTo(from, to)
 	return ok
 }
+
+func (t Trigger) Valid() bool {
+	return t == TriggerAcceptancePass || t == TriggerAcceptanceFail
+}
