@@ -47,4 +47,7 @@ var (
 
 	// ErrSkillInstructionsRequired is returned when a skill's instructions are empty
 	ErrSkillInstructionsRequired = errors.New("skill instructions are required")
+
+	// ErrStageNotFinished is returned when stage_mode execution ends without a stage_finish tool call
+	ErrStageNotFinished = errors.New("stage not finished: stage_finish tool call is required")
 )

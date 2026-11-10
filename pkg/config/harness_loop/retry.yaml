@@ -1,0 +1,27 @@
+version: 1
+max_retries:
+  network: 3
+  runtime: 3
+  system: 3
+  timeout: 2
+  no_finish: 2
+  invalid_tool_result: 2
+  verification_error: 2
+  quota: 1
+  content_filter: 0
+backoff_base_ms:
+  network: 1000
+  runtime: 500
+  system: 2000
+  timeout: 0
+  no_finish: 0
+  invalid_tool_result: 200
+  verification_error: 500
+  quota: 0
+  content_filter: 0
+backoff_factor: 2
+max_backoff_ms: 30000
+jitter_ratio: 0.2
+acceptance_max_fails: 5
+silent_threshold_seconds: 120
+quota_hard_fail_seconds: 30

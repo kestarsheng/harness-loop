@@ -29,41 +29,41 @@ const (
 
 // PromptVariant represents a variant of a prompt
 type PromptVariant struct {
-	ID           string                 `json:"id"`
-	Name         string                 `json:"name"`
-	Type         PromptType             `json:"type"`
-	Template     string                 `json:"template"`
-	Variables    []string               `json:"variables"`    // Variables in template
-	Version      string                 `json:"version"`
-	ParentID     string                 `json:"parent_id"`    // Parent variant ID
-	CreatedAt    time.Time              `json:"created_at"`
-	Metadata     map[string]interface{} `json:"metadata,omitempty"`
+	ID        string                 `json:"id"`
+	Name      string                 `json:"name"`
+	Type      PromptType             `json:"type"`
+	Template  string                 `json:"template"`
+	Variables []string               `json:"variables"` // Variables in template
+	Version   string                 `json:"version"`
+	ParentID  string                 `json:"parent_id"` // Parent variant ID
+	CreatedAt time.Time              `json:"created_at"`
+	Metadata  map[string]interface{} `json:"metadata,omitempty"`
 }
 
 // PromptExecution represents an execution of a prompt
 type PromptExecution struct {
-	ID           string                 `json:"id"`
-	VariantID    string                 `json:"variant_id"`
-	SessionID    string                 `json:"session_id"`
-	Input        map[string]interface{} `json:"input"`        // Variable values
-	Rendered     string                 `json:"rendered"`     // Rendered prompt
-	Output       string                 `json:"output"`       // Model output
-	Success      bool                   `json:"success"`
-	Score        float64                `json:"score"`        // Quality score
-	TokensUsed   int                    `json:"tokens_used"`
-	LatencyMs    int64                  `json:"latency_ms"`
-	CreatedAt    time.Time              `json:"created_at"`
+	ID         string                 `json:"id"`
+	VariantID  string                 `json:"variant_id"`
+	SessionID  string                 `json:"session_id"`
+	Input      map[string]interface{} `json:"input"`    // Variable values
+	Rendered   string                 `json:"rendered"` // Rendered prompt
+	Output     string                 `json:"output"`   // Model output
+	Success    bool                   `json:"success"`
+	Score      float64                `json:"score"` // Quality score
+	TokensUsed int                    `json:"tokens_used"`
+	LatencyMs  int64                  `json:"latency_ms"`
+	CreatedAt  time.Time              `json:"created_at"`
 }
 
 // PromptScore represents scoring for a prompt variant
 type PromptScore struct {
-	VariantID      string  `json:"variant_id"`
-	TotalExecutions int    `json:"total_executions"`
-	SuccessRate    float64 `json:"success_rate"`
-	AvgScore       float64 `json:"avg_score"`
-	AvgLatency     float64 `json:"avg_latency_ms"`
-	AvgTokens      float64 `json:"avg_tokens"`
-	LastExecuted   time.Time `json:"last_executed"`
+	VariantID       string    `json:"variant_id"`
+	TotalExecutions int       `json:"total_executions"`
+	SuccessRate     float64   `json:"success_rate"`
+	AvgScore        float64   `json:"avg_score"`
+	AvgLatency      float64   `json:"avg_latency_ms"`
+	AvgTokens       float64   `json:"avg_tokens"`
+	LastExecuted    time.Time `json:"last_executed"`
 }
 
 // ============================================================
@@ -72,13 +72,13 @@ type PromptScore struct {
 
 // PromptManager manages prompt variants and optimization
 type PromptManager struct {
-	variants    map[string]*PromptVariant    // ID -> Variant
-	byType      map[PromptType][]string      // Type -> Variant IDs
-	executions  map[string][]string          // VariantID -> Execution IDs
-	scores      map[string]*PromptScore      // VariantID -> Score
-	llmClient   llm.Client
-	llmModel    string
-	mu          sync.RWMutex
+	variants   map[string]*PromptVariant // ID -> Variant
+	byType     map[PromptType][]string   // Type -> Variant IDs
+	executions map[string][]string       // VariantID -> Execution IDs
+	scores     map[string]*PromptScore   // VariantID -> Score
+	llmClient  llm.Client
+	llmModel   string
+	mu         sync.RWMutex
 }
 
 // NewPromptManager creates a new prompt manager
@@ -236,20 +236,20 @@ func (m *PromptManager) GetTopVariants(promptType PromptType, limit int) []*Prom
 
 // OptimizationConfig configures prompt optimization
 type OptimizationConfig struct {
-	MaxIterations   int     `json:"max_iterations"`
-	TargetScore     float64 `json:"target_score"`
-	MinExecutions   int     `json:"min_executions"`   // Minimum executions before optimizing
-	Temperature     float64 `json:"temperature"`     // LLM temperature
-	Model           string  `json:"model"`
+	MaxIterations int     `json:"max_iterations"`
+	TargetScore   float64 `json:"target_score"`
+	MinExecutions int     `json:"min_executions"` // Minimum executions before optimizing
+	Temperature   float64 `json:"temperature"`    // LLM temperature
+	Model         string  `json:"model"`
 }
 
 // DefaultOptimizationConfig returns default config
 func DefaultOptimizationConfig() *OptimizationConfig {
 	return &OptimizationConfig{
-		MaxIterations:  5,
-		TargetScore:    0.9,
-		MinExecutions:  10,
-		Temperature:    0.7,
+		MaxIterations: 5,
+		TargetScore:   0.9,
+		MinExecutions: 10,
+		Temperature:   0.7,
 	}
 }
 
@@ -263,16 +263,16 @@ type PromptOptimizer struct {
 
 // OptimizationResult represents an optimization result
 type OptimizationResult struct {
-	ID             string    `json:"id"`
-	ParentID       string    `json:"parent_id"`
-	NewVariantID   string    `json:"new_variant_id"`
-	Iteration      int       `json:"iteration"`
-	ParentScore    float64   `json:"parent_score"`
-	NewScore       float64   `json:"new_score"`
-	Improvement    float64   `json:"improvement"`
-	Changes        []string  `json:"changes"`
-	Suggestions    []string  `json:"suggestions"`
-	Timestamp      time.Time `json:"timestamp"`
+	ID           string    `json:"id"`
+	ParentID     string    `json:"parent_id"`
+	NewVariantID string    `json:"new_variant_id"`
+	Iteration    int       `json:"iteration"`
+	ParentScore  float64   `json:"parent_score"`
+	NewScore     float64   `json:"new_score"`
+	Improvement  float64   `json:"improvement"`
+	Changes      []string  `json:"changes"`
+	Suggestions  []string  `json:"suggestions"`
+	Timestamp    time.Time `json:"timestamp"`
 }
 
 // NewPromptOptimizer creates a new prompt optimizer
@@ -428,31 +428,31 @@ type ABTest struct {
 
 // ABTestResult represents A/B test results
 type ABTestResult struct {
-	TestID        string        `json:"test_id"`
-	VariantA      VariantResult `json:"variant_a"`
-	VariantB      VariantResult `json:"variant_b"`
-	WinnerID      string        `json:"winner_id"`
-	Confidence    float64       `json:"confidence"`    // Statistical confidence
-	Improvement   float64       `json:"improvement"`   // Improvement percentage
-	Recommendation string       `json:"recommendation"`
+	TestID         string        `json:"test_id"`
+	VariantA       VariantResult `json:"variant_a"`
+	VariantB       VariantResult `json:"variant_b"`
+	WinnerID       string        `json:"winner_id"`
+	Confidence     float64       `json:"confidence"`  // Statistical confidence
+	Improvement    float64       `json:"improvement"` // Improvement percentage
+	Recommendation string        `json:"recommendation"`
 }
 
 // VariantResult represents results for a single variant
 type VariantResult struct {
-	VariantID      string  `json:"variant_id"`
-	Executions     int     `json:"executions"`
-	SuccessRate    float64 `json:"success_rate"`
-	AvgScore       float64 `json:"avg_score"`
-	AvgLatency     float64 `json:"avg_latency_ms"`
-	AvgTokens      float64 `json:"avg_tokens"`
+	VariantID   string  `json:"variant_id"`
+	Executions  int     `json:"executions"`
+	SuccessRate float64 `json:"success_rate"`
+	AvgScore    float64 `json:"avg_score"`
+	AvgLatency  float64 `json:"avg_latency_ms"`
+	AvgTokens   float64 `json:"avg_tokens"`
 }
 
 // ABTestManager manages A/B tests for prompts
 type ABTestManager struct {
-	tests     map[string]*ABTest
-	results   map[string]*ABTestResult
-	manager   *PromptManager
-	mu        sync.RWMutex
+	tests   map[string]*ABTest
+	results map[string]*ABTestResult
+	manager *PromptManager
+	mu      sync.RWMutex
 }
 
 // NewABTestManager creates a new A/B test manager

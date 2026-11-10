@@ -16,16 +16,16 @@ import (
 
 // Tool represents a tool definition
 type Tool struct {
-	Name        string                 `json:"name"`
-	Description string                 `json:"description"`
-	Parameters  map[string]Parameter   `json:"parameters"`
-	Category    string                 `json:"category"`
-	Version     string                 `json:"version"`
-	Timeout     int                    `json:"timeout_ms"`
-	Retryable   bool                   `json:"retryable"`
-	MaxRetries  int                    `json:"max_retries"`
-	Dependencies []string              `json:"dependencies"` // Tools this depends on
-	Metadata    map[string]interface{} `json:"metadata"`
+	Name         string                 `json:"name"`
+	Description  string                 `json:"description"`
+	Parameters   map[string]Parameter   `json:"parameters"`
+	Category     string                 `json:"category"`
+	Version      string                 `json:"version"`
+	Timeout      int                    `json:"timeout_ms"`
+	Retryable    bool                   `json:"retryable"`
+	MaxRetries   int                    `json:"max_retries"`
+	Dependencies []string               `json:"dependencies"` // Tools this depends on
+	Metadata     map[string]interface{} `json:"metadata"`
 }
 
 // Parameter represents a tool parameter
@@ -39,26 +39,26 @@ type Parameter struct {
 
 // ToolResult represents the result of a tool execution
 type ToolResult struct {
-	ToolName    string      `json:"tool_name"`
-	Success     bool        `json:"success"`
-	Output      interface{} `json:"output"`
-	Error       string      `json:"error,omitempty"`
-	Duration    int64       `json:"duration_ms"`
-	RetryCount  int         `json:"retry_count"`
-	Cached      bool        `json:"cached"`
-	Metadata    map[string]interface{} `json:"metadata,omitempty"`
+	ToolName   string                 `json:"tool_name"`
+	Success    bool                   `json:"success"`
+	Output     interface{}            `json:"output"`
+	Error      string                 `json:"error,omitempty"`
+	Duration   int64                  `json:"duration_ms"`
+	RetryCount int                    `json:"retry_count"`
+	Cached     bool                   `json:"cached"`
+	Metadata   map[string]interface{} `json:"metadata,omitempty"`
 }
 
 // ToolContext provides context for tool execution
 type ToolContext struct {
-	SessionID   string
-	AgentID     string
-	UserID      string
-	TraceID     string
-	Parameters  map[string]interface{}
+	SessionID       string
+	AgentID         string
+	UserID          string
+	TraceID         string
+	Parameters      map[string]interface{}
 	PreviousResults map[string]*ToolResult
-	Timeout     time.Duration
-	Metadata    map[string]interface{}
+	Timeout         time.Duration
+	Metadata        map[string]interface{}
 }
 
 // ============================================================
@@ -92,10 +92,10 @@ func (f ExecutorFunc) Name() string {
 type CompositionType string
 
 const (
-	CompositionSequential CompositionType = "sequential" // Execute one after another
-	CompositionParallel   CompositionType = "parallel"   // Execute simultaneously
+	CompositionSequential  CompositionType = "sequential"  // Execute one after another
+	CompositionParallel    CompositionType = "parallel"    // Execute simultaneously
 	CompositionConditional CompositionType = "conditional" // Execute based on conditions
-	CompositionLoop       CompositionType = "loop"       // Execute in loop
+	CompositionLoop        CompositionType = "loop"        // Execute in loop
 )
 
 // CompositionStep represents a step in a composition
@@ -103,49 +103,49 @@ type CompositionStep struct {
 	ID           string                 `json:"id"`
 	ToolName     string                 `json:"tool_name"`
 	Parameters   map[string]interface{} `json:"parameters"`
-	Condition    string                 `json:"condition"`     // Condition for conditional execution
-	OnError      string                 `json:"on_error"`      // "continue", "stop", "retry"
+	Condition    string                 `json:"condition"` // Condition for conditional execution
+	OnError      string                 `json:"on_error"`  // "continue", "stop", "retry"
 	MaxRetries   int                    `json:"max_retries"`
 	Timeout      int                    `json:"timeout_ms"`
-	Dependencies []string               `json:"dependencies"`  // Step IDs that must complete first
+	Dependencies []string               `json:"dependencies"` // Step IDs that must complete first
 }
 
 // CompositionPlan represents a tool composition plan
 type CompositionPlan struct {
-	ID          string             `json:"id"`
-	Name        string             `json:"name"`
-	Description string             `json:"description"`
-	Type        CompositionType    `json:"type"`
-	Steps       []CompositionStep  `json:"steps"`
-	Variables   map[string]string  `json:"variables"`  // Variable mappings
-	CreatedAt   time.Time          `json:"created_at"`
+	ID          string            `json:"id"`
+	Name        string            `json:"name"`
+	Description string            `json:"description"`
+	Type        CompositionType   `json:"type"`
+	Steps       []CompositionStep `json:"steps"`
+	Variables   map[string]string `json:"variables"` // Variable mappings
+	CreatedAt   time.Time         `json:"created_at"`
 }
 
 // CompositionResult represents the result of a composition execution
 type CompositionResult struct {
-	PlanID      string                  `json:"plan_id"`
-	Success     bool                    `json:"success"`
-	StepResults map[string]*ToolResult  `json:"step_results"`
+	PlanID        string                 `json:"plan_id"`
+	Success       bool                   `json:"success"`
+	StepResults   map[string]*ToolResult `json:"step_results"`
 	TotalDuration int64                  `json:"total_duration_ms"`
-	Error       string                  `json:"error,omitempty"`
-	FailedStep  string                  `json:"failed_step,omitempty"`
-	Metadata    map[string]interface{}  `json:"metadata,omitempty"`
+	Error         string                 `json:"error,omitempty"`
+	FailedStep    string                 `json:"failed_step,omitempty"`
+	Metadata      map[string]interface{} `json:"metadata,omitempty"`
 }
 
 // Composer composes and executes multiple tools
 type Composer struct {
 	executors map[string]Executor
-	plans    map[string]*CompositionPlan
-	cache    *ResultCache
-	mu       sync.RWMutex
+	plans     map[string]*CompositionPlan
+	cache     *ResultCache
+	mu        sync.RWMutex
 }
 
 // NewComposer creates a new tool composer
 func NewComposer() *Composer {
 	return &Composer{
 		executors: make(map[string]Executor),
-		plans:    make(map[string]*CompositionPlan),
-		cache:    NewResultCache(1000, 5*time.Minute),
+		plans:     make(map[string]*CompositionPlan),
+		cache:     NewResultCache(1000, 5*time.Minute),
 	}
 }
 
@@ -364,13 +364,13 @@ func (c *Composer) executeStep(ctx context.Context, step CompositionStep, toolCt
 
 	// Build execution context
 	execCtx := &ToolContext{
-		SessionID:        toolCtx.SessionID,
-		AgentID:          toolCtx.AgentID,
-		UserID:           toolCtx.UserID,
-		TraceID:          toolCtx.TraceID,
-		Parameters:       step.Parameters,
-		PreviousResults:  toolCtx.PreviousResults,
-		Metadata:         toolCtx.Metadata,
+		SessionID:       toolCtx.SessionID,
+		AgentID:         toolCtx.AgentID,
+		UserID:          toolCtx.UserID,
+		TraceID:         toolCtx.TraceID,
+		Parameters:      step.Parameters,
+		PreviousResults: toolCtx.PreviousResults,
+		Metadata:        toolCtx.Metadata,
 	}
 
 	// Set timeout
@@ -639,10 +639,10 @@ type CacheEntry struct {
 
 // ResultCache caches tool results
 type ResultCache struct {
-	entries  map[string]*CacheEntry
-	maxSize  int
-	ttl      time.Duration
-	mu       sync.RWMutex
+	entries map[string]*CacheEntry
+	maxSize int
+	ttl     time.Duration
+	mu      sync.RWMutex
 }
 
 // NewResultCache creates a new result cache

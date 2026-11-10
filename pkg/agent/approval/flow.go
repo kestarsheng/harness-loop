@@ -30,21 +30,21 @@ const (
 type ApprovalStatus string
 
 const (
-	StatusPending    ApprovalStatus = "pending"
-	StatusApproved   ApprovalStatus = "approved"
-	StatusRejected   ApprovalStatus = "rejected"
-	StatusTimeout    ApprovalStatus = "timeout"
-	StatusCancelled  ApprovalStatus = "cancelled"
-	StatusEscalated  ApprovalStatus = "escalated"
+	StatusPending   ApprovalStatus = "pending"
+	StatusApproved  ApprovalStatus = "approved"
+	StatusRejected  ApprovalStatus = "rejected"
+	StatusTimeout   ApprovalStatus = "timeout"
+	StatusCancelled ApprovalStatus = "cancelled"
+	StatusEscalated ApprovalStatus = "escalated"
 )
 
 // ApprovalPriority defines the priority level
 type ApprovalPriority string
 
 const (
-	PriorityLow    ApprovalPriority = "low"
-	PriorityMedium ApprovalPriority = "medium"
-	PriorityHigh   ApprovalPriority = "high"
+	PriorityLow      ApprovalPriority = "low"
+	PriorityMedium   ApprovalPriority = "medium"
+	PriorityHigh     ApprovalPriority = "high"
 	PriorityCritical ApprovalPriority = "critical"
 )
 
@@ -54,28 +54,28 @@ const (
 
 // ApprovalRequest represents an approval request
 type ApprovalRequest struct {
-	ID             string                 `json:"id"`
-	Type           ApprovalType           `json:"type"`
-	Priority       ApprovalPriority       `json:"priority"`
-	AgentID        string                 `json:"agent_id"`
-	SessionID      string                 `json:"session_id"`
-	UserID         string                 `json:"user_id"`
-	Description    string                 `json:"description"`
-	Details        map[string]interface{} `json:"details"`
-	RiskLevel      string                 `json:"risk_level"`      // low, medium, high
-	RiskReason     string                 `json:"risk_reason"`     // Reason for risk level
-	Status         ApprovalStatus         `json:"status"`
-	CreatedAt      time.Time              `json:"created_at"`
-	ExpiresAt      time.Time              `json:"expires_at"`
-	ApprovedAt     time.Time              `json:"approved_at,omitempty"`
-	RejectedAt     time.Time              `json:"rejected_at,omitempty"`
-	ApprovedBy     string                 `json:"approved_by,omitempty"`
-	RejectedBy     string                 `json:"rejected_by,omitempty"`
-	RejectionReason string                `json:"rejection_reason,omitempty"`
-	Comments       []ApprovalComment      `json:"comments,omitempty"`
-	AutoApprove    bool                   `json:"auto_approve"`    // Can be auto-approved
-	TimeoutSeconds int                    `json:"timeout_seconds"`
-	Metadata       map[string]interface{} `json:"metadata,omitempty"`
+	ID              string                 `json:"id"`
+	Type            ApprovalType           `json:"type"`
+	Priority        ApprovalPriority       `json:"priority"`
+	AgentID         string                 `json:"agent_id"`
+	SessionID       string                 `json:"session_id"`
+	UserID          string                 `json:"user_id"`
+	Description     string                 `json:"description"`
+	Details         map[string]interface{} `json:"details"`
+	RiskLevel       string                 `json:"risk_level"`  // low, medium, high
+	RiskReason      string                 `json:"risk_reason"` // Reason for risk level
+	Status          ApprovalStatus         `json:"status"`
+	CreatedAt       time.Time              `json:"created_at"`
+	ExpiresAt       time.Time              `json:"expires_at"`
+	ApprovedAt      time.Time              `json:"approved_at,omitempty"`
+	RejectedAt      time.Time              `json:"rejected_at,omitempty"`
+	ApprovedBy      string                 `json:"approved_by,omitempty"`
+	RejectedBy      string                 `json:"rejected_by,omitempty"`
+	RejectionReason string                 `json:"rejection_reason,omitempty"`
+	Comments        []ApprovalComment      `json:"comments,omitempty"`
+	AutoApprove     bool                   `json:"auto_approve"` // Can be auto-approved
+	TimeoutSeconds  int                    `json:"timeout_seconds"`
+	Metadata        map[string]interface{} `json:"metadata,omitempty"`
 }
 
 // ApprovalComment represents a comment on an approval request
@@ -92,13 +92,13 @@ type ApprovalComment struct {
 
 // ApprovalDecision represents a user's decision
 type ApprovalDecision struct {
-	RequestID      string         `json:"request_id"`
-	Decision       ApprovalStatus `json:"decision"` // approved or rejected
-	UserID         string         `json:"user_id"`
-	Reason         string         `json:"reason,omitempty"`
-	Comment        string         `json:"comment,omitempty"`
+	RequestID      string                 `json:"request_id"`
+	Decision       ApprovalStatus         `json:"decision"` // approved or rejected
+	UserID         string                 `json:"user_id"`
+	Reason         string                 `json:"reason,omitempty"`
+	Comment        string                 `json:"comment,omitempty"`
 	ModifiedParams map[string]interface{} `json:"modified_params,omitempty"` // User-modified parameters
-	Timestamp      time.Time      `json:"timestamp"`
+	Timestamp      time.Time              `json:"timestamp"`
 }
 
 // ============================================================
@@ -108,7 +108,7 @@ type ApprovalDecision struct {
 // ApprovalFlowManager manages approval requests and decisions
 type ApprovalFlowManager struct {
 	requests       map[string]*ApprovalRequest
-	pendingQueue   map[string][]string // userID -> pending request IDs
+	pendingQueue   map[string][]string           // userID -> pending request IDs
 	history        map[string][]*ApprovalRequest // agentID -> history
 	timeoutSeconds int
 	autoApprove    bool
@@ -469,21 +469,21 @@ func (m *ApprovalFlowManager) WaitForApproval(ctx context.Context, requestID str
 
 // ApprovalRule defines when approval is needed
 type ApprovalRule struct {
-	ID             string         `json:"id"`
-	Type           ApprovalType   `json:"type"`
-	AgentID        string         `json:"agent_id"`
-	ToolName       string         `json:"tool_name"`
-	Condition      string         `json:"condition"`      // Condition to trigger approval
-	RiskThreshold  string         `json:"risk_threshold"` // Risk level threshold
-	AutoApprove    bool           `json:"auto_approve"`
-	TimeoutSeconds int            `json:"timeout_seconds"`
-	Enabled        bool           `json:"enabled"`
+	ID             string       `json:"id"`
+	Type           ApprovalType `json:"type"`
+	AgentID        string       `json:"agent_id"`
+	ToolName       string       `json:"tool_name"`
+	Condition      string       `json:"condition"`      // Condition to trigger approval
+	RiskThreshold  string       `json:"risk_threshold"` // Risk level threshold
+	AutoApprove    bool         `json:"auto_approve"`
+	TimeoutSeconds int          `json:"timeout_seconds"`
+	Enabled        bool         `json:"enabled"`
 }
 
 // RuleEngine evaluates approval rules
 type RuleEngine struct {
-	rules    []ApprovalRule
-	mu       sync.RWMutex
+	rules []ApprovalRule
+	mu    sync.RWMutex
 }
 
 // NewRuleEngine creates a new rule engine

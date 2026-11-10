@@ -1,0 +1,49 @@
+version: 3
+models:
+  - id: qwen-max
+    provider: dashscope
+    kind: chat
+    context_window: 32768
+    max_output_tokens: 8192
+    tool_call: true
+    structured_output: true
+    price_in_per_1k: 0.02
+    price_out_per_1k: 0.06
+    status: available
+    tags: [balanced, strong]
+    api_key_ref: env:DASHSCOPE_API_KEY
+  - id: qwen-plus
+    provider: dashscope
+    kind: chat
+    context_window: 131072
+    max_output_tokens: 8192
+    tool_call: true
+    structured_output: true
+    price_in_per_1k: 0.004
+    price_out_per_1k: 0.012
+    status: available
+    tags: [balanced, cheap]
+    api_key_ref: env:DASHSCOPE_API_KEY
+  - id: qwen-lite
+    provider: dashscope
+    kind: chat
+    context_window: 8192
+    max_output_tokens: 2048
+    tool_call: false
+    structured_output: false
+    price_in_per_1k: 0.0005
+    price_out_per_1k: 0.0015
+    status: available
+    tags: [cheap]
+    api_key_ref: env:DASHSCOPE_API_KEY
+  - id: text-embedding-v3
+    provider: dashscope
+    kind: embedding
+    context_window: 8192
+    max_output_tokens: 1
+    price_in_per_1k: 0.0007
+    price_out_per_1k: 0
+    status: available
+    embedding_dim: 1024
+    tags: [embedding]
+    api_key_ref: env:DASHSCOPE_API_KEY

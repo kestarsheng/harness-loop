@@ -6,8 +6,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/glebarez/sqlite"
+	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
 
@@ -34,9 +34,9 @@ type ContextStore interface {
 
 // StoredContext is the database model for ExecutionContext
 type StoredContext struct {
-	ID           string     `gorm:"primaryKey"`
-	SessionID    string     `gorm:"index"`
-	TenantID     string     `gorm:"index"`
+	ID           string `gorm:"primaryKey"`
+	SessionID    string `gorm:"index"`
+	TenantID     string `gorm:"index"`
 	UserID       string
 	EntryAgent   string
 	CurrentAgent string
@@ -45,8 +45,8 @@ type StoredContext struct {
 	TotalCost    float64
 	Error        string
 	StepCount    int
-	Data         string     `gorm:"type:text"` // JSON serialized ExecutionContext
-	CreatedAt    time.Time  `gorm:"index"`
+	Data         string    `gorm:"type:text"` // JSON serialized ExecutionContext
+	CreatedAt    time.Time `gorm:"index"`
 	UpdatedAt    time.Time
 	CompletedAt  *time.Time
 }
@@ -58,8 +58,8 @@ func (StoredContext) TableName() string {
 
 // SQLiteStore implements ContextStore using SQLite
 type SQLiteStore struct {
-	db   *gorm.DB
-	mu   sync.RWMutex
+	db *gorm.DB
+	mu sync.RWMutex
 }
 
 // NewSQLiteStore creates a new SQLite context store
@@ -222,8 +222,8 @@ func (s *SQLiteStore) Close() error {
 
 // MemoryStore is an in-memory context store (for testing)
 type MemoryStore struct {
-	mu        sync.RWMutex
-	contexts  map[string]*ExecutionContext
+	mu       sync.RWMutex
+	contexts map[string]*ExecutionContext
 }
 
 // NewMemoryStore creates a new in-memory context store

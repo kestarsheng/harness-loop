@@ -7,29 +7,29 @@ import (
 
 // Message represents a conversation message
 type Message struct {
-	Role    string `json:"role"`    // system, user, assistant, tool
-	Content string `json:"content"` // Message content
+	Role    string `json:"role"`              // system, user, assistant, tool
+	Content string `json:"content"`           // Message content
 	Name    string `json:"name,omitempty"`    // For tool messages
 	ToolID  string `json:"tool_id,omitempty"` // Tool call ID if applicable
 }
 
 // ToolCall represents a tool call request
 type ToolCall struct {
-	ID       string          `json:"id"`
-	Name     string          `json:"name"`
+	ID        string          `json:"id"`
+	Name      string          `json:"name"`
 	Arguments json.RawMessage `json:"arguments"`
-	Result   string          `json:"result,omitempty"`
-	Status   string          `json:"status"` // pending, running, completed, error
+	Result    string          `json:"result,omitempty"`
+	Status    string          `json:"status"` // pending, running, completed, error
 }
 
 // AgentExecutionRecord records a single agent execution step
 type AgentExecutionRecord struct {
 	AgentID     string    `json:"agent_id"`
 	AgentName   string    `json:"agent_name"`
-	Thought     string    `json:"thought"`           // Agent's reasoning
-	Action      string    `json:"action"`            // Action taken (tool name or handoff)
-	Arguments   string    `json:"arguments"`         // Action arguments
-	Result      string    `json:"result"`            // Action result
+	Thought     string    `json:"thought"`              // Agent's reasoning
+	Action      string    `json:"action"`               // Action taken (tool name or handoff)
+	Arguments   string    `json:"arguments"`            // Action arguments
+	Result      string    `json:"result"`               // Action result
 	HandoffTo   string    `json:"handoff_to,omitempty"` // Target agent if handoff
 	TokensUsed  int       `json:"tokens_used"`
 	StartedAt   time.Time `json:"started_at"`
@@ -37,19 +37,19 @@ type AgentExecutionRecord struct {
 	Duration    int64     `json:"duration_ms"` // Duration in milliseconds
 }
 
-	// TaskPlan is a decomposed task plan (todo list) the agent works through.
-	type TaskPlan struct {
-		Items     []TaskItem `json:"items"`
-		UpdatedAt time.Time  `json:"updated_at"`
-	}
+// TaskPlan is a decomposed task plan (todo list) the agent works through.
+type TaskPlan struct {
+	Items     []TaskItem `json:"items"`
+	UpdatedAt time.Time  `json:"updated_at"`
+}
 
-	// TaskItem is a single todo item in a TaskPlan.
-	type TaskItem struct {
-		ID          string    `json:"id"`
-		Description string    `json:"description"`
-		Status      string    `json:"status"` // pending / in_progress / done / skipped
-		AddedAt     time.Time `json:"added_at"`
-	}
+// TaskItem is a single todo item in a TaskPlan.
+type TaskItem struct {
+	ID          string    `json:"id"`
+	Description string    `json:"description"`
+	Status      string    `json:"status"` // pending / in_progress / done / skipped
+	AddedAt     time.Time `json:"added_at"`
+}
 
 // ExecutionContext holds the shared state across agent executions
 type ExecutionContext struct {
@@ -82,6 +82,9 @@ type ExecutionContext struct {
 
 	// EntryAgent is the initial agent
 	EntryAgent string `json:"entry_agent"`
+
+	// StageMode requires a structured stage_finish tool call before the run may complete
+	StageMode bool `json:"stage_mode,omitempty"`
 
 	// Status is the execution status
 	Status AgentStatus `json:"status"`
@@ -257,18 +260,18 @@ func (c *ExecutionContext) GetAgentRecordCount(agentID string) int {
 // Clone creates a deep copy of the context
 func (c *ExecutionContext) Clone() *ExecutionContext {
 	clone := &ExecutionContext{
-		ID:           c.ID,
-		SessionID:    c.SessionID,
-		TenantID:     c.TenantID,
-		UserID:       c.UserID,
-		CurrentAgent: c.CurrentAgent,
-		EntryAgent:   c.EntryAgent,
-		Status:       c.Status,
-		TotalTokens:  c.TotalTokens,
-		TotalCost:    c.TotalCost,
-		Error:        c.Error,
-		StartedAt:    c.StartedAt,
-		StepCount:    c.StepCount,
+		ID:              c.ID,
+		SessionID:       c.SessionID,
+		TenantID:        c.TenantID,
+		UserID:          c.UserID,
+		CurrentAgent:    c.CurrentAgent,
+		EntryAgent:      c.EntryAgent,
+		Status:          c.Status,
+		TotalTokens:     c.TotalTokens,
+		TotalCost:       c.TotalCost,
+		Error:           c.Error,
+		StartedAt:       c.StartedAt,
+		StepCount:       c.StepCount,
 		Goal:            c.Goal,
 		SuccessCriteria: c.SuccessCriteria,
 	}
