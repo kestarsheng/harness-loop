@@ -1,0 +1,31 @@
+server:
+  address: ":50008"
+  local: false
+
+postgres:
+  dsn: "postgres://agent:agent_dev_password@localhost:5432/agent_platform?sslmode=disable"
+  max_conns: 8
+  slow_query_ms: 500
+
+agent:
+  target: "127.0.0.1:50002"
+  entry_agent: "default"
+  stage_model: "qwen-plus"
+  timeout_seconds: 600
+
+harness:
+  enabled: true
+  auto_start: true
+  max_steps: 200
+  silent_threshold_seconds: 120
+  graceful_timeout_seconds: 15
+
+policy:
+  matrix_file: "config/harness_loop/stage_matrix.yaml"
+  exec_allow_file: "config/harness_loop/exec_allow.yaml"
+
+models:
+  file: "config/harness_loop/models.yaml"
+
+retry:
+  file: "config/harness_loop/retry.yaml"

@@ -10,7 +10,7 @@ import (
 	agentpb "agent-platform/pkg/pb/agent"
 )
 
-type ChunkHandler func(*agentpb.ExecuteStreamChunk) error
+type ChunkHandler = func(*agentpb.ExecuteStreamChunk) error
 
 var ErrEmptyStream = errors.New("harnessclient: stream ended without any chunk")
 
