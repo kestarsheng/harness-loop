@@ -467,7 +467,8 @@ func TestRuntimeRewindsWithFailedAcceptance(t *testing.T) {
 			VerifiedBy: acceptance.VerifiedByProgram, PromptVersion: acceptance.PromptVersion, InputDigest: "d",
 		}, nil
 	}}
-	rt, tasks, _, _ = newTestRuntime(&stubStages{})
+	var attempts *memAttempts
+	rt, tasks, _, attempts = newTestRuntime(&stubStages{})
 	rt.Acceptor = failAcceptor
 
 	res, err := rt.Run(context.Background(), runtimeInput())
@@ -487,6 +488,17 @@ func TestRuntimeRewindsWithFailedAcceptance(t *testing.T) {
 	}
 	if acceptCalls < 2 {
 		t.Fatalf("acceptance calls = %d", acceptCalls)
+	}
+	attempts.mu.Lock()
+	defer attempts.mu.Unlock()
+	var sawAcceptanceFailed bool
+	for _, a := range attempts.created {
+		if a.Stage == fsm.StageRequirement && a.EntryReason == fsm.EntryAcceptanceFailed {
+			sawAcceptanceFailed = true
+		}
+	}
+	if !sawAcceptanceFailed {
+		t.Fatalf("rewound attempt must record acceptance_failed: %+v", attempts.created)
 	}
 }
 
