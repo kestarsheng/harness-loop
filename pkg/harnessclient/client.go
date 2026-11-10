@@ -60,3 +60,18 @@ func (c *Client) Close() error {
 }
 
 func (c *Client) CallTimeout() time.Duration { return c.call }
+
+func DialLazy(ctx context.Context, cfg Config) (*Client, error) {
+	if cfg.Target == "" {
+		return nil, fmt.Errorf("harnessclient: target is required")
+	}
+	conn, err := grpc.DialContext(ctx, cfg.Target, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return nil, fmt.Errorf("harnessclient: dial %s: %w", cfg.Target, err)
+	}
+	call := cfg.CallTimeout
+	if call <= 0 {
+		call = 10 * time.Minute
+	}
+	return &Client{conn: conn, agent: agentpb.NewAgentServiceClient(conn), call: call}, nil
+}
