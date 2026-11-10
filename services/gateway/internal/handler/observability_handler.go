@@ -55,12 +55,12 @@ func (h *ObservabilityHandler) GetTraces(c *gin.Context) {
 	summary := h.fetchMetricsSummary(c)
 	if summary != nil {
 		c.JSON(200, emptyResponse(gin.H{
-			"total_traces":  summary.TotalCalls,
+			"total_traces":   summary.TotalCalls,
 			"success_traces": summary.SuccessCalls,
-			"success_rate":  summary.SuccessRate,
+			"success_rate":   summary.SuccessRate,
 			"avg_latency_ms": summary.AvgLatency,
-			"total_cost":    summary.TotalCost,
-			"slo_statuses":  summary.SloStatuses,
+			"total_cost":     summary.TotalCost,
+			"slo_statuses":   summary.SloStatuses,
 		}))
 		return
 	}
@@ -113,12 +113,12 @@ func (h *ObservabilityHandler) GetStats(c *gin.Context) {
 	summary := h.fetchMetricsSummary(c)
 	if summary != nil {
 		c.JSON(200, emptyResponse(gin.H{
-			"total_traces":    summary.TotalCalls,
-			"success_traces":  summary.SuccessCalls,
-			"error_traces":    summary.TotalCalls - summary.SuccessCalls,
-			"success_rate":    summary.SuccessRate,
-			"avg_latency_ms":  summary.AvgLatency,
-			"total_cost":      summary.TotalCost,
+			"total_traces":   summary.TotalCalls,
+			"success_traces": summary.SuccessCalls,
+			"error_traces":   summary.TotalCalls - summary.SuccessCalls,
+			"success_rate":   summary.SuccessRate,
+			"avg_latency_ms": summary.AvgLatency,
+			"total_cost":     summary.TotalCost,
 		}))
 		return
 	}

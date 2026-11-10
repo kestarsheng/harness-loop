@@ -20,14 +20,14 @@ func (h *MemoryEnhancedHandler) GetStats(c *gin.Context) {
 	c.JSON(200, gin.H{
 		"code": 0,
 		"data": gin.H{
-			"working_memory_count":  5,
-			"episodic_memory_count": 12,
-			"semantic_memory_count": 8,
+			"working_memory_count":    5,
+			"episodic_memory_count":   12,
+			"semantic_memory_count":   8,
 			"procedural_memory_count": 3,
-			"total_size_bytes":      1024000,
-			"avg_importance":         0.65,
-			"oldest_memory":          time.Now().Add(-7 * 24 * time.Hour).Format(time.RFC3339),
-			"newest_memory":          time.Now().Format(time.RFC3339),
+			"total_size_bytes":        1024000,
+			"avg_importance":          0.65,
+			"oldest_memory":           time.Now().Add(-7 * 24 * time.Hour).Format(time.RFC3339),
+			"newest_memory":           time.Now().Format(time.RFC3339),
 		},
 	})
 }
@@ -38,30 +38,30 @@ func (h *MemoryEnhancedHandler) GetTimeline(c *gin.Context) {
 		"code": 0,
 		"data": []gin.H{
 			{
-				"id":          "event-001",
-				"timestamp":    time.Now().Add(-1 * time.Hour).Format(time.RFC3339),
-				"event_type":   "browser_navigate",
-				"title":         "导航到CSDN",
-				"description":   "用户请求导航到CSDN博客",
-				"importance":    0.8,
+				"id":               "event-001",
+				"timestamp":        time.Now().Add(-1 * time.Hour).Format(time.RFC3339),
+				"event_type":       "browser_navigate",
+				"title":            "导航到CSDN",
+				"description":      "用户请求导航到CSDN博客",
+				"importance":       0.8,
 				"related_memories": []string{"mem-001", "mem-002"},
 			},
 			{
-				"id":          "event-002",
-				"timestamp":    time.Now().Add(-2 * time.Hour).Format(time.RFC3339),
-				"event_type":   "chat_conversation",
-				"title":         "对话讨论",
-				"description":   "讨论了Agent架构设计",
-				"importance":    0.6,
+				"id":               "event-002",
+				"timestamp":        time.Now().Add(-2 * time.Hour).Format(time.RFC3339),
+				"event_type":       "chat_conversation",
+				"title":            "对话讨论",
+				"description":      "讨论了Agent架构设计",
+				"importance":       0.6,
 				"related_memories": []string{"mem-003"},
 			},
 			{
-				"id":          "event-003",
-				"timestamp":    time.Now().Add(-3 * time.Hour).Format(time.RFC3339),
-				"event_type":   "tool_execution",
-				"title":         "工具执行",
-				"description":   "执行了web_search工具",
-				"importance":    0.7,
+				"id":               "event-003",
+				"timestamp":        time.Now().Add(-3 * time.Hour).Format(time.RFC3339),
+				"event_type":       "tool_execution",
+				"title":            "工具执行",
+				"description":      "执行了web_search工具",
+				"importance":       0.7,
 				"related_memories": []string{},
 			},
 		},
@@ -137,7 +137,7 @@ func (h *MemoryEnhancedHandler) GetProceduralMemories(c *gin.Context) {
 				"name":         "发布CSDN博客",
 				"description":  "自动化发布博客到CSDN的流程",
 				"category":     "blog_publishing",
-				"success_rate":  0.95,
+				"success_rate": 0.95,
 				"usage_count":  10,
 				"created_at":   time.Now().Add(-7 * 24 * time.Hour).Format(time.RFC3339),
 			},
@@ -162,10 +162,10 @@ func (h *MemoryEnhancedHandler) Consolidate(c *gin.Context) {
 // Search searches memories (mock)
 func (h *MemoryEnhancedHandler) Search(c *gin.Context) {
 	var req struct {
-		Query         string `json:"query"`
+		Query         string   `json:"query"`
 		Types         []string `json:"types"`
-		Limit         int    `json:"limit"`
-		MinImportance float64 `json:"min_importance"`
+		Limit         int      `json:"limit"`
+		MinImportance float64  `json:"min_importance"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(400, gin.H{"code": 400, "error": "invalid request"})
@@ -179,7 +179,7 @@ func (h *MemoryEnhancedHandler) Search(c *gin.Context) {
 				"id":              "mem-001",
 				"type":            "episodic",
 				"content":         "成功发布博客到CSDN",
-				"relevance_score":  0.92,
+				"relevance_score": 0.92,
 				"importance":      0.8,
 				"created_at":      time.Now().Add(-1 * time.Hour).Format(time.RFC3339),
 			},
@@ -187,7 +187,7 @@ func (h *MemoryEnhancedHandler) Search(c *gin.Context) {
 				"id":              "mem-002",
 				"type":            "semantic",
 				"content":         "CSDN是中国最大的开发者社区",
-				"relevance_score":  0.88,
+				"relevance_score": 0.88,
 				"importance":      0.9,
 				"created_at":      time.Now().Add(-24 * time.Hour).Format(time.RFC3339),
 			},
