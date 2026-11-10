@@ -1,0 +1,308 @@
+# Docker Compose 配置
+# 使用外部 DNS 服务器避免 Docker 内部 DNS (127.0.0.11) 的间歇性问题
+# 114.114.114.114 和 8.8.8.8 是国内常用的公共 DNS
+
+services:
+  # Gateway Service - API 网关
+  gateway:
+    build:
+      context: ..
+      dockerfile: services/gateway/Dockerfile
+    ports:
+      - "9000:9000"
+    volumes:
+      - ../services/gateway/config.yaml:/app/config.yaml:ro
+    depends_on:
+      - chat-service
+      - knowledge-service
+      - memory-service
+      - mcp-service
+      - agent-service
+      - harness-service
+      - otel-collector
+    environment:
+      - OTEL_EXPORTER_OTLP_ENDPOINT=otel-collector:4317
+    networks:
+      - agent-network
+    restart: unless-stopped
+
+  # Chat Service - 对话服务
+  chat-service:
+    build:
+      context: ..
+      dockerfile: services/chat-service/Dockerfile
+    ports:
+      - "50001:50001"
+    volumes:
+      - ../services/chat-service/config.yaml:/app/config.yaml:ro
+      - chat-data:/app/data
+    depends_on:
+      - otel-collector
+    environment:
+      - OTEL_EXPORTER_OTLP_ENDPOINT=otel-collector:4317
+    networks:
+      - agent-network
+    restart: unless-stopped
+
+  # Knowledge Service - 知识库服务
+  knowledge-service:
+    build:
+      context: ..
+      dockerfile: services/knowledge-service/Dockerfile
+    ports:
+      - "50002:50002"
+    volumes:
+      - ../services/knowledge-service/config.yaml:/app/config.yaml:ro
+      - knowledge-data:/app/data
+    networks:
+      - agent-network
+    restart: unless-stopped
+
+  # Memory Service - 记忆服务
+  memory-service:
+    build:
+      context: ..
+      dockerfile: services/memory-service/Dockerfile
+    ports:
+      - "50003:50003"
+    volumes:
+      - ../services/memory-service/config.yaml:/app/config.yaml:ro
+      - memory-data:/app/data
+    depends_on:
+      - otel-collector
+    environment:
+      - OTEL_EXPORTER_OTLP_ENDPOINT=otel-collector:4317
+    networks:
+      - agent-network
+    restart: unless-stopped
+
+  # A2A Service - 跨服务通信
+  a2a-service:
+    build:
+      context: ..
+      dockerfile: services/a2a-service/Dockerfile
+    ports:
+      - "50004:50004"
+      - "9001:9001"
+    volumes:
+      - ../services/a2a-service/config.yaml:/app/config.yaml:ro
+      - a2a-data:/app/data
+    networks:
+      - agent-network
+    restart: unless-stopped
+
+  # MCP Service - 工具协议服务
+  mcp-service:
+    build:
+      context: ..
+      dockerfile: services/mcp-service/Dockerfile
+    ports:
+      - "50005:50005"
+    environment:
+      # Headed-Chrome container (non-headless). Plain Chrome needs the full
+      # ws://host:port/devtools/browser/<id> path; browseragent discovers the id
+      # via /json/version when given an http:// URL. To revert to Obscura's
+      # stealth headless engine, set this to ws://obscura:9222/devtools/browser
+      # and depends_on: obscura.
+      - OBSCURA_CDP_URL=http://chrome:9222
+      # Computer Use desktop sidecar. When set, the computer_use tool drives this
+      # container over HTTP; otherwise it falls back to local xdotool (needs an X
+      # server inside mcp-service, usually not present).
+      - DESKTOP_URL=http://desktop:9100
+    depends_on:
+      - chrome
+      - desktop
+    volumes:
+      - ../services/mcp-service/config.yaml:/app/config.yaml:ro
+    networks:
+      - agent-network
+    restart: unless-stopped
+
+  # MCP Demo Server - MCP 协议演示服务器 (用于测试 MCP 客户端连接)
+  mcp-demo-server:
+    build:
+      context: ..
+      dockerfile: services/mcp-demo-server/Dockerfile
+    ports:
+      - "50009:50009"
+    networks:
+      - agent-network
+    restart: unless-stopped
+
+  # Agent Service - 多 Agent 编排服务
+  agent-service:
+    build:
+      context: ..
+      dockerfile: services/agent-service/Dockerfile
+    ports:
+      - "50006:50006"
+    volumes:
+      - ../services/agent-service/config.yaml:/app/config.yaml:ro
+      - agent-data:/app/data
+      - ../configs/agents:/app/configs/agents:ro
+    depends_on:
+      - mongo
+      - mcp-service
+      - otel-collector
+    environment:
+      - OTEL_EXPORTER_OTLP_ENDPOINT=otel-collector:4317
+    networks:
+      - agent-network
+    restart: unless-stopped
+
+  # Harness Service - 运维治理服务
+  harness-service:
+    build:
+      context: ..
+      dockerfile: services/harness-service/Dockerfile
+    ports:
+      - "50007:50007"
+    volumes:
+      - ../services/harness-service/config.yaml:/app/config.yaml:ro
+      - harness-data:/app/data
+    depends_on:
+      - otel-collector
+    environment:
+      - OTEL_EXPORTER_OTLP_ENDPOINT=otel-collector:4317
+    networks:
+      - agent-network
+    restart: unless-stopped
+
+  # Redis - 缓存
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - agent-network
+    restart: unless-stopped
+
+  # MongoDB - Agent 持久化存储
+  mongo:
+    image: mongo:7
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+    networks:
+      - agent-network
+    restart: unless-stopped
+    environment:
+      - MONGO_INITDB_DATABASE=agent_platform
+
+  # Qdrant - 向量数据库
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant-data:/qdrant/storage
+    networks:
+      - agent-network
+    restart: unless-stopped
+
+  # PostgreSQL + pgvector - 记忆索引 / 代码索引 / 事件（harness loop）
+  postgres:
+    image: pgvector/pgvector:pg16
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/00-init.sql:ro
+      - hlp-workspace:/workspace
+    environment:
+      - POSTGRES_USER=agent
+      - POSTGRES_PASSWORD=agent_dev_password
+      - POSTGRES_DB=agent_platform
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agent -d agent_platform"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks:
+      - agent-network
+    restart: unless-stopped
+
+  # Obscura - 隐身无头浏览器引擎（替代 Chrome）
+  # 比 Chrome 小 7 倍、快 6 倍，内置反检测和 MCP 支持
+  obscura:
+    image: h4ckf0r0day/obscura:latest
+    command: serve --port 9222 --stealth --host 0.0.0.0
+    # Host port removed to avoid clashing with the chrome service; still
+    # reachable as obscura:9222 on the agent-network for fallback use.
+    networks:
+      - agent-network
+    restart: unless-stopped
+
+  # Headed Chromium + Xvfb for sites whose anti-bot requires a non-headless
+  # browser (XHS search: x-s-common only generates when the page event loop
+  # runs normally). Exposes CDP on port 9222.
+  chrome:
+    build:
+      context: ./chrome
+      dockerfile: Dockerfile
+    ports:
+      - "9222:9222"
+    networks:
+      - agent-network
+    restart: unless-stopped
+
+  # Desktop container for Computer Use: Xvfb + XFCE + xdotool + scrot with an
+  # HTTP sidecar exposing desktop primitives. mcp-service drives it via
+  # DESKTOP_URL (the computer_use tool). Optional - only needed for desktop
+  # control tasks; the platform runs fine without it.
+  desktop:
+    build:
+      context: ..
+      dockerfile: docker/desktop/Dockerfile
+    ports:
+      - "9100:9100"
+    networks:
+      - agent-network
+    restart: unless-stopped
+
+  # OpenTelemetry Collector - 分布式追踪收集器
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.96.0
+    ports:
+      - "4317:4317"   # gRPC receiver
+      - "4318:4318"   # HTTP receiver
+    volumes:
+      - ./otel-config.yaml:/etc/otelcol-contrib/config.yaml:ro
+    networks:
+      - agent-network
+    restart: unless-stopped
+
+  # Frontend - 前端界面
+  frontend:
+    build:
+      context: ..
+      dockerfile: frontend/Dockerfile
+    ports:
+      - "8888:80"
+    depends_on:
+      - gateway
+    networks:
+      - agent-network
+    restart: unless-stopped
+
+networks:
+  agent-network:
+    driver: bridge
+
+volumes:
+  chat-data:
+  knowledge-data:
+  memory-data:
+  a2a-data:
+  mcp-data:
+  agent-data:
+  harness-data:
+  redis-data:
+  mongo-data:
+  qdrant-data:
+  pg-data:
+  hlp-workspace:
