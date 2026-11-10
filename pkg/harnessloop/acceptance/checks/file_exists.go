@@ -3,6 +3,7 @@ package checks
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -53,17 +54,22 @@ func safeJoin(root, rel string) (string, error) {
 	if rel == "" {
 		return "", fmt.Errorf("%w: empty path", errUnsafePath)
 	}
-	if filepath.IsAbs(rel) || strings.ContainsAny(rel, "\x00") || strings.HasPrefix(rel, "/") || strings.HasPrefix(rel, `\`) {
+	decoded := rel
+	if unescaped, err := url.PathUnescape(rel); err == nil {
+		decoded = unescaped
+	}
+	decoded = strings.ReplaceAll(decoded, `\`, "/")
+	if filepath.IsAbs(decoded) || strings.ContainsAny(decoded, "\x00") || strings.HasPrefix(decoded, "/") {
 		return "", fmt.Errorf("%w: %q must be relative", errUnsafePath, rel)
 	}
 	rootAbs, err := filepath.Abs(root)
 	if err != nil {
 		return "", err
 	}
-	target := filepath.Join(rootAbs, filepath.FromSlash(rel))
+	target := filepath.Join(rootAbs, filepath.FromSlash(decoded))
 	cleanTarget := filepath.Clean(target)
 	if cleanTarget != rootAbs && !strings.HasPrefix(cleanTarget, rootAbs+string(filepath.Separator)) {
-		return "", fmt.Errorf("%w: %q escapes workspace root", errUnsafePath, rel)
+		return "", fmt.Errorf("%w: %q escapes workspace root", errUnsafePath, decoded)
 	}
 	return cleanTarget, nil
 }
