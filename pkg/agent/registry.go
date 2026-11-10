@@ -19,10 +19,10 @@ type AgentStore interface {
 
 // Registry manages agent registrations with optional persistence
 type Registry struct {
-	mu          sync.RWMutex
-	agents      map[string]*Agent  // In-memory cache
-	defaultID   string
-	store       AgentStore          // Optional persistence layer
+	mu        sync.RWMutex
+	agents    map[string]*Agent // In-memory cache
+	defaultID string
+	store     AgentStore // Optional persistence layer
 }
 
 // NewRegistry creates a new agent registry (without persistence)

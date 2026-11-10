@@ -23,18 +23,18 @@ type ReflectionPhase string
 const (
 	PhasePreAction  ReflectionPhase = "pre_action"  // Before taking action
 	PhasePostAction ReflectionPhase = "post_action" // After taking action
-	PhaseComplete   ReflectionPhase = "complete"   // After task completion
-	PhaseError      ReflectionPhase = "error"      // After error
+	PhaseComplete   ReflectionPhase = "complete"    // After task completion
+	PhaseError      ReflectionPhase = "error"       // After error
 )
 
 // ReflectionType defines the type of reflection
 type ReflectionType string
 
 const (
-	ReflectionSelf    ReflectionType = "self"    // Self-evaluation
+	ReflectionSelf     ReflectionType = "self"     // Self-evaluation
 	ReflectionCritique ReflectionType = "critique" // Critical analysis
-	ReflectionImprove ReflectionType = "improve" // Improvement suggestions
-	ReflectionLearn   ReflectionType = "learn"   // Learning extraction
+	ReflectionImprove  ReflectionType = "improve"  // Improvement suggestions
+	ReflectionLearn    ReflectionType = "learn"    // Learning extraction
 )
 
 // ============================================================
@@ -43,35 +43,35 @@ const (
 
 // ReflectionResult represents the result of a reflection
 type ReflectionResult struct {
-	ID              string                 `json:"id"`
-	SessionID       string                 `json:"session_id"`
-	Phase           ReflectionPhase        `json:"phase"`
-	Type            ReflectionType         `json:"type"`
-	Score           float64                `json:"score"` // 0-1 self-evaluation score
-	Strengths       []string               `json:"strengths"`
-	Weaknesses      []string               `json:"weaknesses"`
-	Suggestions     []string               `json:"suggestions"`
-	LessonsLearned  []string               `json:"lessons_learned"`
-	AlternativeActions []string            `json:"alternative_actions"`
-	Confidence      float64                `json:"confidence"` // Confidence in reflection
-	Analysis        string                 `json:"analysis"`
-	Timestamp       time.Time              `json:"timestamp"`
-	Metadata        map[string]interface{} `json:"metadata,omitempty"`
+	ID                 string                 `json:"id"`
+	SessionID          string                 `json:"session_id"`
+	Phase              ReflectionPhase        `json:"phase"`
+	Type               ReflectionType         `json:"type"`
+	Score              float64                `json:"score"` // 0-1 self-evaluation score
+	Strengths          []string               `json:"strengths"`
+	Weaknesses         []string               `json:"weaknesses"`
+	Suggestions        []string               `json:"suggestions"`
+	LessonsLearned     []string               `json:"lessons_learned"`
+	AlternativeActions []string               `json:"alternative_actions"`
+	Confidence         float64                `json:"confidence"` // Confidence in reflection
+	Analysis           string                 `json:"analysis"`
+	Timestamp          time.Time              `json:"timestamp"`
+	Metadata           map[string]interface{} `json:"metadata,omitempty"`
 }
 
 // ErrorAnalysis represents analysis of an error
 type ErrorAnalysis struct {
-	ID              string                 `json:"id"`
-	SessionID       string                 `json:"session_id"`
-	StepNum         int                    `json:"step_num"`
-	ErrorMessage    string                 `json:"error_message"`
-	ErrorType       string                 `json:"error_type"` // timeout, tool_error, llm_error, etc.
-	RootCause       string                 `json:"root_cause"`
-	ContributingFactors []string           `json:"contributing_factors"`
-	RecoveryOptions []RecoveryOption       `json:"recovery_options"`
-	PreventionTips  []string               `json:"prevention_tips"`
-	Severity        string                 `json:"severity"` // low, medium, high, critical
-	Timestamp       time.Time              `json:"timestamp"`
+	ID                  string           `json:"id"`
+	SessionID           string           `json:"session_id"`
+	StepNum             int              `json:"step_num"`
+	ErrorMessage        string           `json:"error_message"`
+	ErrorType           string           `json:"error_type"` // timeout, tool_error, llm_error, etc.
+	RootCause           string           `json:"root_cause"`
+	ContributingFactors []string         `json:"contributing_factors"`
+	RecoveryOptions     []RecoveryOption `json:"recovery_options"`
+	PreventionTips      []string         `json:"prevention_tips"`
+	Severity            string           `json:"severity"` // low, medium, high, critical
+	Timestamp           time.Time        `json:"timestamp"`
 }
 
 // RecoveryOption represents a recovery option
@@ -85,17 +85,17 @@ type RecoveryOption struct {
 
 // StrategyAdjustment represents a strategy adjustment
 type StrategyAdjustment struct {
-	ID              string                 `json:"id"`
-	SessionID       string                 `json:"session_id"`
-	Trigger         string                 `json:"trigger"` // What triggered the adjustment
-	CurrentStrategy string                 `json:"current_strategy"`
-	NewStrategy     string                 `json:"new_strategy"`
-	Reason          string                 `json:"reason"`
-	ExpectedImpact  string                 `json:"expected_impact"`
-	Applied         bool                   `json:"applied"`
-	AppliedAt       time.Time              `json:"applied_at,omitempty"`
-	Result          string                 `json:"result,omitempty"`
-	Timestamp       time.Time              `json:"timestamp"`
+	ID              string    `json:"id"`
+	SessionID       string    `json:"session_id"`
+	Trigger         string    `json:"trigger"` // What triggered the adjustment
+	CurrentStrategy string    `json:"current_strategy"`
+	NewStrategy     string    `json:"new_strategy"`
+	Reason          string    `json:"reason"`
+	ExpectedImpact  string    `json:"expected_impact"`
+	Applied         bool      `json:"applied"`
+	AppliedAt       time.Time `json:"applied_at,omitempty"`
+	Result          string    `json:"result,omitempty"`
+	Timestamp       time.Time `json:"timestamp"`
 }
 
 // ============================================================
@@ -104,13 +104,13 @@ type StrategyAdjustment struct {
 
 // ReflectionLoop manages the reflection process
 type ReflectionLoop struct {
-	llmClient  llm.Client
-	llmModel   string
-	results    map[string]*ReflectionResult // id -> result
-	bySession  map[string][]string          // sessionID -> result IDs
+	llmClient   llm.Client
+	llmModel    string
+	results     map[string]*ReflectionResult // id -> result
+	bySession   map[string][]string          // sessionID -> result IDs
 	adjustments map[string]*StrategyAdjustment
-	mu         sync.RWMutex
-	enabled    bool
+	mu          sync.RWMutex
+	enabled     bool
 }
 
 // NewReflectionLoop creates a new reflection loop
@@ -181,33 +181,33 @@ func (l *ReflectionLoop) Reflect(ctx context.Context, sessionID string, phase Re
 
 // ReflectionContext provides context for reflection
 type ReflectionContext struct {
-	Task            string                 `json:"task"`
-	Goal            string                 `json:"goal"`
-	ActionsTaken    []ActionRecord         `json:"actions_taken"`
-	CurrentState    string                 `json:"current_state"`
-	ExpectedState   string                 `json:"expected_state"`
-	Errors          []ErrorRecord          `json:"errors"`
-	TokenUsage      int                    `json:"token_usage"`
-	ElapsedTime     int64                  `json:"elapsed_time_ms"`
-	Success         bool                   `json:"success"`
-	Metadata        map[string]interface{} `json:"metadata,omitempty"`
+	Task          string                 `json:"task"`
+	Goal          string                 `json:"goal"`
+	ActionsTaken  []ActionRecord         `json:"actions_taken"`
+	CurrentState  string                 `json:"current_state"`
+	ExpectedState string                 `json:"expected_state"`
+	Errors        []ErrorRecord          `json:"errors"`
+	TokenUsage    int                    `json:"token_usage"`
+	ElapsedTime   int64                  `json:"elapsed_time_ms"`
+	Success       bool                   `json:"success"`
+	Metadata      map[string]interface{} `json:"metadata,omitempty"`
 }
 
 // ActionRecord records an action
 type ActionRecord struct {
-	StepNum   int                    `json:"step_num"`
-	Action    string                 `json:"action"`
-	Input     map[string]interface{} `json:"input"`
-	Output    interface{}            `json:"output"`
-	Success   bool                   `json:"success"`
-	Duration  int64                  `json:"duration_ms"`
+	StepNum  int                    `json:"step_num"`
+	Action   string                 `json:"action"`
+	Input    map[string]interface{} `json:"input"`
+	Output   interface{}            `json:"output"`
+	Success  bool                   `json:"success"`
+	Duration int64                  `json:"duration_ms"`
 }
 
 // ErrorRecord records an error
 type ErrorRecord struct {
-	StepNum     int    `json:"step_num"`
-	Error       string `json:"error"`
-	ErrorType   string `json:"error_type"`
+	StepNum         int    `json:"step_num"`
+	Error           string `json:"error"`
+	ErrorType       string `json:"error_type"`
 	RecoveryAttempt string `json:"recovery_attempt,omitempty"`
 }
 
@@ -293,14 +293,14 @@ func (l *ReflectionLoop) reflectWithLLM(ctx context.Context, phase ReflectionPha
 	jsonStr := extractJSON(resp.Content)
 	if jsonStr != "" {
 		var llmResult struct {
-			Score            float64  `json:"score"`
-			Strengths        []string `json:"strengths"`
-			Weaknesses       []string `json:"weaknesses"`
-			Suggestions      []string `json:"suggestions"`
-			LessonsLearned   []string `json:"lessons_learned"`
+			Score              float64  `json:"score"`
+			Strengths          []string `json:"strengths"`
+			Weaknesses         []string `json:"weaknesses"`
+			Suggestions        []string `json:"suggestions"`
+			LessonsLearned     []string `json:"lessons_learned"`
 			AlternativeActions []string `json:"alternative_actions"`
-			Confidence       float64  `json:"confidence"`
-			Analysis         string   `json:"analysis"`
+			Confidence         float64  `json:"confidence"`
+			Analysis           string   `json:"analysis"`
 		}
 
 		if err := parseJSON(jsonStr, &llmResult); err == nil {
@@ -365,11 +365,11 @@ func (l *ReflectionLoop) reflectWithRules(phase ReflectionPhase, context_ Reflec
 
 // ErrorAnalyzer analyzes errors
 type ErrorAnalyzer struct {
-	llmClient   llm.Client
-	llmModel    string
-	analyses    map[string]*ErrorAnalysis
-	errorTypes  map[string]int // error type -> count
-	mu          sync.RWMutex
+	llmClient  llm.Client
+	llmModel   string
+	analyses   map[string]*ErrorAnalysis
+	errorTypes map[string]int // error type -> count
+	mu         sync.RWMutex
 }
 
 // NewErrorAnalyzer creates a new error analyzer
@@ -500,12 +500,12 @@ func (a *ErrorAnalyzer) determineSeverity(errorType, errorMessage string) string
 // inferRootCause infers root cause from error type
 func (a *ErrorAnalyzer) inferRootCause(errorType, errorMessage string) string {
 	causes := map[string]string{
-		"timeout":         "请求超时，可能是网络延迟或服务响应慢",
-		"connection":      "网络连接问题，可能是服务不可用",
-		"auth":            "认证失败，可能是凭证过期或无效",
-		"rate_limit":      "请求频率超限，需要降低请求速率",
-		"tool_error":      "工具执行错误，可能是参数不正确或环境问题",
-		"llm_error":       "LLM 调用失败，可能是模型服务问题",
+		"timeout":    "请求超时，可能是网络延迟或服务响应慢",
+		"connection": "网络连接问题，可能是服务不可用",
+		"auth":       "认证失败，可能是凭证过期或无效",
+		"rate_limit": "请求频率超限，需要降低请求速率",
+		"tool_error": "工具执行错误，可能是参数不正确或环境问题",
+		"llm_error":  "LLM 调用失败，可能是模型服务问题",
 	}
 
 	if cause, ok := causes[errorType]; ok {

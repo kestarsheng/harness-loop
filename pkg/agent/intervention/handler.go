@@ -16,24 +16,24 @@ import (
 type InterventionType string
 
 const (
-	InterventionPause      InterventionType = "pause"       // Pause execution
-	InterventionResume     InterventionType = "resume"      // Resume execution
-	InterventionStop       InterventionType = "stop"        // Stop execution
-	InterventionModify     InterventionType = "modify"      // Modify parameters
-	InterventionInject     InterventionType = "inject"      // Inject message
-	InterventionOverride   InterventionType = "override"    // Override decision
-	InterventionRedirect   InterventionType = "redirect"    // Redirect to different path
-	InterventionFeedback   InterventionType = "feedback"    // Provide feedback
+	InterventionPause    InterventionType = "pause"    // Pause execution
+	InterventionResume   InterventionType = "resume"   // Resume execution
+	InterventionStop     InterventionType = "stop"     // Stop execution
+	InterventionModify   InterventionType = "modify"   // Modify parameters
+	InterventionInject   InterventionType = "inject"   // Inject message
+	InterventionOverride InterventionType = "override" // Override decision
+	InterventionRedirect InterventionType = "redirect" // Redirect to different path
+	InterventionFeedback InterventionType = "feedback" // Provide feedback
 )
 
 // InterventionStatus defines the status of an intervention
 type InterventionStatus string
 
 const (
-	InterventionPending   InterventionStatus = "pending"
-	InterventionApplied   InterventionStatus = "applied"
-	InterventionRejected  InterventionStatus = "rejected"
-	InterventionExpired   InterventionStatus = "expired"
+	InterventionPending  InterventionStatus = "pending"
+	InterventionApplied  InterventionStatus = "applied"
+	InterventionRejected InterventionStatus = "rejected"
+	InterventionExpired  InterventionStatus = "expired"
 )
 
 // ============================================================
@@ -66,29 +66,29 @@ type InterventionRequest struct {
 
 // SessionState represents the state of an agent session
 type SessionState struct {
-	SessionID     string                 `json:"session_id"`
-	AgentID       string                 `json:"agent_id"`
-	Status        string                 `json:"status"` // running, paused, stopped, completed
-	CurrentStep   int                    `json:"current_step"`
-	TotalSteps    int                    `json:"total_steps"`
-	StartTime     time.Time              `json:"start_time"`
-	PauseTime     time.Time              `json:"pause_time,omitempty"`
-	ResumeTime    time.Time              `json:"resume_time,omitempty"`
-	Variables     map[string]interface{} `json:"variables"`
-	ExecutionLog  []ExecutionEntry       `json:"execution_log"`
-	LastUpdate    time.Time              `json:"last_update"`
+	SessionID    string                 `json:"session_id"`
+	AgentID      string                 `json:"agent_id"`
+	Status       string                 `json:"status"` // running, paused, stopped, completed
+	CurrentStep  int                    `json:"current_step"`
+	TotalSteps   int                    `json:"total_steps"`
+	StartTime    time.Time              `json:"start_time"`
+	PauseTime    time.Time              `json:"pause_time,omitempty"`
+	ResumeTime   time.Time              `json:"resume_time,omitempty"`
+	Variables    map[string]interface{} `json:"variables"`
+	ExecutionLog []ExecutionEntry       `json:"execution_log"`
+	LastUpdate   time.Time              `json:"last_update"`
 }
 
 // ExecutionEntry represents an entry in the execution log
 type ExecutionEntry struct {
-	StepNum     int                    `json:"step_num"`
-	Action      string                 `json:"action"`
-	Input       map[string]interface{} `json:"input"`
-	Output      interface{}            `json:"output"`
-	Duration    int64                  `json:"duration_ms"`
-	Success     bool                   `json:"success"`
-	Error       string                 `json:"error,omitempty"`
-	Timestamp   time.Time              `json:"timestamp"`
+	StepNum   int                    `json:"step_num"`
+	Action    string                 `json:"action"`
+	Input     map[string]interface{} `json:"input"`
+	Output    interface{}            `json:"output"`
+	Duration  int64                  `json:"duration_ms"`
+	Success   bool                   `json:"success"`
+	Error     string                 `json:"error,omitempty"`
+	Timestamp time.Time              `json:"timestamp"`
 }
 
 // ============================================================
@@ -107,10 +107,10 @@ type InterventionManager struct {
 
 // InterventionEvent represents an intervention event
 type InterventionEvent struct {
-	Type      InterventionType   `json:"type"`
-	SessionID string             `json:"session_id"`
-	RequestID string             `json:"request_id"`
-	Timestamp time.Time          `json:"timestamp"`
+	Type      InterventionType       `json:"type"`
+	SessionID string                 `json:"session_id"`
+	RequestID string                 `json:"request_id"`
+	Timestamp time.Time              `json:"timestamp"`
 	Data      map[string]interface{} `json:"data,omitempty"`
 }
 
@@ -273,7 +273,7 @@ func (m *InterventionManager) PauseSession(ctx context.Context, sessionID, userI
 			SessionID: sessionID,
 			Timestamp: time.Now(),
 			Data: map[string]interface{}{
-				"reason": reason,
+				"reason":  reason,
 				"user_id": userID,
 			},
 		}
@@ -340,7 +340,7 @@ func (m *InterventionManager) StopSession(ctx context.Context, sessionID, userID
 			SessionID: sessionID,
 			Timestamp: time.Now(),
 			Data: map[string]interface{}{
-				"reason": reason,
+				"reason":  reason,
 				"user_id": userID,
 			},
 		}
@@ -512,16 +512,16 @@ func (m *InterventionManager) ListActiveSessions() []*SessionState {
 
 // Feedback represents user feedback
 type Feedback struct {
-	ID           string                 `json:"id"`
-	SessionID    string                 `json:"session_id"`
-	StepNum      int                    `json:"step_num"`
-	UserID       string                 `json:"user_id"`
-	Rating       int                    `json:"rating"` // 1-5
-	Comment      string                 `json:"comment"`
-	Category     string                 `json:"category"` // helpful, incorrect, confusing, other
-	IsPositive   bool                   `json:"is_positive"`
-	CreatedAt    time.Time              `json:"created_at"`
-	Metadata     map[string]interface{} `json:"metadata,omitempty"`
+	ID         string                 `json:"id"`
+	SessionID  string                 `json:"session_id"`
+	StepNum    int                    `json:"step_num"`
+	UserID     string                 `json:"user_id"`
+	Rating     int                    `json:"rating"` // 1-5
+	Comment    string                 `json:"comment"`
+	Category   string                 `json:"category"` // helpful, incorrect, confusing, other
+	IsPositive bool                   `json:"is_positive"`
+	CreatedAt  time.Time              `json:"created_at"`
+	Metadata   map[string]interface{} `json:"metadata,omitempty"`
 }
 
 // FeedbackCollector collects and manages feedback
@@ -600,11 +600,11 @@ func (c *FeedbackCollector) GetStats() map[string]interface{} {
 	}
 
 	return map[string]interface{}{
-		"total_feedback":   total,
-		"positive_count":   positive,
-		"negative_count":   negative,
-		"average_rating":   avgRating,
-		"category_counts":  categoryCounts,
+		"total_feedback":  total,
+		"positive_count":  positive,
+		"negative_count":  negative,
+		"average_rating":  avgRating,
+		"category_counts": categoryCounts,
 	}
 }
 

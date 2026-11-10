@@ -89,7 +89,7 @@ func DefaultAgents() []*Agent {
 			Temperature:       0.7,
 			ToolConfig: map[string]ToolSpecificConfig{
 				"browser_navigate": {
-					APIKey:  "",  // 从环境变量读取
+					APIKey:  "", // 从环境变量读取
 					BaseURL: "",
 					Model:   "",
 				},
