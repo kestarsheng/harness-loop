@@ -38,6 +38,7 @@ type Handler struct {
 	policy      *policy.Engine
 	models      *modelregistry.Registry
 	publisher   *event.Publisher
+	flags       *config.FlagSet
 
 	mu      sync.Mutex
 	running map[string]context.CancelFunc
@@ -54,6 +55,7 @@ type Deps struct {
 	Policy      *policy.Engine
 	Models      *modelregistry.Registry
 	Publisher   *event.Publisher
+	Flags       *config.FlagSet
 }
 
 func New(d Deps) *Handler {
@@ -68,6 +70,7 @@ func New(d Deps) *Handler {
 		policy:      d.Policy,
 		models:      d.Models,
 		publisher:   d.Publisher,
+		flags:       d.Flags,
 		running:     make(map[string]context.CancelFunc),
 	}
 }
@@ -96,10 +99,15 @@ func (h *Handler) CreateTask(ctx context.Context, req *harnesspb.CreateTaskReque
 	if req.GetGoal() == "" || req.GetWorkspaceRoot() == "" {
 		return nil, status.Error(codes.InvalidArgument, "goal and workspace_root are required")
 	}
-	if !h.cfg.Harness.Enabled {
+	tenantID := tenantFrom(ctx, req.GetTenantId())
+	fsmEnabled := h.fsmEnabled(config.FlagContext{
+		TenantID:  tenantID,
+		ProjectID: req.GetProjectId(),
+		TaskType:  "long_running",
+	})
+	if !fsmEnabled {
 		return nil, status.Error(codes.FailedPrecondition, "E_FSM_DISABLED: harness loop is disabled")
 	}
-	tenantID := tenantFrom(ctx, req.GetTenantId())
 	taskID := newID("task")
 
 	snapshot, err := json.Marshal(map[string]any{
@@ -125,7 +133,7 @@ func (h *Handler) CreateTask(ctx context.Context, req *harnesspb.CreateTaskReque
 		AcceptanceFail: map[string]int{},
 		BudgetTokens:   req.GetBudget().GetTokens(),
 		BudgetCost:     req.GetBudget().GetCost(),
-		FSMEnabled:     true,
+		FSMEnabled:     fsmEnabled,
 		PolicySnapshot: snapshot,
 	}
 	if err := h.tasks.Create(ctx, run); err != nil {
@@ -140,6 +148,13 @@ func (h *Handler) CreateTask(ctx context.Context, req *harnesspb.CreateTaskReque
 		h.startTask(view.TenantID, view.TaskID)
 	}
 	return &harnesspb.CreateTaskResponse{Task: toProtoTask(view)}, nil
+}
+
+func (h *Handler) fsmEnabled(fc config.FlagContext) bool {
+	if h.flags != nil {
+		return h.flags.EvaluateFSM(fc)
+	}
+	return h.cfg.Harness.Enabled
 }
 
 func hashGoal(goal string) string {

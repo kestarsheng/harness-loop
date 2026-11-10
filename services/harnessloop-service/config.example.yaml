@@ -14,7 +14,8 @@ agent:
   timeout_seconds: 600
 
 harness:
-  enabled: true
+  # local fallback only; the feature flag file takes precedence when present
+  enabled: false
   auto_start: true
   max_steps: 200
   silent_threshold_seconds: 120
@@ -29,3 +30,6 @@ models:
 
 retry:
   file: "config/harness_loop/retry.yaml"
+
+feature_flags:
+  file: "config/harness_loop/features.yaml"

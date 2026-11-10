@@ -12,8 +12,10 @@ import (
 
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 
 	"agent-platform/internal/cli/output"
 	harnesspb "agent-platform/pkg/pb/harnessloop"
@@ -213,11 +215,49 @@ func envelopeFromTask(task *harnesspb.TaskView) output.Envelope {
 	})
 }
 
+func exitCodeForError(err error) int {
+	st, ok := status.FromError(err)
+	if !ok {
+		return output.ExitConnectionFail
+	}
+	switch st.Code() {
+	case codes.InvalidArgument, codes.FailedPrecondition:
+		return output.ExitInvalidUsage
+	case codes.NotFound:
+		return output.ExitFailed
+	case codes.PermissionDenied, codes.Unauthenticated:
+		return output.ExitInvalidUsage
+	default:
+		return output.ExitConnectionFail
+	}
+}
+
+var knownErrorCodes = []string{
+	"E_FSM_DISABLED", "E_TENANT_REQUIRED", "E_TOOL_DENIED", "E_PATH_ESCAPE",
+	"E_EXEC_DENIED", "E_ILLEGAL_TRANSITION", "E_ACCEPTANCE_CONTEXT_INCOMPLETE",
+	"E_AGGREGATION_MISSING", "E_VERSION_CONFLICT", "E_MODEL_CAPABILITY_MISMATCH",
+}
+
 func describeError(err error) output.Envelope {
 	code := "E_UNKNOWN"
 	message := err.Error()
-	if strings.Contains(message, "E_TENANT") {
-		code = "E_TENANT_REQUIRED"
+	for _, known := range knownErrorCodes {
+		if strings.Contains(message, known) {
+			code = known
+			break
+		}
+	}
+	if st, ok := status.FromError(err); ok && code == "E_UNKNOWN" {
+		switch st.Code() {
+		case codes.NotFound:
+			code = "E_NOT_FOUND"
+		case codes.InvalidArgument:
+			code = "E_INVALID_ARGUMENT"
+		case codes.FailedPrecondition:
+			code = "E_PRECONDITION_FAILED"
+		case codes.Unavailable:
+			code = "E_SERVICE_UNAVAILABLE"
+		}
 	}
 	return output.Failure(code, message, nil)
 }
