@@ -2,8 +2,8 @@
 package handler
 
 import (
-	"agent-platform/pkg/config"
 	"agent-platform/pkg/client"
+	"agent-platform/pkg/config"
 )
 
 // Handlers holds all handlers

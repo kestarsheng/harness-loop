@@ -137,10 +137,10 @@ func (h *RealA2AHandler) SendTask(c *gin.Context) {
 	}
 
 	var req struct {
-		AgentID  string            `json:"agent_id"`
+		AgentID  string                 `json:"agent_id"`
 		Message  map[string]interface{} `json:"message"`
-		Metadata map[string]string `json:"metadata"`
-		TenantID string            `json:"tenant_id"`
+		Metadata map[string]string      `json:"metadata"`
+		TenantID string                 `json:"tenant_id"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(400, gin.H{"code": 1, "error": err.Error()})
@@ -158,7 +158,7 @@ func (h *RealA2AHandler) SendTask(c *gin.Context) {
 	// Convert message JSON to A2AMessage proto
 	if req.Message != nil {
 		grpcReq.Message = &pb.A2AMessage{
-			Role: getStringField(req.Message, "role"),
+			Role:    getStringField(req.Message, "role"),
 			Content: getStringField(req.Message, "content"),
 		}
 	}

@@ -5,17 +5,17 @@ import (
 	"net/http"
 	"sync"
 
-	"agent-platform/pkg/config"
 	"agent-platform/pkg/browseragent"
+	"agent-platform/pkg/config"
 
 	"github.com/gin-gonic/gin"
 )
 
 // CookieHandler handles cookie management
 type CookieHandler struct {
-	cfg    *config.Config
-	store  *browseragent.MemoryCookieStorage
-	mu     sync.RWMutex
+	cfg   *config.Config
+	store *browseragent.MemoryCookieStorage
+	mu    sync.RWMutex
 }
 
 // NewCookieHandler creates a new cookie handler
@@ -28,9 +28,9 @@ func NewCookieHandler(cfg *config.Config) *CookieHandler {
 
 // CookieRequest represents a cookie save request
 type CookieRequest struct {
-	UserID   string              `json:"user_id"`
-	TenantID string              `json:"tenant_id"`
-	Domain   string              `json:"domain"`
+	UserID   string                `json:"user_id"`
+	TenantID string                `json:"tenant_id"`
+	Domain   string                `json:"domain"`
 	Cookies  []browseragent.Cookie `json:"cookies"`
 }
 
@@ -105,9 +105,9 @@ func (h *CookieHandler) GetCookies(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"code": 0,
 		"data": gin.H{
-			"cookies":  cookies,
-			"domain":   domain,
-			"user_id":  userID,
+			"cookies":   cookies,
+			"domain":    domain,
+			"user_id":   userID,
 			"tenant_id": tenantID,
 		},
 	})

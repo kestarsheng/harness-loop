@@ -29,6 +29,7 @@ func Setup(engine *gin.Engine, cfg *config.Config) {
 	memoryEnhancedHandler := handler.NewMemoryEnhancedHandler()
 	evalHandler := handler.NewEvalHandler()
 	layeredMemoryHandler := handler.NewLayeredMemoryHandler(cfg)
+	harnessLoopHandler := handler.NewHarnessLoopHandler(cfg)
 
 	// API v2 group
 	api := engine.Group("/api/v2")
@@ -315,6 +316,20 @@ func Setup(engine *gin.Engine, cfg *config.Config) {
 	// Prompt Optimizer routes
 	api.POST("/harness/optimizer/run", harnessHandler.RunPromptOptimization)
 	api.POST("/harness/optimizer/adopt", harnessHandler.AdoptPromptVersion)
+
+	// Harness loop routes (strict tenant: X-Tenant-ID required)
+	harnessLoop := api.Group("/harness-loop")
+	harnessLoop.Use(middleware.StrictTenant())
+	harnessLoop.GET("/tasks", harnessLoopHandler.ListTasks)
+	harnessLoop.POST("/tasks", harnessLoopHandler.CreateTask)
+	harnessLoop.GET("/tasks/:id", harnessLoopHandler.GetTask)
+	harnessLoop.POST("/tasks/:id/pause", harnessLoopHandler.PauseTask)
+	harnessLoop.POST("/tasks/:id/resume", harnessLoopHandler.ResumeTask)
+	harnessLoop.POST("/tasks/:id/abort", harnessLoopHandler.AbortTask)
+	harnessLoop.GET("/tasks/:id/report", harnessLoopHandler.GetReport)
+	harnessLoop.GET("/events", harnessLoopHandler.ListEvents)
+	harnessLoop.GET("/checkpoints", harnessLoopHandler.ListCheckpoints)
+	harnessLoop.POST("/checkpoints/restore", harnessLoopHandler.RestoreCheckpoint)
 
 	// Health check
 	engine.GET("/health", func(c *gin.Context) {
