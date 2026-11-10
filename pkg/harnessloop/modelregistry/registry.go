@@ -43,8 +43,8 @@ type Model struct {
 	MaxOutputTokens  int      `yaml:"max_output_tokens" json:"max_output_tokens"`
 	ToolCall         bool     `yaml:"tool_call" json:"tool_call"`
 	StructuredOutput bool     `yaml:"structured_output" json:"structured_output"`
-	PriceInPer1K     float64  `yaml:"price_in_per_1k" json:"price_in_per_1k"`
-	PriceOutPer1K    float64  `yaml:"price_out_per_1k" json:"price_out_per_1k"`
+	PriceInPer1K     *float64 `yaml:"price_in_per_1k" json:"price_in_per_1k"`
+	PriceOutPer1K    *float64 `yaml:"price_out_per_1k" json:"price_out_per_1k"`
 	Status           string   `yaml:"status" json:"status"`
 	Tags             []string `yaml:"tags" json:"tags,omitempty"`
 	EmbeddingDim     int      `yaml:"embedding_dim" json:"embedding_dim,omitempty"`
@@ -68,10 +68,10 @@ func (m *Model) Validate() error {
 	if m.MaxOutputTokens <= 0 {
 		missing = append(missing, "max_output_tokens")
 	}
-	if m.PriceInPer1K < 0 {
+	if m.PriceInPer1K == nil || *m.PriceInPer1K < 0 {
 		missing = append(missing, "price_in_per_1k")
 	}
-	if m.PriceOutPer1K < 0 {
+	if m.PriceOutPer1K == nil || *m.PriceOutPer1K < 0 {
 		missing = append(missing, "price_out_per_1k")
 	}
 	if len(missing) > 0 {
@@ -228,7 +228,7 @@ func sortByStrategy(models []*Model, strategy string) {
 		a, b := models[i], models[j]
 		switch strategy {
 		case StrategyCostFirst:
-			return a.PriceInPer1K < b.PriceInPer1K
+			return a.priceIn() < b.priceIn()
 		case StrategyQualityFirst:
 			as, bs := hasTag(a, "strong"), hasTag(b, "strong")
 			if as != bs {
@@ -236,9 +236,23 @@ func sortByStrategy(models []*Model, strategy string) {
 			}
 			return a.ContextWindow > b.ContextWindow
 		default:
-			return a.PriceInPer1K < b.PriceInPer1K
+			return a.priceIn() < b.priceIn()
 		}
 	})
+}
+
+func (m *Model) priceIn() float64 {
+	if m.PriceInPer1K == nil {
+		return 0
+	}
+	return *m.PriceInPer1K
+}
+
+func (m *Model) priceOut() float64 {
+	if m.PriceOutPer1K == nil {
+		return 0
+	}
+	return *m.PriceOutPer1K
 }
 
 func hasTag(m *Model, tag string) bool {

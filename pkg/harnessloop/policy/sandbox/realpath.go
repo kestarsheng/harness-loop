@@ -29,6 +29,9 @@ func Resolve(root, rel string) (string, error) {
 	if decoded == "" || decoded == "." {
 		return "", fmt.Errorf("%w: empty path", ErrUnsafePath)
 	}
+	if hasURLScheme(decoded) {
+		return "", fmt.Errorf("%w: url-style path %q is not allowed", ErrUnsafePath, rel)
+	}
 	if filepath.IsAbs(decoded) || strings.HasPrefix(decoded, "/") || strings.HasPrefix(decoded, `\`) {
 		return "", fmt.Errorf("%w: absolute path %q is not allowed", ErrUnsafePath, rel)
 	}
@@ -51,6 +54,26 @@ func Resolve(root, rel string) (string, error) {
 		return "", fmt.Errorf("%w: %q escapes workspace root", ErrPathEscape, rel)
 	}
 	return resolved, nil
+}
+
+func hasURLScheme(p string) bool {
+	idx := strings.Index(p, "://")
+	if idx <= 0 {
+		return false
+	}
+	scheme := p[:idx]
+	for i := 0; i < len(scheme); i++ {
+		c := scheme[i]
+		isAlpha := c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
+		isDigit := c >= '0' && c <= '9'
+		if i == 0 && !isAlpha {
+			return false
+		}
+		if !isAlpha && !isDigit && c != '+' && c != '-' && c != '.' {
+			return false
+		}
+	}
+	return true
 }
 
 func evalBestEffort(target string) (string, error) {

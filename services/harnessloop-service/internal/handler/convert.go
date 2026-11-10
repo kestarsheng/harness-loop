@@ -5,6 +5,7 @@ import (
 
 	"agent-platform/pkg/harnessloop/checkpoint"
 	"agent-platform/pkg/harnessloop/event"
+	"agent-platform/pkg/harnessloop/modelregistry"
 	harnesspb "agent-platform/pkg/pb/harnessloop"
 	"agent-platform/services/harnessloop-service/internal/repository"
 )
@@ -99,5 +100,20 @@ func toProtoCheckpoint(cp *checkpoint.Checkpoint) *harnesspb.CheckpointView {
 		CreatedAtMs:       cp.CreatedAt.UnixMilli(),
 		EventSeqWatermark: cp.EventSeqWatermark,
 		PayloadRef:        cp.Checksum,
+	}
+}
+
+func toModelEntry(v modelregistry.View) *harnesspb.ModelEntry {
+	return &harnesspb.ModelEntry{
+		Id:               v.ID,
+		Provider:         v.Provider,
+		ContextWindow:    int32(v.ContextWindow),
+		MaxOutputTokens:  int32(v.MaxOutputTokens),
+		ToolCall:         v.ToolCall,
+		StructuredOutput: v.StructuredOutput,
+		PriceInPer_1K:    v.PriceInPer1K,
+		PriceOutPer_1K:   v.PriceOutPer1K,
+		Status:           v.Status,
+		Tags:             v.Tags,
 	}
 }
