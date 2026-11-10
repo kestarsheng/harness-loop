@@ -38,6 +38,9 @@ type Config struct {
 	Models struct {
 		File string `yaml:"file"`
 	} `yaml:"models"`
+	FeatureFlags struct {
+		File string `yaml:"file"`
+	} `yaml:"feature_flags"`
 	Retry struct {
 		File string `yaml:"file"`
 	} `yaml:"retry"`
@@ -50,7 +53,7 @@ func Default() Config {
 	c.Agent.EntryAgent = "default"
 	c.Agent.StageModel = "qwen-plus"
 	c.Agent.TimeoutSeconds = 600
-	c.Harness.Enabled = true
+	c.Harness.Enabled = false
 	c.Harness.AutoStart = true
 	c.Harness.MaxSteps = 200
 	c.Harness.SilentThresholdSeconds = 120
@@ -58,6 +61,7 @@ func Default() Config {
 	c.Policy.MatrixFile = "config/harness_loop/stage_matrix.yaml"
 	c.Policy.ExecAllowFile = "config/harness_loop/exec_allow.yaml"
 	c.Models.File = "config/harness_loop/models.yaml"
+	c.FeatureFlags.File = "config/harness_loop/features.yaml"
 	c.Retry.File = "config/harness_loop/retry.yaml"
 	return c
 }

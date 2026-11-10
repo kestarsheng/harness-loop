@@ -41,7 +41,7 @@ func newLogsCmd() *cobra.Command {
 				})
 				if listErr != nil {
 					emit(cmd, describeError(listErr))
-					return &ExitError{Code: output.ExitConnectionFail}
+					return &ExitError{Code: exitCodeForError(listErr)}
 				}
 				for _, e := range resp.Events {
 					line, _ := json.Marshal(map[string]any{

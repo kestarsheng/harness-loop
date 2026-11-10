@@ -115,6 +115,14 @@ func main() {
 		stages = service.NewStageRunner(agentClient).WithEvents(publisher)
 	}
 
+	flags, flagErr := config.LoadFlagSet(cfg.FeatureFlags.File)
+	if flagErr != nil {
+		log.Printf("harnessloop: feature flags unavailable, falling back to harness.enabled: %v", flagErr)
+	}
+	if flags == nil {
+		log.Printf("harnessloop: no feature flag file configured, using harness.enabled=%v", cfg.Harness.Enabled)
+	}
+
 	runtime := service.NewRuntime(taskRepo, attemptRepo, stages)
 	runtime.Events = publisher
 	runtime.Policy = retryPolicy
@@ -131,6 +139,7 @@ func main() {
 		Policy:      policyEngine,
 		Models:      models,
 		Publisher:   publisher,
+		Flags:       flags,
 	})
 
 	lis, err := net.Listen("tcp", cfg.ListenAddress())

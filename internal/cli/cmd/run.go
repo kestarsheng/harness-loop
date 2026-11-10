@@ -58,7 +58,7 @@ func newRunCmd() *cobra.Command {
 			if err != nil {
 				env := describeError(err)
 				emit(cmd, env)
-				return &ExitError{Code: output.ExitConnectionFail}
+				return &ExitError{Code: exitCodeForError(err)}
 			}
 			if noWait {
 				emit(cmd, envelopeFromTask(created.Task))
@@ -76,7 +76,7 @@ func newRunCmd() *cobra.Command {
 				next, getErr := client.GetTask(ctx, &harnesspb.GetTaskRequest{TenantId: tenant, TaskId: task.GetTaskId()})
 				if getErr != nil {
 					emit(cmd, describeError(getErr))
-					return &ExitError{Code: output.ExitConnectionFail}
+					return &ExitError{Code: exitCodeForError(getErr)}
 				}
 				task = next
 			}
@@ -124,7 +124,7 @@ func newStatusCmd() *cobra.Command {
 				if getErr != nil {
 					env := describeError(getErr)
 					emit(cmd, env)
-					return &ExitError{Code: output.ExitConnectionFail}
+					return &ExitError{Code: exitCodeForError(getErr)}
 				}
 				if opts.JSON || !watch {
 					emit(cmd, envelopeFromTask(view))
@@ -170,7 +170,7 @@ func newAbortCmd() *cobra.Command {
 			})
 			if abortErr != nil {
 				emit(cmd, describeError(abortErr))
-				return &ExitError{Code: output.ExitConnectionFail}
+				return &ExitError{Code: exitCodeForError(abortErr)}
 			}
 			emit(cmd, envelopeFromTask(view))
 			if view.GetStatus() == "aborted" {
@@ -208,7 +208,7 @@ func newResumeCmd() *cobra.Command {
 			})
 			if resumeErr != nil {
 				emit(cmd, describeError(resumeErr))
-				return &ExitError{Code: output.ExitConnectionFail}
+				return &ExitError{Code: exitCodeForError(resumeErr)}
 			}
 			emit(cmd, envelopeFromTask(view))
 			return nil

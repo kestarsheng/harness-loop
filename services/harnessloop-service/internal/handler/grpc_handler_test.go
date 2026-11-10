@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -40,6 +41,7 @@ func setupHandler(t *testing.T) *Handler {
 	cfg := config.Default()
 	cfg.Postgres.DSN = dsn
 	cfg.Harness.AutoStart = false
+	cfg.Harness.Enabled = true
 
 	return New(Deps{
 		Config:      cfg,
@@ -261,5 +263,51 @@ func TestConvertEventAndCheckpoint(t *testing.T) {
 	}
 	if toProtoCheckpoint(nil) != nil {
 		t.Fatal("nil checkpoint must convert to nil")
+	}
+}
+
+func TestFeatureFlagEnablesAndFreezes(t *testing.T) {
+	h := setupHandler(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "features.yaml")
+	body := "version: 1\nflags:\n  - name: harness.loop.fsm.enabled\n    default: true\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	flags, err := config.LoadFlagSet(path)
+	if err != nil {
+		t.Fatalf("load flags: %v", err)
+	}
+	h.flags = flags
+
+	ctx := context.Background()
+	created, err := h.CreateTask(ctx, &harnesspb.CreateTaskRequest{
+		TenantId: "tenant-a", ProjectId: "proj-a", WorkspaceRoot: t.TempDir(), Goal: "g",
+	})
+	if err != nil {
+		t.Fatalf("create with flag on: %v", err)
+	}
+	if !created.Task.FsmEnabled {
+		t.Fatal("task must record fsm_enabled=true when the flag is on")
+	}
+
+	h.flags = nil
+	h.cfg.Harness.Enabled = false
+
+	got, err := h.GetTask(ctx, &harnesspb.GetTaskRequest{TenantId: "tenant-a", TaskId: created.Task.TaskId})
+	if err != nil {
+		t.Fatalf("historical task must remain readable: %v", err)
+	}
+	if !got.FsmEnabled {
+		t.Fatal("fsm_enabled must stay frozen after the flag is turned off")
+	}
+
+	if _, err := h.ListCheckpoints(ctx, &harnesspb.ListCheckpointsRequest{TaskId: created.Task.TaskId}); err != nil {
+		t.Fatalf("checkpoints must remain readable: %v", err)
+	}
+
+	_, err = h.CreateTask(ctx, &harnesspb.CreateTaskRequest{WorkspaceRoot: t.TempDir(), Goal: "g"})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("new task must be rejected when disabled: %v", err)
 	}
 }
