@@ -99,3 +99,8 @@ func SelectTarget(from Stage, verdict Verdict, category string) (Stage, bool) {
 		return "", false
 	}
 }
+
+func IsLegalTarget(from, to Stage) bool {
+	_, ok := transitionTo(from, to)
+	return ok
+}
