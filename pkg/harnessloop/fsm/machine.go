@@ -63,6 +63,7 @@ type PendingEvent struct {
 	Severity string
 	From     Stage
 	To       Stage
+	Detail   string
 }
 
 type Decision struct {

@@ -293,6 +293,7 @@ type ExecutionRequest struct {
 	SystemPromptOverride string         `json:"system_prompt_override,omitempty"` // Rendered prompt from Prompt Management
 	Goal                 string         `json:"goal,omitempty"`
 	SuccessCriteria      string         `json:"success_criteria,omitempty"` // checkable completion condition; verifier gates done on this
+	StageMode            bool           `json:"stage_mode,omitempty"`       // require stage_finish tool call instead of implicit completion
 }
 
 // ExecutionResult represents an execution result
@@ -314,6 +315,7 @@ func (e *Engine) Run(ctx context.Context, req *ExecutionRequest) (*ExecutionResu
 	execCtx.TenantID = req.TenantID
 	execCtx.UserID = req.UserID
 	execCtx.EntryAgent = req.EntryAgent
+	execCtx.StageMode = req.StageMode
 	execCtx.MarkRunning()
 
 	// Set initial variables
@@ -742,6 +744,10 @@ func (e *Engine) executeLoop(ctx context.Context, execCtx *ExecutionContext, sta
 				}
 			}
 
+			if execCtx.StageMode {
+				execCtx.MarkError(ErrStageNotFinished.Error())
+				return e.buildResult(execCtx, ""), ErrStageNotFinished
+			}
 			execCtx.MarkCompleted()
 
 			// Persist the conclusion: write the final answer to memory and
@@ -1408,6 +1414,10 @@ func (e *Engine) resumeLoop(ctx context.Context, execCtx *ExecutionContext, star
 				}
 			}
 
+			if execCtx.StageMode {
+				execCtx.MarkError(ErrStageNotFinished.Error())
+				return e.buildResult(execCtx, ""), ErrStageNotFinished
+			}
 			execCtx.MarkCompleted()
 
 			// Persist the conclusion: write the final answer to memory and
