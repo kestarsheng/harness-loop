@@ -125,6 +125,7 @@ func main() {
 
 	runtime := service.NewRuntime(taskRepo, attemptRepo, stages)
 	runtime.Events = publisher
+	runtime.Checkpoints = checkpointRepo
 	runtime.Policy = retryPolicy
 	log.Printf("harnessloop: acceptance verifier is program-only in P0 (no model verifier wired yet)")
 

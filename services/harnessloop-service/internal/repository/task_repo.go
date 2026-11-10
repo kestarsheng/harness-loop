@@ -298,8 +298,12 @@ func insertEvent(ctx context.Context, tx pgx.Tx, tenantID, taskID string, e Even
 	_, err := tx.Exec(ctx, `
 		INSERT INTO hlp_event.events
 			(event_id, task_id, tenant_id, project_id, seq, event_type, schema_version, stage, attempt, severity, ts, payload)
-		SELECT $1, $2, $3, project_id, $4, $5, $6, NULLIF($7, ''), NULLIF($8, 0), $9, now(), $10
-		FROM hlp_task.task_runs WHERE task_id = $2 AND tenant_id = $3`,
+		SELECT $1, $2, $3, t.project_id,
+		       CASE WHEN $4 > 0 THEN $4
+		            ELSE (SELECT COALESCE(MAX(e2.seq), 0) + 1 FROM hlp_event.events e2 WHERE e2.task_id = $2 AND e2.tenant_id = $3)
+		       END,
+		       $5, $6, NULLIF($7, ''), NULLIF($8, 0), $9, now(), $10
+		FROM hlp_task.task_runs t WHERE t.task_id = $2 AND t.tenant_id = $3`,
 		e.EventID, taskID, tenantID, e.Seq, e.EventType, schema, string(e.Stage), e.Attempt, severity, payload)
 	if err != nil {
 		return fmt.Errorf("task_repo: insert event %s: %w", e.EventID, err)

@@ -162,6 +162,7 @@ func (r *Runtime) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 	}
 
 	budget := retry.NewBudget(r.Policy)
+	entryReason := fsm.EntryInitial
 	maxSteps := in.MaxSteps
 	if maxSteps <= 0 {
 		maxSteps = 200
@@ -182,7 +183,7 @@ func (r *Runtime) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 		if err != nil {
 			return nil, fmt.Errorf("runtime: next attempt no: %w", err)
 		}
-		attempt, err := fsm.NewAttempt(task.TaskID, stage, attemptNo, entryReasonFor(step, result), r.now())
+		attempt, err := fsm.NewAttempt(task.TaskID, stage, attemptNo, entryReason, r.now())
 		if err != nil {
 			return nil, fmt.Errorf("runtime: create attempt: %w", err)
 		}
@@ -263,6 +264,7 @@ func (r *Runtime) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 			}
 			task = updated
 			budget.OnStageEnter()
+			entryReason = fsm.EntryInitial
 			if target == fsm.StageDone {
 				return r.finalize(ctx, in, result, ReasonCompleted, target, "", "", 0, "", task.Version)
 			}
@@ -275,6 +277,7 @@ func (r *Runtime) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 		result.LastError = verdict.Reason
 
 		if stage == fsm.StageRequirement {
+			entryReason = fsm.EntryAcceptanceFailed
 			if decision.Terminal {
 				return r.finalize(ctx, in, result, ReasonFailed, stage, string(stage), string(category), decision.RetryIndex, verdict.Reason, task.Version)
 			}
@@ -295,6 +298,7 @@ func (r *Runtime) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 		}
 		task = updated
 		budget.OnStageEnter()
+		entryReason = fsm.EntryAcceptanceFailed
 		if decision.Terminal {
 			return r.finalize(ctx, in, result, ReasonFailed, stage, string(stage), string(category), decision.RetryIndex, verdict.Reason, task.Version)
 		}
@@ -428,7 +432,7 @@ func (r *Runtime) transitionEvents(in RunInput, from, to fsm.Stage, attempt fsm.
 	payload := []byte(fmt.Sprintf(`{"from":%q,"to":%q,"attempt_id":%q}`, from, to, attempt.AttemptID))
 	return []repository.EventInsert{{
 		EventID:   fmt.Sprintf("%s-%s-%s", in.TaskID, from, to),
-		Seq:       r.now().UnixNano(),
+		Seq:       0,
 		EventType: "stage.transition",
 		Severity:  "info",
 		Stage:     to,
@@ -498,16 +502,6 @@ func (r *Runtime) now() time.Time {
 		return r.Now()
 	}
 	return time.Now()
-}
-
-func entryReasonFor(step int, res *RunResult) fsm.EntryReason {
-	if step == 0 {
-		return fsm.EntryInitial
-	}
-	if res != nil && res.Category != "" {
-		return fsm.EntryRetry
-	}
-	return fsm.EntryAcceptanceFailed
 }
 
 func rollbackCategory(v acceptance.Verdict) retry.Category {
