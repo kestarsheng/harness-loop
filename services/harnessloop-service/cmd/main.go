@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -16,12 +17,17 @@ import (
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/reflection"
 
+	"agent-platform/pkg/codeindex"
+	"agent-platform/pkg/codeindex/parser"
 	"agent-platform/pkg/harnessclient"
+	"agent-platform/pkg/harnessloop/compaction"
 	"agent-platform/pkg/harnessloop/event"
 	"agent-platform/pkg/harnessloop/modelregistry"
 	"agent-platform/pkg/harnessloop/policy"
 	"agent-platform/pkg/harnessloop/policy/sandbox"
 	"agent-platform/pkg/harnessloop/retry"
+	"agent-platform/pkg/llm"
+	codeindexpb "agent-platform/pkg/pb/codeindex"
 	harnesspb "agent-platform/pkg/pb/harnessloop"
 	"agent-platform/pkg/pgindex"
 	"agent-platform/services/harnessloop-service/internal/config"
@@ -142,6 +148,37 @@ func main() {
 	runtime.Policy = retryPolicy
 	runtime.Injector = service.NewMemoryInjector(recaller, nil).WithEvents(publisher)
 	runtime.HarnessHome = cfg.Memory.HarnessHome
+
+	if os.Getenv("HARNESSLOOP_COMPACTION_ENABLED") != "false" {
+		compactionCfg, compErr := compaction.LoadConfig("")
+		if compErr != nil {
+			compactionCfg = compaction.DefaultConfig()
+		}
+		runtime.CompactionTrigger = compaction.NewTrigger(compactionCfg, modelWindowResolver{models: models})
+		runtime.CompactionLimits = compaction.DefaultDegradeLimits()
+		if cfg.Memory.HarnessHome != "" {
+			runtime.CompactionDir = filepath.Join(cfg.Memory.HarnessHome, "tmp")
+		} else {
+			runtime.CompactionDir = filepath.Join(os.TempDir(), "harness", "tmp")
+		}
+		if baseURL := os.Getenv("HARNESSLOOP_LLM_BASE_URL"); baseURL != "" {
+			llmClient, llmErr := llm.NewClient(llm.Config{
+				Provider: "openai",
+				APIKey:   os.Getenv("HARNESSLOOP_LLM_API_KEY"),
+				BaseURL:  baseURL,
+				Model:    os.Getenv("HARNESSLOOP_LLM_MODEL"),
+			})
+			if llmErr != nil {
+				log.Printf("harnessloop: compaction summarizer disabled: %v", llmErr)
+			} else {
+				runtime.CompactionSummarizer = compaction.NewTemplateSummarizer(compaction.LLMCompleter{Client: llmClient, Model: os.Getenv("HARNESSLOOP_LLM_MODEL")})
+				log.Printf("harnessloop: compaction summarizer enabled (%s)", baseURL)
+			}
+		} else {
+			log.Printf("harnessloop: compaction summarizer not configured, degradation path L1 will be used")
+		}
+		log.Printf("harnessloop: compaction trigger enabled (ratio=%.2f fallback=%d)", compactionCfg.ThresholdRatio, compactionCfg.FallbackWindow)
+	}
 	log.Printf("harnessloop: acceptance verifier is program-only in P0 (no model verifier wired yet)")
 
 	h := handler.New(handler.Deps{
@@ -163,8 +200,16 @@ func main() {
 		log.Fatalf("harnessloop: listen %s: %v", cfg.ListenAddress(), err)
 	}
 
+	indexRegistry := parser.NewRegistry()
+	codeWriter := codeindex.NewCodeWriter(db, func(path string, src []byte) (codeindex.ParseResult, error) {
+		return indexRegistry.Parse(path, src), nil
+	}, nil, nil)
+	indexService := service.NewIndexService(codeWriter)
+	indexHandler := handler.NewCodeIndexHandler(indexService)
+
 	server := grpc.NewServer()
 	harnesspb.RegisterHarnessLoopServiceServer(server, h)
+	codeindexpb.RegisterCodeIndexServiceServer(server, indexHandler)
 	healthServer := health.NewServer()
 	healthpb.RegisterHealthServer(server, healthServer)
 	healthServer.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
@@ -193,6 +238,18 @@ func main() {
 		server.Stop()
 	}
 	log.Printf("harnessloop: stopped")
+}
+
+type modelWindowResolver struct {
+	models *modelregistry.Registry
+}
+
+func (r modelWindowResolver) ContextWindow(model string) (int, bool) {
+	m, ok := r.models.Get(model)
+	if !ok {
+		return 0, false
+	}
+	return m.ContextWindow, true
 }
 
 func buildPolicy(cfg config.Config) (*policy.Engine, error) {

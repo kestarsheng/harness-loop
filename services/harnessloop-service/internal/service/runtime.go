@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -12,6 +13,7 @@ import (
 
 	"agent-platform/pkg/harnessloop/acceptance"
 	"agent-platform/pkg/harnessloop/checkpoint"
+	"agent-platform/pkg/harnessloop/compaction"
 	"agent-platform/pkg/harnessloop/event"
 	"agent-platform/pkg/harnessloop/fsm"
 	"agent-platform/pkg/harnessloop/retry"
@@ -116,6 +118,11 @@ type Runtime struct {
 
 	Injector    *MemoryInjector
 	HarnessHome string
+
+	CompactionTrigger    *compaction.Trigger
+	CompactionSummarizer compaction.Summarizer
+	CompactionLimits     compaction.DegradeLimits
+	CompactionDir        string
 
 	mu                sync.Mutex
 	pubMu             sync.Mutex
@@ -235,6 +242,7 @@ func (r *Runtime) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 				stageInput.Message = formatInjectedMessage(injected, stageInput.Message)
 			}
 		}
+		stageInput.Message = r.maybeCompact(ctx, in, task, stage, attempt, stageInput.Message, result)
 		stageRes, stageErr := r.Stages.Run(ctx, stageInput)
 		result.Steps++
 		if stageRes == nil {
@@ -513,6 +521,103 @@ func (r *Runtime) publishError(ctx context.Context, in RunInput, stage fsm.Stage
 		TenantID:      in.TenantID,
 		ProjectID:     in.ProjectID,
 		Payload:       payload,
+	})
+}
+
+func (r *Runtime) compactionLimits() compaction.DegradeLimits {
+	limits := r.CompactionLimits
+	if limits.KeepRecent == 0 {
+		limits = compaction.DefaultDegradeLimits()
+	}
+	return limits
+}
+
+func (r *Runtime) maybeCompact(ctx context.Context, in RunInput, task *repository.TaskRun, stage fsm.Stage, attempt fsm.Attempt, message string, res *RunResult) string {
+	if r.CompactionTrigger == nil {
+		return message
+	}
+	r.CompactionTrigger.SetModel(in.StageModel)
+	decision := r.CompactionTrigger.EvaluateText(message)
+	if !decision.Should {
+		return message
+	}
+
+	r.saveCheckpoint(ctx, in, task, attempt, checkpoint.KindPreCompaction, res)
+	r.publishCompaction(ctx, in, stage, attempt, event.CompactionTriggered, compaction.TriggerEventPayload(decision))
+
+	history := compaction.History{
+		Goal:     in.Goal,
+		GoalHash: in.GoalHash,
+		Phase:    string(stage),
+		Messages: []compaction.Message{{Role: "user", Content: message}},
+	}
+
+	if r.CompactionSummarizer != nil {
+		summary, err := r.CompactionSummarizer.Summarize(ctx, history, compaction.TemplateV1)
+		if err == nil {
+			if lines, buildErr := compaction.BuildLines(summary, string(stage), r.now()); buildErr == nil {
+				outputRef := ""
+				if r.CompactionDir != "" {
+					if path, writeErr := compaction.WriteJSONL(r.CompactionDir, task.TaskID, string(stage), lines); writeErr == nil {
+						outputRef = path
+					}
+				}
+				compacted := compaction.RenderLinesAsMessage(lines).Content
+				payload := map[string]any{
+					"trigger_reason": decision.Reason,
+					"tokens_before":  decision.EstimatedTokens,
+					"tokens_after":   len(compacted) / 2,
+					"ratio":          0.5,
+					"degraded":       false,
+					"strategy_id":    string(compaction.TemplateV1),
+					"prompt_version": string(compaction.TemplateV1),
+				}
+				if outputRef != "" {
+					payload["output_ref"] = outputRef
+				}
+				r.publishCompaction(ctx, in, stage, attempt, event.CompactionCompleted, payload)
+				return compacted
+			}
+		}
+	}
+
+	degraded, degradeErr := compaction.DegradeL1([]compaction.ChatMessage{{Role: "user", Content: message}}, history, r.compactionLimits())
+	if degradeErr == nil {
+		payload := map[string]any{
+			"trigger_reason": decision.Reason,
+			"tokens_before":  degraded.TokensBefore,
+			"tokens_after":   degraded.TokensAfter,
+			"ratio":          degraded.Ratio,
+			"degraded":       true,
+			"degrade_level":  degraded.Level,
+			"reason":         degraded.Reason,
+		}
+		r.publishCompaction(ctx, in, stage, attempt, event.CompactionDegraded, payload)
+		return compaction.RenderLinesAsMessage(degraded.Lines).Content
+	}
+	return message
+}
+
+func (r *Runtime) publishCompaction(ctx context.Context, in RunInput, stage fsm.Stage, attempt fsm.Attempt, eventType event.EventType, payload map[string]any) {
+	if r.Events == nil {
+		return
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	_ = r.Events.Publish(ctx, &event.Event{
+		EventID:       fmt.Sprintf("%s-%s-%d", in.TaskID, eventType, time.Now().UnixNano()),
+		EventType:     eventType,
+		SchemaVersion: event.CurrentSchemaVersion,
+		TaskID:        in.TaskID,
+		Stage:         string(stage),
+		Attempt:       attempt.AttemptNo,
+		Timestamp:     r.now().UTC(),
+		Severity:      event.SeverityInfo,
+		TenantID:      in.TenantID,
+		ProjectID:     in.ProjectID,
+		Payload:       raw,
 	})
 }
 
