@@ -748,6 +748,9 @@ func (e *Engine) executeLoop(ctx context.Context, execCtx *ExecutionContext, sta
 			}
 
 			if execCtx.StageMode {
+				if _, ok := ParseStageFinishProtocol(llmResp.Content); ok {
+					return e.buildResult(execCtx, llmResp.Content), nil
+				}
 				execCtx.MarkError(ErrStageNotFinished.Error())
 				return e.buildResult(execCtx, ""), ErrStageNotFinished
 			}
@@ -951,7 +954,7 @@ func (e *Engine) buildAgentMessages(ctx context.Context, agent *Agent, execCtx *
 	}
 
 	if execCtx.StageMode {
-		systemPrompt += "\n\nSTAGE MODE: this run executes exactly one harness stage. You are NOT done until you call the `stage_finish` tool with {attempt_id, stage, summary}. Plain-text completion is treated as no_finish and retried."
+		systemPrompt += "\n\nSTAGE MODE: this run executes exactly one harness stage. You are NOT done until you call the `stage_finish` tool with {attempt_id, stage, summary}. Plain-text completion is treated as no_finish and retried." + StageFinishProtocolInstruction()
 	}
 
 	// Add agent history summary
@@ -1006,6 +1009,15 @@ func (e *Engine) buildAgentMessages(ctx context.Context, agent *Agent, execCtx *
 
 	for i := start; i < len(execCtx.Messages); i++ {
 		messages = append(messages, execCtx.Messages[i])
+	}
+
+	if execCtx.StageMode {
+		messages = append(messages, Message{
+			Role: "user",
+			Content: "结束本阶段必须输出且仅输出以下格式的一行（JSON 必须合法）：\n" +
+				StageFinishMarker + ` {"attempt_id":"<stage message 中的 attempt_id>","stage":"<a|b|c|d>","summary":"<一句话概括>"}` +
+				"\n只输出自然语言、不带该标记将被视为未完成并重试。",
+		})
 	}
 
 	return messages
@@ -1445,6 +1457,9 @@ func (e *Engine) resumeLoop(ctx context.Context, execCtx *ExecutionContext, star
 			}
 
 			if execCtx.StageMode {
+				if _, ok := ParseStageFinishProtocol(llmResp.Content); ok {
+					return e.buildResult(execCtx, llmResp.Content), nil
+				}
 				execCtx.MarkError(ErrStageNotFinished.Error())
 				return e.buildResult(execCtx, ""), ErrStageNotFinished
 			}
