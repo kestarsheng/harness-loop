@@ -123,10 +123,25 @@ func main() {
 		log.Printf("harnessloop: no feature flag file configured, using harness.enabled=%v", cfg.Harness.Enabled)
 	}
 
+	var recaller service.MemoryRecaller
+	if cfg.Memory.Addr != "" {
+		if rc, rcErr := service.DialMemoryRecaller(rootCtx, cfg.Memory.Addr, 3*time.Second); rcErr != nil {
+			log.Printf("harnessloop: memory recall unavailable, will degrade to markdown: %v", rcErr)
+		} else {
+			recaller = rc
+			defer rc.Close()
+			log.Printf("harnessloop: memory recall enabled: %s", cfg.Memory.Addr)
+		}
+	} else {
+		log.Printf("harnessloop: memory recall disabled, will degrade to markdown")
+	}
+
 	runtime := service.NewRuntime(taskRepo, attemptRepo, stages)
 	runtime.Events = publisher
 	runtime.Checkpoints = checkpointRepo
 	runtime.Policy = retryPolicy
+	runtime.Injector = service.NewMemoryInjector(recaller, nil).WithEvents(publisher)
+	runtime.HarnessHome = cfg.Memory.HarnessHome
 	log.Printf("harnessloop: acceptance verifier is program-only in P0 (no model verifier wired yet)")
 
 	h := handler.New(handler.Deps{
