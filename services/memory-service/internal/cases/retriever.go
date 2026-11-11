@@ -29,9 +29,9 @@ const (
 type CaseStatus string
 
 const (
-	CaseStatusActive  CaseStatus = "active"  // Active case, used for learning
+	CaseStatusActive   CaseStatus = "active"   // Active case, used for learning
 	CaseStatusArchived CaseStatus = "archived" // Archived case
-	CaseStatusDeleted  CaseStatus = "deleted" // Deleted case
+	CaseStatusDeleted  CaseStatus = "deleted"  // Deleted case
 )
 
 // ============================================================
@@ -40,53 +40,53 @@ const (
 
 // Case represents an experience case
 type Case struct {
-	ID          string                 `json:"id"`
-	SessionID   string                 `json:"session_id"`
-	AgentID     string                 `json:"agent_id"`
-	Type        CaseType               `json:"type"`
-	Status      CaseStatus             `json:"status"`
-	Task        string                 `json:"task"`          // Task description
-	Goal        string                 `json:"goal"`          // Goal description
-	Outcome     string                 `json:"outcome"`       // Outcome description
-	Success     bool                   `json:"success"`       // Whether successful
-	Score       float64                `json:"score"`         // Success score (0-1)
+	ID        string     `json:"id"`
+	SessionID string     `json:"session_id"`
+	AgentID   string     `json:"agent_id"`
+	Type      CaseType   `json:"type"`
+	Status    CaseStatus `json:"status"`
+	Task      string     `json:"task"`    // Task description
+	Goal      string     `json:"goal"`    // Goal description
+	Outcome   string     `json:"outcome"` // Outcome description
+	Success   bool       `json:"success"` // Whether successful
+	Score     float64    `json:"score"`   // Success score (0-1)
 
 	// Execution details
-	Steps       []CaseStep             `json:"steps"`         // Execution steps
-	ToolsUsed   []string               `json:"tools_used"`    // Tools used
-	TokenCount  int                    `json:"token_count"`   // Total tokens used
-	Duration    int64                  `json:"duration_ms"`   // Execution duration
+	Steps      []CaseStep `json:"steps"`       // Execution steps
+	ToolsUsed  []string   `json:"tools_used"`  // Tools used
+	TokenCount int        `json:"token_count"` // Total tokens used
+	Duration   int64      `json:"duration_ms"` // Execution duration
 
 	// Learning elements
-	Lessons     []string               `json:"lessons"`       // Lessons learned
-	Patterns    []string               `json:"patterns"`      // Patterns identified
-	KeyActions  []string               `json:"key_actions"`   // Key actions that worked
-	Mistakes    []string               `json:"mistakes"`      // Mistakes made
+	Lessons    []string `json:"lessons"`     // Lessons learned
+	Patterns   []string `json:"patterns"`    // Patterns identified
+	KeyActions []string `json:"key_actions"` // Key actions that worked
+	Mistakes   []string `json:"mistakes"`    // Mistakes made
 
 	// Metadata
-	Tags        []string               `json:"tags"`          // Tags for categorization
-	Category    string                 `json:"category"`      // Category
-	Importance  float64                `json:"importance"`    // Importance score (0-1)
-	Vector      []float64              `json:"vector"`        // Embedding for similarity
+	Tags       []string  `json:"tags"`       // Tags for categorization
+	Category   string    `json:"category"`   // Category
+	Importance float64   `json:"importance"` // Importance score (0-1)
+	Vector     []float64 `json:"vector"`     // Embedding for similarity
 
-	CreatedAt   time.Time              `json:"created_at"`
-	UpdatedAt   time.Time              `json:"updated_at"`
-	AccessCount int                    `json:"access_count"`  // Times accessed
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+	AccessCount int       `json:"access_count"` // Times accessed
 
-	Metadata    map[string]interface{} `json:"metadata,omitempty"`
+	Metadata map[string]interface{} `json:"metadata,omitempty"`
 }
 
 // CaseStep represents a step in a case
 type CaseStep struct {
-	StepNum     int                    `json:"step_num"`
-	Action      string                 `json:"action"`
-	Thought     string                 `json:"thought"`       // Agent's reasoning
-	ToolName    string                 `json:"tool_name"`
-	Input       map[string]interface{} `json:"input"`
-	Output      interface{}            `json:"output"`
-	Success     bool                   `json:"success"`
-	Error       string                 `json:"error,omitempty"`
-	Duration    int64                  `json:"duration_ms"`
+	StepNum  int                    `json:"step_num"`
+	Action   string                 `json:"action"`
+	Thought  string                 `json:"thought"` // Agent's reasoning
+	ToolName string                 `json:"tool_name"`
+	Input    map[string]interface{} `json:"input"`
+	Output   interface{}            `json:"output"`
+	Success  bool                   `json:"success"`
+	Error    string                 `json:"error,omitempty"`
+	Duration int64                  `json:"duration_ms"`
 }
 
 // ============================================================
@@ -95,14 +95,14 @@ type CaseStep struct {
 
 // CaseLibrary manages the collection of cases
 type CaseLibrary struct {
-	cases        map[string]*Case     // ID -> Case
-	byAgent      map[string][]string  // AgentID -> Case IDs
-	byCategory   map[string][]string  // Category -> Case IDs
-	byTag        map[string][]string  // Tag -> Case IDs
+	cases        map[string]*Case      // ID -> Case
+	byAgent      map[string][]string   // AgentID -> Case IDs
+	byCategory   map[string][]string   // Category -> Case IDs
+	byTag        map[string][]string   // Tag -> Case IDs
 	byType       map[CaseType][]string // Type -> Case IDs
-	successCases []string             // IDs of success cases
-	failureCases []string             // IDs of failure cases
-	maxCases     int                  // Maximum cases to store
+	successCases []string              // IDs of success cases
+	failureCases []string              // IDs of failure cases
+	maxCases     int                   // Maximum cases to store
 	mu           sync.RWMutex
 }
 
@@ -364,11 +364,11 @@ func (l *CaseLibrary) GetStatistics() map[string]interface{} {
 	}
 
 	stats := map[string]interface{}{
-		"total_cases":     len(l.cases),
-		"success_cases":   len(l.successCases),
-		"failure_cases":   len(l.failureCases),
-		"success_rate":    successRate,
-		"by_agent_count":  len(l.byAgent),
+		"total_cases":       len(l.cases),
+		"success_cases":     len(l.successCases),
+		"failure_cases":     len(l.failureCases),
+		"success_rate":      successRate,
+		"by_agent_count":    len(l.byAgent),
 		"by_category_count": len(l.byCategory),
 	}
 
@@ -381,9 +381,9 @@ func (l *CaseLibrary) GetStatistics() map[string]interface{} {
 
 // SimilarCaseResult represents a similar case match
 type SimilarCaseResult struct {
-	Case        *Case   `json:"case"`
-	Similarity  float64 `json:"similarity"` // 0-1 similarity score
-	MatchType   string  `json:"match_type"` // vector, keyword, pattern
+	Case       *Case   `json:"case"`
+	Similarity float64 `json:"similarity"` // 0-1 similarity score
+	MatchType  string  `json:"match_type"` // vector, keyword, pattern
 }
 
 // CaseRetriever retrieves similar cases
@@ -609,13 +609,13 @@ func keywordSimilarity(query string, case_ *Case) float64 {
 
 // LearningPattern represents a learned pattern
 type LearningPattern struct {
-	ID          string   `json:"id"`
-	Name        string   `json:"name"`
-	Description string   `json:"description"`
-	Conditions  []string `json:"conditions"` // Conditions that trigger this pattern
-	Actions     []string `json:"actions"`    // Recommended actions
-	Confidence  float64  `json:"confidence"` // Pattern confidence
-	Occurrences int      `json:"occurrences"` // Times pattern occurred
+	ID          string    `json:"id"`
+	Name        string    `json:"name"`
+	Description string    `json:"description"`
+	Conditions  []string  `json:"conditions"`  // Conditions that trigger this pattern
+	Actions     []string  `json:"actions"`     // Recommended actions
+	Confidence  float64   `json:"confidence"`  // Pattern confidence
+	Occurrences int       `json:"occurrences"` // Times pattern occurred
 	CreatedAt   time.Time `json:"created_at"`
 }
 
