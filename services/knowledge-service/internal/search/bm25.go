@@ -151,7 +151,7 @@ func (b *BM25) scoreTerm(term string, doc BM25Document) float64 {
 	}
 
 	// Calculate IDF: log((N - df + 0.5) / (df + 0.5))
-	idf := math.Log((float64(b.numDocs) - df + 0.5) / (df + 0.5))
+	idf := math.Log((float64(b.numDocs)-df+0.5)/(df+0.5) + 1)
 
 	// Calculate term saturation
 	docLen := float64(doc.Length)
@@ -242,4 +242,37 @@ func (b *BM25) GetDocumentCount() int {
 // GetVocabularySize returns the number of unique terms
 func (b *BM25) GetVocabularySize() int {
 	return len(b.docFreq)
+}
+
+// RemoveDocument removes a document from the index and updates statistics.
+func (b *BM25) RemoveDocument(id string) bool {
+	idx := -1
+	for i := range b.documents {
+		if b.documents[i].ID == id {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return false
+	}
+	doc := b.documents[idx]
+	b.documents = append(b.documents[:idx], b.documents[idx+1:]...)
+	for term := range doc.TermFreq {
+		b.docFreq[term]--
+		if b.docFreq[term] <= 0 {
+			delete(b.docFreq, term)
+		}
+	}
+	b.numDocs--
+	if b.numDocs <= 0 {
+		b.avgDocLen = 0
+		return true
+	}
+	total := 0.0
+	for _, d := range b.documents {
+		total += float64(d.Length)
+	}
+	b.avgDocLen = total / float64(b.numDocs)
+	return true
 }

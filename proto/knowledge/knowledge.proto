@@ -36,6 +36,7 @@ message UploadRequest {
     int32 chunk_size = 4;
     int32 chunk_overlap = 5;
     string tenant_id = 6;
+    string kb_id = 7;
 }
 
 // 上传响应
@@ -58,6 +59,7 @@ message ListDocumentsRequest {
     string tenant_id = 1;
     string status = 2;
     common.PaginationRequest pagination = 3;
+    string kb_id = 4;
 }
 
 // 列出文档响应
@@ -80,6 +82,7 @@ message SearchRequest {
     double score_threshold = 4;
     map<string, string> filters = 5;
     string tenant_id = 6;
+    string kb_id = 7;
 }
 
 // 检索结果

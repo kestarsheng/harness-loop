@@ -8,8 +8,8 @@ import (
 
 	"agent-platform/pkg/config"
 	"agent-platform/pkg/llm"
-	pb "agent-platform/pkg/pb/knowledge"
 	commonpb "agent-platform/pkg/pb/common"
+	pb "agent-platform/pkg/pb/knowledge"
 	"agent-platform/services/knowledge-service/internal/chunker"
 	"agent-platform/services/knowledge-service/internal/parser"
 	"agent-platform/services/knowledge-service/internal/repository"
@@ -36,6 +36,10 @@ func NewKnowledgeService(llmClient llm.Client, docRepo *repository.DocumentRepos
 
 // Upload handles file upload
 func (s *KnowledgeService) Upload(ctx context.Context, req *pb.UploadRequest) (*pb.UploadResponse, error) {
+	if err := repository.ValidateUpload(req.Filename, req.Content, 0); err != nil {
+		return nil, err
+	}
+
 	// Parse file content
 	content, err := parser.Parse(req.Filename, req.Content)
 	if err != nil {
@@ -71,16 +75,23 @@ func (s *KnowledgeService) Upload(ctx context.Context, req *pb.UploadRequest) (*
 	}
 
 	// Save document and chunks
-	docID, err := s.docRepo.SaveDocument(ctx, req.Filename, content, chunks, embeddings, req.TenantId)
+	docID, err := s.docRepo.SaveDocumentWithMeta(ctx, repository.SaveDocumentMeta{
+		TenantID:      req.TenantId,
+		KBID:          req.GetKbId(),
+		Filename:      req.Filename,
+		Status:        repository.StatusPending,
+		SplitStrategy: req.ChunkStrategy,
+		Overlap:       chunkOverlap,
+	}, content, chunks, embeddings)
 	if err != nil {
 		return nil, fmt.Errorf("save document: %w", err)
 	}
 
 	return &pb.UploadResponse{
-		DocumentId:  docID,
-		Filename:    req.Filename,
-		ChunkCount:  int32(len(chunks)),
-		Status:      "ready",
+		DocumentId: docID,
+		Filename:   req.Filename,
+		ChunkCount: int32(len(chunks)),
+		Status:     "ready",
 	}, nil
 }
 
@@ -113,7 +124,7 @@ func (s *KnowledgeService) ListDocuments(ctx context.Context, req *pb.ListDocume
 		pageSize = 20
 	}
 
-	docs, total, err := s.docRepo.ListDocuments(ctx, req.TenantId, req.Status, page, pageSize)
+	docs, total, err := s.docRepo.ListDocuments(ctx, req.TenantId, req.Status, req.GetKbId(), page, pageSize)
 	if err != nil {
 		return nil, err
 	}
@@ -176,8 +187,9 @@ func (s *KnowledgeService) Search(ctx context.Context, req *pb.SearchRequest) (*
 				ChunkId:    c.ID,
 				DocumentId: c.DocID,
 				Content:    c.Content,
-				Score:      float64(topK - i), // Simple ranking
+				Score:      c.Score,
 			})
+			_ = i
 		}
 
 	case "hybrid":
@@ -206,9 +218,9 @@ func (s *KnowledgeService) Search(ctx context.Context, req *pb.SearchRequest) (*
 	}
 
 	return &pb.SearchResponse{
-		Results:    results,
-		Total:      int64(len(results)),
-		LatencyMs:  time.Since(startTime).Milliseconds(),
+		Results:   results,
+		Total:     int64(len(results)),
+		LatencyMs: time.Since(startTime).Milliseconds(),
 	}, nil
 }
 
@@ -301,4 +313,31 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func (s *KnowledgeService) filterSearchable(ctx context.Context, results []*pb.SearchResult, tenantID, kbID string) []*pb.SearchResult {
+	if len(results) == 0 {
+		return results
+	}
+	cache := make(map[string]*repository.Document, 8)
+	out := make([]*pb.SearchResult, 0, len(results))
+	for _, r := range results {
+		doc, ok := cache[r.DocumentId]
+		if !ok {
+			loaded, err := s.docRepo.GetDocument(ctx, r.DocumentId, tenantID)
+			if err != nil || loaded == nil {
+				continue
+			}
+			cache[r.DocumentId] = loaded
+			doc = loaded
+		}
+		if !repository.Searchable(doc.Status) {
+			continue
+		}
+		if !repository.KBMatches(doc.KBID, kbID) {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
 }
