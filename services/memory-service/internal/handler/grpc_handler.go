@@ -23,13 +23,14 @@ import (
 // MemoryHandler implements MemoryServiceServer with layered memory subsystems
 type MemoryHandler struct {
 	pb.UnimplementedMemoryServiceServer
-	service       *service.MemoryServiceWithForgetting
-	episodic      *episodic.EpisodicMemory
-	semantic      *semantic.SemanticMemory
-	working       *working.WorkingMemory
-	caseLibrary   *cases.CaseLibrary
-	caseRetriever *cases.CaseRetriever
-	mdWriter      *mempg.MemoryWriter
+	service        *service.MemoryServiceWithForgetting
+	episodic       *episodic.EpisodicMemory
+	semantic       *semantic.SemanticMemory
+	working        *working.WorkingMemory
+	caseLibrary    *cases.CaseLibrary
+	caseRetriever  *cases.CaseRetriever
+	mdWriter       *mempg.MemoryWriter
+	recallEmbedder func(ctx context.Context, text string) ([]float32, error)
 }
 
 // NewMemoryHandler creates a new memory handler with all subsystems
@@ -407,4 +408,50 @@ func (h *MemoryHandler) SyncFromMarkdown(ctx context.Context, req *pb.SyncFromMa
 		Deleted:     int32(deleted),
 		IndexedAtMs: time.Now().UnixMilli(),
 	}, nil
+}
+
+// SetRecallEmbedder enables semantic recall (nil keeps full-text-only recall).
+func (h *MemoryHandler) SetRecallEmbedder(embedder func(ctx context.Context, text string) ([]float32, error)) {
+	h.recallEmbedder = embedder
+}
+
+func (h *MemoryHandler) RecallTopics(ctx context.Context, req *pb.RecallTopicsRequest) (*pb.RecallTopicsResponse, error) {
+	if h.mdWriter == nil {
+		return nil, status.Error(codes.Unavailable, "E_MEMORY_INDEX_DISABLED: memory index is not configured")
+	}
+	if req.GetTenantId() == "" || req.GetProjectId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "tenant_id and project_id are required")
+	}
+	hits, stats, err := h.mdWriter.Recall(ctx, mempg.RecallOptions{
+		TenantID:   req.GetTenantId(),
+		ProjectID:  req.GetProjectId(),
+		Query:      req.GetQuery(),
+		Scope:      req.GetScope(),
+		Categories: req.GetCategories(),
+		TopK:       int(req.GetTopK()),
+		RRFK:       int(req.GetRrfK()),
+		Semantic:   req.GetSemantic(),
+		Embedder:   h.recallEmbedder,
+	})
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	resp := &pb.RecallTopicsResponse{
+		VectorCalled: stats.VectorCalled,
+		Trigger:      stats.Trigger,
+		LatencyMs:    stats.LatencyMs,
+	}
+	for _, hit := range hits {
+		resp.Hits = append(resp.Hits, &pb.RecallTopicHit{
+			TopicKey:    hit.TopicKey,
+			Title:       hit.Title,
+			Body:        hit.Body,
+			Category:    hit.Category,
+			SourceFile:  hit.SourceFile,
+			UpdatedAtMs: hit.UpdatedAt.UnixMilli(),
+			Score:       hit.RRFScore,
+			Sources:     hit.Sources,
+		})
+	}
+	return resp, nil
 }

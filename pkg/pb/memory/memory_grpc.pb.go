@@ -28,6 +28,7 @@ const (
 	MemoryService_GetAllMemories_FullMethodName      = "/memory.MemoryService/GetAllMemories"
 	MemoryService_DeleteMemory_FullMethodName        = "/memory.MemoryService/DeleteMemory"
 	MemoryService_SyncFromMarkdown_FullMethodName    = "/memory.MemoryService/SyncFromMarkdown"
+	MemoryService_RecallTopics_FullMethodName        = "/memory.MemoryService/RecallTopics"
 )
 
 // MemoryServiceClient is the client API for MemoryService service.
@@ -47,6 +48,8 @@ type MemoryServiceClient interface {
 	DeleteMemory(ctx context.Context, in *DeleteMemoryRequest, opts ...grpc.CallOption) (*common.Empty, error)
 	// markdown 事实源增量同步（md 为准，本服务只维护派生索引）
 	SyncFromMarkdown(ctx context.Context, in *SyncFromMarkdownRequest, opts ...grpc.CallOption) (*SyncFromMarkdownResponse, error)
+	// 记忆混合召回（全文 + 按需向量 + RRF）
+	RecallTopics(ctx context.Context, in *RecallTopicsRequest, opts ...grpc.CallOption) (*RecallTopicsResponse, error)
 }
 
 type memoryServiceClient struct {
@@ -129,6 +132,15 @@ func (c *memoryServiceClient) SyncFromMarkdown(ctx context.Context, in *SyncFrom
 	return out, nil
 }
 
+func (c *memoryServiceClient) RecallTopics(ctx context.Context, in *RecallTopicsRequest, opts ...grpc.CallOption) (*RecallTopicsResponse, error) {
+	out := new(RecallTopicsResponse)
+	err := c.cc.Invoke(ctx, MemoryService_RecallTopics_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // MemoryServiceServer is the server API for MemoryService service.
 // All implementations must embed UnimplementedMemoryServiceServer
 // for forward compatibility
@@ -146,6 +158,8 @@ type MemoryServiceServer interface {
 	DeleteMemory(context.Context, *DeleteMemoryRequest) (*common.Empty, error)
 	// markdown 事实源增量同步（md 为准，本服务只维护派生索引）
 	SyncFromMarkdown(context.Context, *SyncFromMarkdownRequest) (*SyncFromMarkdownResponse, error)
+	// 记忆混合召回（全文 + 按需向量 + RRF）
+	RecallTopics(context.Context, *RecallTopicsRequest) (*RecallTopicsResponse, error)
 	mustEmbedUnimplementedMemoryServiceServer()
 }
 
@@ -176,6 +190,9 @@ func (UnimplementedMemoryServiceServer) DeleteMemory(context.Context, *DeleteMem
 }
 func (UnimplementedMemoryServiceServer) SyncFromMarkdown(context.Context, *SyncFromMarkdownRequest) (*SyncFromMarkdownResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method SyncFromMarkdown not implemented")
+}
+func (UnimplementedMemoryServiceServer) RecallTopics(context.Context, *RecallTopicsRequest) (*RecallTopicsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method RecallTopics not implemented")
 }
 func (UnimplementedMemoryServiceServer) mustEmbedUnimplementedMemoryServiceServer() {}
 
@@ -334,6 +351,24 @@ func _MemoryService_SyncFromMarkdown_Handler(srv interface{}, ctx context.Contex
 	return interceptor(ctx, in, info, handler)
 }
 
+func _MemoryService_RecallTopics_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RecallTopicsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MemoryServiceServer).RecallTopics(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MemoryService_RecallTopics_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MemoryServiceServer).RecallTopics(ctx, req.(*RecallTopicsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // MemoryService_ServiceDesc is the grpc.ServiceDesc for MemoryService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -372,6 +407,10 @@ var MemoryService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "SyncFromMarkdown",
 			Handler:    _MemoryService_SyncFromMarkdown_Handler,
+		},
+		{
+			MethodName: "RecallTopics",
+			Handler:    _MemoryService_RecallTopics_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

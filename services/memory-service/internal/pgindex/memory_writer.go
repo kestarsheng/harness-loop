@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	pgdb "agent-platform/pkg/pgindex"
 )
 
@@ -130,7 +132,10 @@ func (w *MemoryWriter) SearchTopics(ctx context.Context, tenantID, projectID, qu
 		return nil, fmt.Errorf("memory_writer: search: %w", err)
 	}
 	defer rows.Close()
+	return scanTopicRows(rows)
+}
 
+func scanTopicRows(rows pgx.Rows) ([]TopicRecord, error) {
 	var out []TopicRecord
 	for rows.Next() {
 		var rec TopicRecord

@@ -157,6 +157,17 @@ func main() {
 				registered++
 			}
 			h.SetMDSync(writer)
+			h.SetRecallEmbedder(func(ctx context.Context, text string) ([]float32, error) {
+				vec, embedErr := llmClient.Embed(ctx, text)
+				if embedErr != nil {
+					return nil, embedErr
+				}
+				out := make([]float32, len(vec))
+				for i, v := range vec {
+					out[i] = float32(v)
+				}
+				return out, nil
+			})
 			mdCtx, cancel := context.WithCancel(context.Background())
 			mdCancel = cancel
 			go func() { _ = syncer.Run(mdCtx) }()
