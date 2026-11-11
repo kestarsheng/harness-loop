@@ -24,9 +24,14 @@ func main() {
 		SessionId:  "probe-1",
 		Message:    "stage=a attempt=1",
 		EntryAgent: "coder-agent",
-		Goal:       "这是链路验证任务：请用一句话概括阶段目标，然后必须调用 stage_finish 工具。",
+		Goal:       "完成 harness loop 真实链路验证：依次走过需求理解、计划、执行、验收四个阶段，每个阶段用一句话概括该阶段要做什么，然后按约定格式结束本阶段。",
 		ContextVars: map[string]string{
-			"__stage_mode__": "true",
+			"__stage_mode__":         "true",
+			"__policy_snapshot__":    "{}",
+			"__policy_hash__":        "sha256:snapshot",
+			"__stage_model__":        "qwen-plus",
+			"__model_window__":       "131072",
+			"__requires_tool_call__": "true",
 		},
 	}
 	err = client.ExecuteStream(ctx, req, func(c *agentpb.ExecuteStreamChunk) error {

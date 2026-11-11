@@ -383,8 +383,10 @@ func (s *AgentService) ExecuteStream(req *pb.ExecuteStreamRequest, stream pb.Age
 			}
 		}
 
-		// Add tool call info
-		if event.ToolName != "" {
+		// Only tool-start events carry actionable call arguments. Tool-result
+		// events reuse ToolName but have empty ToolArgs; mapping them as a tool
+		// call would overwrite the real arguments downstream.
+		if event.ToolName != "" && event.Type == agent.EventToolStart && len(event.ToolArgs) > 0 {
 			chunk.ToolCall = &pb.ToolCall{
 				Name:      event.ToolName,
 				Arguments: string(event.ToolArgs),
