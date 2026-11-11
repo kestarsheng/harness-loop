@@ -95,7 +95,10 @@ func (s *Store) Get(key string) (Topic, bool) {
 	if !ok {
 		return Topic{}, false
 	}
-	s.doc.MoveToFront(key)
+	// Long-term memory (global.md) is not LRU: reads never reorder it.
+	if s.doc.Scope != ScopeGlobal {
+		s.doc.MoveToFront(key)
+	}
 	return topic, true
 }
 
@@ -135,7 +138,7 @@ func (s *Store) insertLocked(topic Topic) error {
 			}
 			merged.Meta.ContentHash = ComputeContentHash(merged.Body)
 		}
-		s.doc.UpsertTopic(merged, true)
+		s.doc.UpsertTopic(merged, s.doc.Scope != ScopeGlobal)
 		return nil
 	}
 
@@ -152,7 +155,7 @@ func (s *Store) insertLocked(topic Topic) error {
 	if len(s.doc.Topics) >= max {
 		if softLimit {
 			s.warnings = append(s.warnings, Event{Type: "memory.capacity_warning", Key: topic.Key, Detail: fmt.Sprintf("global memory has %d topics (soft limit %d)", len(s.doc.Topics), max)})
-			s.doc.UpsertTopic(topic, true)
+			s.doc.UpsertTopic(topic, false)
 			return nil
 		}
 		victim, ok := s.findVictim()
@@ -162,7 +165,7 @@ func (s *Store) insertLocked(topic Topic) error {
 		s.doc.RemoveTopic(victim.Key)
 		s.evicted = append(s.evicted, Eviction{Key: victim.Key, Reason: "lru"})
 	}
-	s.doc.UpsertTopic(topic, true)
+	s.doc.UpsertTopic(topic, s.doc.Scope != ScopeGlobal)
 	return nil
 }
 
@@ -187,7 +190,9 @@ func (s *Store) Touch(key string) bool {
 	if _, ok := s.doc.TopicByKey(key); !ok {
 		return false
 	}
-	s.doc.MoveToFront(key)
+	if s.doc.Scope != ScopeGlobal {
+		s.doc.MoveToFront(key)
+	}
 	return true
 }
 
