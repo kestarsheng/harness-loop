@@ -1,0 +1,5 @@
+version: 1
+threshold_ratio: 0.80
+fallback_window: 60000
+safety_margin: 0.10
+budget_ratio: 0.10
