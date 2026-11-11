@@ -13,6 +13,7 @@ import (
 
 	"agent-platform/pkg/harnessloop/acceptance"
 	"agent-platform/pkg/harnessloop/checkpoint"
+	"agent-platform/pkg/harnessloop/compaction"
 	"agent-platform/pkg/harnessloop/event"
 	"agent-platform/pkg/harnessloop/fsm"
 	"agent-platform/pkg/harnessloop/retry"
@@ -611,5 +612,114 @@ func TestMemoryInjectRuntimeDegradesWithoutRecaller(t *testing.T) {
 	}
 	if events.count(event.MemoryIndexDegraded) == 0 {
 		t.Fatal("degrade event must be emitted when recaller is missing")
+	}
+}
+
+type stubSummarizer struct {
+	err error
+}
+
+func (s *stubSummarizer) Summarize(ctx context.Context, h compaction.History, tmpl compaction.TemplateVersion) (compaction.Summary, error) {
+	if s.err != nil {
+		return compaction.Summary{}, s.err
+	}
+	return compaction.Summary{
+		Goal: h.Goal, Done: "done", Todo: "todo",
+		Constraints: "constraint", Background: "background",
+	}, nil
+}
+
+func compactionRuntime(t *testing.T, summarizer compaction.Summarizer) (*Runtime, *stubStages, *captureEvents, *captureCheckpoints) {
+	t.Helper()
+	stages := &stubStages{}
+	rt, _, events, _ := newTestRuntime(stages)
+	checkpoints := &captureCheckpoints{}
+	rt.Checkpoints = checkpoints
+	rt.CompactionTrigger = compaction.NewTrigger(compaction.Config{
+		ThresholdRatio: 0.8, FallbackWindow: 100, SafetyMargin: 0,
+	}, nil)
+	rt.CompactionSummarizer = summarizer
+	rt.CompactionLimits = compaction.DefaultDegradeLimits()
+	rt.CompactionDir = filepath.Join(t.TempDir(), "tmp")
+	rt.Injector = NewMemoryInjector(&stubRecaller{hits: []MemoryHit{
+		hit("long", "project_fact", strings.Repeat("长上下文内容", 300), 1.0, false),
+	}}, nil).WithEvents(events)
+	rt.HarnessHome = t.TempDir()
+	return rt, stages, events, checkpoints
+}
+
+func TestRuntimeCompactionCompleted(t *testing.T) {
+	rt, stages, events, checkpoints := compactionRuntime(t, &stubSummarizer{})
+	input := runtimeInput()
+	input.ModelWindow = 1000
+
+	if _, err := rt.Run(context.Background(), input); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	stages.mu.Lock()
+	inputs := append([]StageRunInput(nil), stages.inputs...)
+	stages.mu.Unlock()
+	found := false
+	for _, stageInput := range inputs {
+		if strings.Contains(stageInput.Message, "[compacted context]") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("at least one stage must receive compacted context: %+v", inputs)
+	}
+
+	checkpoints.mu.Lock()
+	kinds := map[string]bool{}
+	for _, cp := range checkpoints.saved {
+		kinds[cp.Kind] = true
+	}
+	checkpoints.mu.Unlock()
+	if !kinds[checkpoint.KindPreCompaction] {
+		t.Fatalf("pre-compaction checkpoint missing: %v", kinds)
+	}
+	if events.count(event.CompactionTriggered) == 0 || events.count(event.CompactionCompleted) == 0 {
+		t.Fatalf("compaction events missing: triggered=%d completed=%d",
+			events.count(event.CompactionTriggered), events.count(event.CompactionCompleted))
+	}
+}
+
+func TestRuntimeCompactionDegradesOnSummarizerFailure(t *testing.T) {
+	rt, stages, events, _ := compactionRuntime(t, &stubSummarizer{err: errors.New("llm timeout")})
+	input := runtimeInput()
+	input.ModelWindow = 1000
+
+	if _, err := rt.Run(context.Background(), input); err != nil {
+		t.Fatalf("degradation must not block the run: %v", err)
+	}
+
+	stages.mu.Lock()
+	inputs := append([]StageRunInput(nil), stages.inputs...)
+	stages.mu.Unlock()
+	hasPlaceholder := false
+	for _, stageInput := range inputs {
+		if strings.Contains(stageInput.Message, "[compacted context]") && strings.Contains(stageInput.Message, "goal:") {
+			hasPlaceholder = true
+		}
+	}
+	if !hasPlaceholder {
+		t.Fatalf("degraded compaction must keep readable five-element placeholder: %+v", inputs)
+	}
+	if events.count(event.CompactionDegraded) == 0 {
+		t.Fatal("compaction.degraded event missing")
+	}
+}
+
+func TestRuntimeCompactionSkippedWhenNoTrigger(t *testing.T) {
+	stages := &stubStages{}
+	rt, _, events, _ := newTestRuntime(stages)
+	input := runtimeInput()
+	input.ModelWindow = 1000
+	if _, err := rt.Run(context.Background(), input); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if events.count(event.CompactionTriggered) != 0 {
+		t.Fatal("no trigger must not emit compaction events")
 	}
 }
