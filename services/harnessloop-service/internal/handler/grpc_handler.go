@@ -200,9 +200,20 @@ func (h *Handler) runInput(tenantID, taskID string) service.RunInput {
 	if model, ok := h.models.Get(h.cfg.Agent.StageModel); ok {
 		window = model.ContextWindow
 	}
+	projectID := ""
+	goal := ""
+	goalHash := ""
+	if task, err := h.tasks.Get(context.Background(), tenantID, taskID); err == nil {
+		projectID = task.ProjectID
+		goal = task.Goal
+		goalHash = task.GoalHash
+	}
 	return service.RunInput{
 		TenantID:         tenantID,
+		ProjectID:        projectID,
 		TaskID:           taskID,
+		Goal:             goal,
+		GoalHash:         goalHash,
 		EntryAgent:       h.cfg.Agent.EntryAgent,
 		StageModel:       h.cfg.Agent.StageModel,
 		ModelWindow:      window,

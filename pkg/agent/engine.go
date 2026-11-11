@@ -692,6 +692,9 @@ func (e *Engine) executeLoop(ctx context.Context, execCtx *ExecutionContext, sta
 
 		// Build tools for this agent
 		tools, err := e.buildAgentTools(ctx, currentAgent)
+		if err == nil && execCtx.StageMode {
+			tools = appendStageFinishTool(ctx, e.tools, tools)
+		}
 		if err != nil {
 			fmt.Printf("[AgentEngine] ERROR build tools: %v\n", err)
 			return nil, fmt.Errorf("build tools: %w", err)
@@ -947,6 +950,10 @@ func (e *Engine) buildAgentMessages(ctx context.Context, agent *Agent, execCtx *
 		systemPrompt += fmt.Sprintf("\n\nCurrent context variables:\n%s", string(varsJSON))
 	}
 
+	if execCtx.StageMode {
+		systemPrompt += "\n\nSTAGE MODE: this run executes exactly one harness stage. You are NOT done until you call the `stage_finish` tool with {attempt_id, stage, summary}. Plain-text completion is treated as no_finish and retried."
+	}
+
 	// Add agent history summary
 	if len(execCtx.AgentHistory) > 0 {
 		systemPrompt += "\n\nPrevious agent actions:\n"
@@ -1103,6 +1110,26 @@ func (e *Engine) writeStepMemory(ctx context.Context, execCtx *ExecutionContext,
 }
 
 // buildAgentTools builds tools available to an agent
+// appendStageFinishTool grants the stage_finish tool in stage mode.
+func appendStageFinishTool(ctx context.Context, executor ToolExecutor, tools []map[string]any) []map[string]any {
+	if executor == nil {
+		return tools
+	}
+	allTools, err := executor.ListTools(ctx)
+	if err != nil || allTools == nil {
+		return tools
+	}
+	def, ok := allTools["stage_finish"]
+	if !ok {
+		return tools
+	}
+	mapped, ok := def.(map[string]any)
+	if !ok {
+		return tools
+	}
+	return append(tools, mapped)
+}
+
 func (e *Engine) buildAgentTools(ctx context.Context, agent *Agent) ([]map[string]any, error) {
 	tools := make([]map[string]any, 0)
 	seen := make(map[string]bool) // dedup tool names across agent + skill sources
@@ -1368,6 +1395,9 @@ func (e *Engine) resumeLoop(ctx context.Context, execCtx *ExecutionContext, star
 		fmt.Printf("[AgentEngine] Built %d messages\n", len(messages))
 
 		tools, err := e.buildAgentTools(ctx, currentAgent)
+		if err == nil && execCtx.StageMode {
+			tools = appendStageFinishTool(ctx, e.tools, tools)
+		}
 		if err != nil {
 			fmt.Printf("[AgentEngine] ERROR build tools: %v\n", err)
 			return nil, fmt.Errorf("build tools: %w", err)
