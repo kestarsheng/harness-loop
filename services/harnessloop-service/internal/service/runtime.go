@@ -245,6 +245,7 @@ func (r *Runtime) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 		stageInput.Message = r.maybeCompact(ctx, in, task, stage, attempt, stageInput.Message, result)
 		stageRes, stageErr := r.Stages.Run(ctx, stageInput)
 		result.Steps++
+		entryReason = fsm.EntryRetry
 		if stageRes == nil {
 			stageRes = &StageRunResult{}
 		}

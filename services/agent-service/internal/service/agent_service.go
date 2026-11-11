@@ -81,7 +81,7 @@ func NewAgentService(registry *agent.Registry, llmClient llm.Client, mcpClient m
 	s.engine = agent.NewEngine(
 		registry,
 		&llmAdapter{client: metricsLLM},
-		&toolAdapter{mcpClient: mcpClient},
+		&stageFinishExecutor{inner: &toolAdapter{mcpClient: mcpClient}},
 		store,
 		agent.DefaultEngineConfig(),
 	)
