@@ -92,6 +92,20 @@ message SearchResult {
     string content = 3;
     double score = 4;
     map<string, string> metadata = 5;
+    repeated SourceRef sources = 6;
+}
+
+// 可定位来源引用
+message SourceRef {
+    string chunk_id = 1;
+    string document_id = 2;
+    string document_name = 3;
+    int32 page_no = 4;
+    string section = 5;
+    double score = 6;
+    double rerank_score = 7;
+    string snippet = 8;
+    string uri = 9;
 }
 
 // 检索响应
