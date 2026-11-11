@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -111,6 +114,9 @@ type Runtime struct {
 	Policy      retry.Policy
 	Now         func() time.Time
 
+	Injector    *MemoryInjector
+	HarnessHome string
+
 	mu                sync.Mutex
 	pubMu             sync.Mutex
 	aborts            map[abortKey]AbortResult
@@ -198,7 +204,7 @@ func (r *Runtime) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 
 		r.saveCheckpoint(ctx, in, task, attempt, checkpoint.KindStageEntry, result)
 
-		stageRes, stageErr := r.Stages.Run(ctx, StageRunInput{
+		stageInput := StageRunInput{
 			TaskID:           in.TaskID,
 			TenantID:         in.TenantID,
 			ProjectID:        in.ProjectID,
@@ -216,7 +222,20 @@ func (r *Runtime) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 			ModelWindow:      in.ModelWindow,
 			RequiresToolCall: in.RequiresToolCall,
 			Timeout:          in.StageTimeout,
-		})
+		}
+		if r.Injector != nil {
+			fallback := &MDFallback{
+				GlobalFile:  r.globalMemoryPath(),
+				ProjectFile: filepath.Join(task.WorkspaceRoot, ".harness", "memory", "project.md"),
+			}
+			if injected, injErr := r.Injector.Inject(ctx, InjectOptions{
+				TenantID: in.TenantID, ProjectID: in.ProjectID, Stage: string(stage),
+				Query: in.Goal, ContextBudget: in.ModelWindow, Fallback: fallback,
+			}); injErr == nil && len(injected.Items) > 0 {
+				stageInput.Message = formatInjectedMessage(injected, stageInput.Message)
+			}
+		}
+		stageRes, stageErr := r.Stages.Run(ctx, stageInput)
 		result.Steps++
 		if stageRes == nil {
 			stageRes = &StageRunResult{}
@@ -495,6 +514,32 @@ func (r *Runtime) publishError(ctx context.Context, in RunInput, stage fsm.Stage
 		ProjectID:     in.ProjectID,
 		Payload:       payload,
 	})
+}
+
+func (r *Runtime) globalMemoryPath() string {
+	home := r.HarnessHome
+	if home == "" {
+		if h, err := os.UserHomeDir(); err == nil {
+			home = filepath.Join(h, ".harness")
+		}
+	}
+	if home == "" {
+		return ""
+	}
+	return filepath.Join(home, "memory", "global.md")
+}
+
+func formatInjectedMessage(injected *InjectResult, base string) string {
+	var b strings.Builder
+	b.WriteString(base)
+	b.WriteString("\n\n[injected memory]\n")
+	for rank, item := range injected.Items {
+		b.WriteString(fmt.Sprintf("[topic=%s file=%s updated=%s score=%.3f rank=%d]\n",
+			item.TopicKey, item.SourceFile, item.UpdatedAt.UTC().Format(time.RFC3339), item.Score, rank+1))
+		b.WriteString(item.Body)
+		b.WriteString("\n")
+	}
+	return b.String()
 }
 
 func (r *Runtime) now() time.Time {

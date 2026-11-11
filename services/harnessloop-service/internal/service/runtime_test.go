@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -13,6 +16,7 @@ import (
 	"agent-platform/pkg/harnessloop/event"
 	"agent-platform/pkg/harnessloop/fsm"
 	"agent-platform/pkg/harnessloop/retry"
+	"agent-platform/pkg/memoryfile"
 	"agent-platform/services/harnessloop-service/internal/repository"
 )
 
@@ -124,15 +128,19 @@ func (m *memAttempts) AttachAcceptance(ctx context.Context, attemptID, acceptanc
 }
 
 type stubStages struct {
-	mu    sync.Mutex
-	calls int
-	fn    func(call int, ctx context.Context) (*StageRunResult, error)
+	mu        sync.Mutex
+	calls     int
+	lastInput StageRunInput
+	inputs    []StageRunInput
+	fn        func(call int, ctx context.Context) (*StageRunResult, error)
 }
 
 func (s *stubStages) Run(ctx context.Context, in StageRunInput) (*StageRunResult, error) {
 	s.mu.Lock()
 	s.calls++
 	call := s.calls
+	s.lastInput = in
+	s.inputs = append(s.inputs, in)
 	s.mu.Unlock()
 	if s.fn != nil {
 		return s.fn(call, ctx)
@@ -535,5 +543,73 @@ func TestRuntimeAcceptanceBeyondLimitFails(t *testing.T) {
 	}
 	if n < 5 {
 		t.Fatalf("expected at least 5 acceptance failures, got %d", n)
+	}
+}
+
+func TestMemoryInjectRuntimePrefix(t *testing.T) {
+	stages := &stubStages{}
+	rt, _, _, _ := newTestRuntime(stages)
+	recaller := &stubRecaller{hits: []MemoryHit{hit("constraint", "long_term_constraint", "禁止使用 mysql", 0.9, true)}}
+	rt.Injector = NewMemoryInjector(recaller, nil)
+	rt.HarnessHome = t.TempDir()
+
+	if _, err := rt.Run(context.Background(), runtimeInput()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	stages.mu.Lock()
+	inputs := append([]StageRunInput(nil), stages.inputs...)
+	stages.mu.Unlock()
+	var injected string
+	for _, input := range inputs {
+		if strings.Contains(input.Message, "[injected memory]") {
+			injected = input.Message
+			break
+		}
+	}
+	if injected == "" {
+		t.Fatalf("runtime must prefix injected memory in at least one stage: %+v", inputs)
+	}
+	for _, meta := range []string{"topic=constraint", "file=project.md", "updated=", "score="} {
+		if !strings.Contains(injected, meta) {
+			t.Fatalf("injected metadata %q missing: %q", meta, injected)
+		}
+	}
+	if !strings.Contains(injected, "禁止使用 mysql") {
+		t.Fatalf("injected body missing: %q", injected)
+	}
+}
+
+func TestMemoryInjectRuntimeDegradesWithoutRecaller(t *testing.T) {
+	workspace := t.TempDir()
+	projectDir := filepath.Join(workspace, ".harness", "memory")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	doc := &memoryfile.Document{
+		SchemaVersion: memoryfile.SchemaVersion, Scope: memoryfile.ScopeProject,
+		UpdatedAt: time.Now().UTC(), OrderVersion: 1,
+		Order: []string{"fact"},
+		Topics: []memoryfile.Topic{{Key: "fact", Title: "事实", Body: "项目使用 PostgreSQL 存储",
+			Meta: memoryfile.Meta{Category: memoryfile.CategoryProjectFact, UpdatedAt: time.Now().UTC()}}},
+	}
+	raw, err := doc.Render()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, "project.md"), raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stages := &stubStages{}
+	rt, _, events, _ := newTestRuntime(stages)
+	rt.Injector = NewMemoryInjector(nil, nil).WithEvents(events)
+	rt.HarnessHome = t.TempDir()
+
+	input := runtimeInput()
+	if _, err := rt.Run(context.Background(), input); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if events.count(event.MemoryIndexDegraded) == 0 {
+		t.Fatal("degrade event must be emitted when recaller is missing")
 	}
 }

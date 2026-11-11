@@ -41,6 +41,10 @@ type Config struct {
 	FeatureFlags struct {
 		File string `yaml:"file"`
 	} `yaml:"feature_flags"`
+	Memory struct {
+		Addr        string `yaml:"addr"`
+		HarnessHome string `yaml:"harness_home"`
+	} `yaml:"memory"`
 	Retry struct {
 		File string `yaml:"file"`
 	} `yaml:"retry"`
@@ -85,6 +89,12 @@ func Load(path string) (Config, error) {
 	}
 	if target := os.Getenv("HARNESSLOOP_AGENT_TARGET"); target != "" {
 		c.Agent.Target = target
+	}
+	if addr := os.Getenv("HARNESSLOOP_MEMORY_ADDR"); addr != "" {
+		c.Memory.Addr = addr
+	}
+	if home := os.Getenv("HARNESSLOOP_HARNESS_HOME"); home != "" {
+		c.Memory.HarnessHome = home
 	}
 	c.Server.Address = normalizeAddress(c.Server.Address, c.Server.Local)
 	return c, nil

@@ -33,3 +33,9 @@ retry:
 
 feature_flags:
   file: "config/harness_loop/features.yaml"
+
+memory:
+  # memory-service gRPC address; empty disables recall and degrades to markdown
+  addr: "memory-service:50003"
+  # long-term memory home; empty uses ~/.harness
+  harness_home: ""
