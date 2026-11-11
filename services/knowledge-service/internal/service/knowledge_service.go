@@ -13,6 +13,7 @@ import (
 	"agent-platform/services/knowledge-service/internal/chunker"
 	"agent-platform/services/knowledge-service/internal/parser"
 	"agent-platform/services/knowledge-service/internal/repository"
+	"agent-platform/services/knowledge-service/internal/rerank"
 )
 
 // KnowledgeService provides knowledge management functionality
@@ -22,6 +23,7 @@ type KnowledgeService struct {
 	docRepo   *repository.DocumentRepository
 	cfg       *config.Config
 	chunker   *chunker.TokenChunker
+	reranker  rerank.Reranker
 }
 
 // NewKnowledgeService creates a new knowledge service
@@ -340,4 +342,105 @@ func (s *KnowledgeService) filterSearchable(ctx context.Context, results []*pb.S
 		out = append(out, r)
 	}
 	return out
+}
+
+func (s *KnowledgeService) SetReranker(r rerank.Reranker) {
+	s.reranker = r
+}
+
+func (s *KnowledgeService) rerankResults(ctx context.Context, query string, results []*pb.SearchResult, topK int) []*pb.SearchResult {
+	if len(results) <= 5 {
+		return results
+	}
+	limit := topK
+	if limit <= 0 || limit > len(results) {
+		limit = len(results)
+	}
+	if s.reranker == nil {
+		return results[:limit]
+	}
+
+	candidates := make([]rerank.Candidate, 0, len(results))
+	for _, r := range results {
+		candidates = append(candidates, rerank.Candidate{
+			ChunkID:    r.ChunkId,
+			DocumentID: r.DocumentId,
+			Content:    r.Content,
+			Score:      r.Score,
+		})
+	}
+	reranked, err := s.reranker.Rerank(ctx, query, candidates, limit)
+	if err != nil {
+		for _, r := range results {
+			if r.Metadata == nil {
+				r.Metadata = map[string]string{}
+			}
+			r.Metadata["rerank"] = "degraded"
+		}
+		return results[:limit]
+	}
+	out := make([]*pb.SearchResult, 0, len(reranked))
+	for _, c := range reranked {
+		for _, r := range results {
+			if r.ChunkId == c.ChunkID {
+				if r.Metadata == nil {
+					r.Metadata = map[string]string{}
+				}
+				r.Metadata["rerank_score"] = fmt.Sprintf("%.2f", c.RerankScore)
+				r.Metadata["rerank"] = "applied"
+				out = append(out, r)
+				break
+			}
+		}
+	}
+	if len(out) == 0 {
+		return results[:limit]
+	}
+	return out
+}
+
+func (s *KnowledgeService) attachSources(ctx context.Context, results []*pb.SearchResult, tenantID string) []*pb.SearchResult {
+	cache := make(map[string]*repository.Document, 4)
+	for _, r := range results {
+		doc, ok := cache[r.DocumentId]
+		if !ok {
+			loaded, err := s.docRepo.GetDocument(ctx, r.DocumentId, tenantID)
+			if err != nil || loaded == nil {
+				continue
+			}
+			cache[r.DocumentId] = loaded
+			doc = loaded
+		}
+		ref := &pb.SourceRef{
+			ChunkId:      r.ChunkId,
+			DocumentId:   r.DocumentId,
+			DocumentName: doc.Filename,
+			Score:        r.Score,
+			Snippet:      truncateSnippet(r.Content, 200),
+			Uri:          fmt.Sprintf("/api/v2/knowledge/documents/%s", r.DocumentId),
+		}
+		if r.Metadata != nil {
+			if v := r.Metadata["rerank_score"]; v != "" {
+				var score float64
+				fmt.Sscanf(v, "%f", &score)
+				ref.RerankScore = score
+			}
+			if v := r.Metadata["page_no"]; v != "" {
+				var page int
+				fmt.Sscanf(v, "%d", &page)
+				ref.PageNo = int32(page)
+			}
+			ref.Section = r.Metadata["section"]
+		}
+		r.Sources = append(r.Sources, ref)
+	}
+	return results
+}
+
+func truncateSnippet(s string, n int) string {
+	runes := []rune(s)
+	if len(runes) <= n {
+		return s
+	}
+	return string(runes[:n]) + "…"
 }

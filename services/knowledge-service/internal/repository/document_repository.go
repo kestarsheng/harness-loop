@@ -220,6 +220,12 @@ func (r *DocumentRepository) DeleteDocument(ctx context.Context, id, tenantID st
 		return fmt.Errorf("delete document: %w", err)
 	}
 
+	// Keep the in-memory BM25 index consistent: a deleted document must never
+	// be returned from keyword search.
+	for _, c := range chunks {
+		r.RemoveBM25Document(c.ID)
+	}
+
 	return nil
 }
 
