@@ -25,22 +25,22 @@ const (
 
 // Episode represents a single episode in episodic memory
 type Episode struct {
-	ID          string                 `json:"id"`
-	SessionID   string                 `json:"session_id"`
-	AgentID     string                 `json:"agent_id"`
-	Type        EpisodeType            `json:"type"`
-	Title       string                 `json:"title"`
-	Description string                 `json:"description"`
-	StartTime   time.Time              `json:"start_time"`
-	EndTime     time.Time              `json:"end_time"`
-	Participants []string              `json:"participants"` // agents, users involved
-	Location    string                 `json:"location"`     // context/location
-	Emotions    map[string]float64     `json:"emotions"`     // emotional context
-	Outcome     string                 `json:"outcome"`      // success, failure, neutral
-	Importance  float64                `json:"importance"`   // 0-1 importance score
-	Metadata    map[string]interface{} `json:"metadata"`
-	Vector      []float64              `json:"vector"`       // embedding for similarity search
-	CreatedAt   time.Time              `json:"created_at"`
+	ID           string                 `json:"id"`
+	SessionID    string                 `json:"session_id"`
+	AgentID      string                 `json:"agent_id"`
+	Type         EpisodeType            `json:"type"`
+	Title        string                 `json:"title"`
+	Description  string                 `json:"description"`
+	StartTime    time.Time              `json:"start_time"`
+	EndTime      time.Time              `json:"end_time"`
+	Participants []string               `json:"participants"` // agents, users involved
+	Location     string                 `json:"location"`     // context/location
+	Emotions     map[string]float64     `json:"emotions"`     // emotional context
+	Outcome      string                 `json:"outcome"`      // success, failure, neutral
+	Importance   float64                `json:"importance"`   // 0-1 importance score
+	Metadata     map[string]interface{} `json:"metadata"`
+	Vector       []float64              `json:"vector"` // embedding for similarity search
+	CreatedAt    time.Time              `json:"created_at"`
 }
 
 // EpisodeSequence represents a sequence of related episodes
@@ -57,10 +57,10 @@ type EpisodeSequence struct {
 
 // Timeline represents a temporal structure for episodes
 type Timeline struct {
-	SessionID string                 `json:"session_id"`
-	Events    []TimelineEvent        `json:"events"`
-	Duration  time.Duration          `json:"duration"`
-	Stats     TimelineStats          `json:"stats"`
+	SessionID string          `json:"session_id"`
+	Events    []TimelineEvent `json:"events"`
+	Duration  time.Duration   `json:"duration"`
+	Stats     TimelineStats   `json:"stats"`
 }
 
 // TimelineEvent represents an event in the timeline
@@ -73,21 +73,21 @@ type TimelineEvent struct {
 
 // TimelineStats represents statistics about the timeline
 type TimelineStats struct {
-	TotalEpisodes   int                    `json:"total_episodes"`
-	ByType          map[EpisodeType]int    `json:"by_type"`
-	AvgDuration     time.Duration          `json:"avg_duration"`
-	SuccessRate     float64                `json:"success_rate"`
-	AvgImportance   float64                `json:"avg_importance"`
+	TotalEpisodes int                 `json:"total_episodes"`
+	ByType        map[EpisodeType]int `json:"by_type"`
+	AvgDuration   time.Duration       `json:"avg_duration"`
+	SuccessRate   float64             `json:"success_rate"`
+	AvgImportance float64             `json:"avg_importance"`
 }
 
 // EpisodicMemory manages episodic memories
 type EpisodicMemory struct {
-	episodes   map[string]*Episode
-	sequences  map[string]*EpisodeSequence
-	bySession  map[string][]string // session -> episode IDs
-	byAgent    map[string][]string // agent -> episode IDs
-	byType     map[EpisodeType][]string
-	mu         sync.RWMutex
+	episodes    map[string]*Episode
+	sequences   map[string]*EpisodeSequence
+	bySession   map[string][]string // session -> episode IDs
+	byAgent     map[string][]string // agent -> episode IDs
+	byType      map[EpisodeType][]string
+	mu          sync.RWMutex
 	maxEpisodes int
 }
 
@@ -368,9 +368,9 @@ func (m *EpisodicMemory) GetStats() map[string]interface{} {
 	defer m.mu.RUnlock()
 
 	stats := map[string]interface{}{
-		"total_episodes": len(m.episodes),
-		"total_sequences": len(m.sequences),
-		"by_type": make(map[EpisodeType]int),
+		"total_episodes":   len(m.episodes),
+		"total_sequences":  len(m.sequences),
+		"by_type":          make(map[EpisodeType]int),
 		"by_session_count": len(m.bySession),
 	}
 

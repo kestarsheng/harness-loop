@@ -13,37 +13,37 @@ import (
 type MessageType string
 
 const (
-	MessageTypeUser      MessageType = "user"
-	MessageTypeAgent     MessageType = "agent"
-	MessageTypeSystem    MessageType = "system"
-	MessageTypeTool      MessageType = "tool"
+	MessageTypeUser       MessageType = "user"
+	MessageTypeAgent      MessageType = "agent"
+	MessageTypeSystem     MessageType = "system"
+	MessageTypeTool       MessageType = "tool"
 	MessageTypeToolResult MessageType = "tool_result"
 )
 
 // Message represents a message in working memory
 type Message struct {
-	ID        string                 `json:"id"`
-	Type      MessageType            `json:"type"`
-	Content   string                 `json:"content"`
-	Role      string                 `json:"role"`       // For LLM: user, assistant, system
-	Summary   string                 `json:"summary"`    // Compressed summary
-	Tokens    int                    `json:"tokens"`     // Estimated token count
-	Importance float64               `json:"importance"` // 0-1 importance score
-	Timestamp time.Time              `json:"timestamp"`
-	Metadata  map[string]interface{} `json:"metadata"`
-	IsKey     bool                   `json:"is_key"`     // Key message to preserve
+	ID         string                 `json:"id"`
+	Type       MessageType            `json:"type"`
+	Content    string                 `json:"content"`
+	Role       string                 `json:"role"`       // For LLM: user, assistant, system
+	Summary    string                 `json:"summary"`    // Compressed summary
+	Tokens     int                    `json:"tokens"`     // Estimated token count
+	Importance float64                `json:"importance"` // 0-1 importance score
+	Timestamp  time.Time              `json:"timestamp"`
+	Metadata   map[string]interface{} `json:"metadata"`
+	IsKey      bool                   `json:"is_key"` // Key message to preserve
 }
 
 // WorkingMemoryContext represents the current working memory context
 type WorkingMemoryContext struct {
-	SessionID     string    `json:"session_id"`
-	Messages      []Message `json:"messages"`
-	TotalTokens   int       `json:"total_tokens"`
-	MaxTokens     int       `json:"max_tokens"`      // Maximum tokens allowed
-	KeyMessages   []string  `json:"key_messages"`    // IDs of key messages to preserve
+	SessionID      string    `json:"session_id"`
+	Messages       []Message `json:"messages"`
+	TotalTokens    int       `json:"total_tokens"`
+	MaxTokens      int       `json:"max_tokens"`   // Maximum tokens allowed
+	KeyMessages    []string  `json:"key_messages"` // IDs of key messages to preserve
 	LastCompressed time.Time `json:"last_compressed"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 // CompressionStrategy defines how to compress memory
@@ -51,18 +51,18 @@ type CompressionStrategy string
 
 const (
 	CompressionStrategyNone      CompressionStrategy = "none"
-	CompressionStrategySummary   CompressionStrategy = "summary"    // Summarize old messages
+	CompressionStrategySummary   CompressionStrategy = "summary"   // Summarize old messages
 	CompressionStrategySelective CompressionStrategy = "selective" // Keep important messages
 	CompressionStrategyHybrid    CompressionStrategy = "hybrid"    // Combine strategies
 )
 
 // WorkingMemory manages current conversation context
 type WorkingMemory struct {
-contexts     map[string]*WorkingMemoryContext
-	llmClient   LLMCompressor    // Interface for LLM-based compression
+	contexts    map[string]*WorkingMemoryContext
+	llmClient   LLMCompressor // Interface for LLM-based compression
 	strategy    CompressionStrategy
-	maxTokens   int              // Default max tokens
-	maxMessages int              // Max messages per context
+	maxTokens   int // Default max tokens
+	maxMessages int // Max messages per context
 	mu          sync.RWMutex
 }
 
@@ -81,7 +81,7 @@ func NewWorkingMemory(maxTokens, maxMessages int) *WorkingMemory {
 		maxMessages = 100
 	}
 	return &WorkingMemory{
-	contexts:     make(map[string]*WorkingMemoryContext),
+		contexts:    make(map[string]*WorkingMemoryContext),
 		strategy:    CompressionStrategyHybrid,
 		maxTokens:   maxTokens,
 		maxMessages: maxMessages,
@@ -319,13 +319,13 @@ func (w *WorkingMemory) compressBySummary(wmCtx *WorkingMemoryContext) {
 		if err == nil && summary != "" {
 			// Replace compressed messages with summary
 			summaryMsg := Message{
-				ID:        generateMessageID(),
-				Type:      MessageTypeSystem,
-				Content:   summary,
-				Summary:   summary,
-				Tokens:    estimateTokens(summary),
+				ID:         generateMessageID(),
+				Type:       MessageTypeSystem,
+				Content:    summary,
+				Summary:    summary,
+				Tokens:     estimateTokens(summary),
 				Importance: 0.8,
-				Timestamp: time.Now(),
+				Timestamp:  time.Now(),
 			}
 
 			// Recalculate total tokens
@@ -416,13 +416,13 @@ func (w *WorkingMemory) compressByHybrid(wmCtx *WorkingMemoryContext) {
 		summary, err := w.llmClient.Compress(ctx, toSummarize)
 		if err == nil && summary != "" {
 			summaryMsg := Message{
-				ID:        generateMessageID(),
-				Type:      MessageTypeSystem,
-				Content:   summary,
-				Summary:   summary,
-				Tokens:    estimateTokens(summary),
+				ID:         generateMessageID(),
+				Type:       MessageTypeSystem,
+				Content:    summary,
+				Summary:    summary,
+				Tokens:     estimateTokens(summary),
 				Importance: 0.7,
-				Timestamp: time.Now(),
+				Timestamp:  time.Now(),
 			}
 			toKeep = append([]Message{summaryMsg}, toKeep...)
 		}
@@ -468,10 +468,10 @@ func (w *WorkingMemory) GetStats() map[string]interface{} {
 
 	for sessionID, ctx := range w.contexts {
 		stats["contexts"].(map[string]interface{})[sessionID] = map[string]interface{}{
-			"message_count":  len(ctx.Messages),
-			"total_tokens":   ctx.TotalTokens,
-			"usage_percent":  float64(ctx.TotalTokens) / float64(ctx.MaxTokens) * 100,
-			"key_messages":   len(ctx.KeyMessages),
+			"message_count":   len(ctx.Messages),
+			"total_tokens":    ctx.TotalTokens,
+			"usage_percent":   float64(ctx.TotalTokens) / float64(ctx.MaxTokens) * 100,
+			"key_messages":    len(ctx.KeyMessages),
 			"last_compressed": ctx.LastCompressed,
 		}
 	}
@@ -506,12 +506,12 @@ func estimateTokens(content string) int {
 	}
 
 	englishTokens := englishChars / 4
-	if englishChars % 4 > 0 {
+	if englishChars%4 > 0 {
 		englishTokens++
 	}
 
 	chineseTokens := chineseChars / 2
-	if chineseChars % 2 > 0 {
+	if chineseChars%2 > 0 {
 		chineseTokens++
 	}
 

@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"agent-platform/pkg/llm"
-	pb "agent-platform/pkg/pb/memory"
 	commonpb "agent-platform/pkg/pb/common"
+	pb "agent-platform/pkg/pb/memory"
 	"agent-platform/services/memory-service/internal/repository"
 )
 
@@ -67,8 +67,8 @@ func (s *MemoryService) Save(ctx context.Context, req *pb.SaveMemoryRequest) (*p
 	}
 
 	return &pb.SaveMemoryResponse{
-		Id:         memory.ID,
-		CreatedAt:  memory.CreatedAt.Unix(),
+		Id:        memory.ID,
+		CreatedAt: memory.CreatedAt.Unix(),
 	}, nil
 }
 
@@ -101,8 +101,8 @@ func (s *MemoryService) SaveBatch(ctx context.Context, req *pb.SaveMemoryBatchRe
 	}
 
 	return &pb.SaveMemoryBatchResponse{
-		Ids:        ids,
-		CreatedAt:  now.Unix(),
+		Ids:       ids,
+		CreatedAt: now.Unix(),
 	}, nil
 }
 
