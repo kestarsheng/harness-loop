@@ -805,16 +805,16 @@
 | 验收标准 | `go test ./pkg/pgindex/... -run TestMigrateAll`：空库一次迁移成功、重复迁移无变更；关闭新索引开关后旧路径可用；打开后新数据仅在新索引可查；`schema_migrations` 版本连续。 |
 | 复杂度 | M |
 
-### T-P1-31 多 Agent 编排接入 runtime 与事件发布
+### T-P1-31 编排与模型策略接入 runtime 及事件发布
 
 | 字段 | 内容 |
 |---|---|
-| 目标 | 把 orchestrator 的 DAG 规划、调度、handoff 与汇聚接入 harnessloop-service 运行时，并让编排事件真正写入事件仓储。 |
-| 关联需求 | REQ-123、REQ-125~134、REQ-139；design 4.13 |
-| 依赖 | T-P1-18、T-P1-19、T-P1-20、T-P1-21、T-P0-09、T-P0-17 |
-| 涉及文件 | [N] `services/harnessloop-service/internal/service/orchestrator_bridge.go`、[N] `pkg/harnessloop/orchestrator/publisher_emitter.go`、[M] `pkg/harnessloop/event/types.go`、[M] `services/harnessloop-service/internal/service/runtime.go`、[N] `services/harnessloop-service/internal/service/orchestrator_bridge_test.go` |
-| 实施要点 | 1) 新增生产 Emitter：把 `orchestrator.Event` 转为 `event.Event`，复用既有 Publisher 分配 seq，不允许各组件自行生成 seq；2) `event/types.go` 的 `knownTypes` 补 `subtask.*`、`handoff.*`、`aggregation.*` 类型，保证 `IsKnownType` 通过；3) runtime 在 b 阶段调用 planner 产出 DAG，c/d 阶段用 scheduler 调度子任务，d 阶段先走汇聚再用汇聚报告作为验收必填输入；4) 编排特性开关默认关闭，关闭时完全走现有单 Agent 路径且功能不退化；5) 事件按 tenant/task 隔离，跨租户拒绝仍走 `security.violation`。 |
-| 验收标准 | `go test ./services/harnessloop-service/... -run TestOrchestratorBridge`；真实任务可查到 `subtask.plan_created`、`subtask.queued`、`aggregation.*` 事件且 seq 连续无缺号；关闭特性开关后任务仍按原路径完成；全仓 `go build ./...`、`depcheck` 0 violations。 |
+| 目标 | 把 orchestrator 的 DAG 规划、调度、handoff、汇聚，以及 modelregistry 的模型选择、回退与热更新接入 harnessloop-service 运行时，并让两类事件真正写入事件仓储。 |
+| 关联需求 | REQ-123、REQ-125~134、REQ-139、REQ-143~155；design 4.13 / 4.14 |
+| 依赖 | T-P1-18、T-P1-19、T-P1-20、T-P1-21、T-P1-23、T-P1-24、T-P0-09、T-P0-17 |
+| 涉及文件 | [N] `services/harnessloop-service/internal/service/orchestrator_bridge.go`、[N] `services/harnessloop-service/internal/service/model_bridge.go`、[N] `pkg/harnessloop/orchestrator/publisher_emitter.go`、[M] `pkg/harnessloop/event/types.go`、[M] `services/harnessloop-service/internal/service/runtime.go`、[M] `services/harnessloop-service/cmd/main.go`、[N] `services/harnessloop-service/internal/service/orchestrator_bridge_test.go`、[N] `services/harnessloop-service/internal/service/model_bridge_test.go` |
+| 实施要点 | 1) 新增生产 Emitter：把 `orchestrator.Event` 与 `modelregistry.ModelEvent` 统一转为 `event.Event`，复用既有 Publisher 分配 seq，不允许各组件自行生成 seq；2) `event/types.go` 的 `knownTypes` 补 `subtask.*`、`handoff.*`、`aggregation.*`、`model.selected`、`model.recovered`、`model.config_applied` 类型，保证 `IsKnownType` 通过；3) runtime 在 b 阶段调用 planner 产出 DAG，c/d 阶段用 scheduler 调度子任务，d 阶段先走汇聚再用汇聚报告作为验收必填输入；4) runtime 每阶段经 `Selector` 选模型、失败走 `FallbackChain`，进入新阶段必须调用 `ResetStage`，热更新由 `HotReloader` 驱动并替换 Registry 快照；5) `SelectionRecorder` 落 `hlp_task.model_selections`，`ModelEvent` 与编排事件共用同一发布通道；6) 编排与模型策略各自有特性开关且默认关闭，关闭时完全走现有单 Agent/静态模型路径且功能不退化；7) 事件按 tenant/task 隔离，跨租户拒绝仍走 `security.violation`。 |
+| 验收标准 | `go test ./services/harnessloop-service/... -run "TestOrchestratorBridge|TestModelBridge"`；真实任务可查到 `subtask.plan_created`、`subtask.queued`、`aggregation.*` 与 `model.selected` 事件且 seq 连续无缺号；`model_selections` 有对应阶段行；进入新阶段后回退计数归零；热更新后新任务使用新配置、运行中任务不切换；关闭特性开关后任务仍按原路径完成；全仓 `go build ./...`、`depcheck` 0 violations。 |
 | 复杂度 | L |
 
 ### T-P1-T1 记忆 LRU 与原子写测试
@@ -1147,7 +1147,7 @@ flowchart LR
   S18 --> TT5[T-P1-T5]
   MR24 --> TT5
   POL26 --> TT5
-  S18 --> X31[T-P1-31 接入runtime]
+  S18 --> X31[T-P1-31 接入runtime+模型]
   S19 --> X31
   G21 --> X31
   MR24 --> X31
