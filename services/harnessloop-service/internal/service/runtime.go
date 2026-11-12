@@ -119,7 +119,7 @@ type Runtime struct {
 	Injector    *MemoryInjector
 	HarnessHome string
 
-	Models *ModelBridge
+	Models       *ModelBridge
 	Orchestrator *OrchestratorBridge
 
 	CompactionTrigger    *compaction.Trigger
@@ -225,6 +225,7 @@ func (r *Runtime) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 
 		stageInput := StageRunInput{
 			TaskID:           in.TaskID,
+			WorkspaceRoot:    task.WorkspaceRoot,
 			TenantID:         in.TenantID,
 			ProjectID:        in.ProjectID,
 			SessionID:        in.SessionID,
@@ -277,6 +278,16 @@ func (r *Runtime) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 		}
 
 		if stageErr != nil || stageRes.Decision.Action != retry.ActionDone {
+			if stageErr != nil && stageRes.Decision.Action == retry.ActionFail {
+				category := retry.System
+				lastErr := stageRes.Decision.Reason
+				if stageRes.Classification != nil {
+					category = stageRes.Classification.Category
+					lastErr = stageRes.Classification.Reason
+				}
+				r.publishError(ctx, in, stage, attempt, category, lastErr)
+				return r.finalize(ctx, in, result, ReasonFailed, stage, string(stage), string(category), 0, lastErr, task.Version)
+			}
 			category := retry.System
 			lastErr := "stage did not finish"
 			if stageRes.Classification != nil {

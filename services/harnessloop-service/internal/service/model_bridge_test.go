@@ -183,7 +183,6 @@ func TestModelBridgeStageReset(t *testing.T) {
 	}
 }
 
-
 func TestModelBridgeHotReloadSwapsSnapshot(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "models.yaml")

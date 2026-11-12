@@ -167,6 +167,14 @@ func main() {
 		log.Printf("harnessloop: orchestrator bridge enabled (subtask executor not wired, see T-P1-31)")
 	}
 
+	policyBridge := service.NewPolicyBridge(flagDefault(flags, config.FlagPolicyResolverEnabled), policyEngine, repository.NewAuditRepo(db), emitter, nil)
+	if sr, ok := stages.(*service.StageRunner); ok {
+		sr.WithToolGate(policyBridge)
+	}
+	if policyBridge.Enabled() {
+		log.Printf("harnessloop: policy resolver bridge enabled (approval gate not configured, high-risk calls stay pending)")
+	}
+
 	if os.Getenv("HARNESSLOOP_COMPACTION_ENABLED") != "false" {
 		compactionCfg, compErr := compaction.LoadConfig("")
 		if compErr != nil {
@@ -200,17 +208,18 @@ func main() {
 	log.Printf("harnessloop: acceptance verifier is program-only in P0 (no model verifier wired yet)")
 
 	h := handler.New(handler.Deps{
-		Config:      cfg,
-		Tasks:       taskRepo,
-		Attempts:    attemptRepo,
-		Events:      eventRepo,
-		Checkpoints: checkpointRepo,
-		Acceptances: acceptanceRepo,
-		Runtime:     runtime,
-		Policy:      policyEngine,
-		Models:      models,
-		Publisher:   publisher,
-		Flags:       flags,
+		Config:       cfg,
+		Tasks:        taskRepo,
+		Attempts:     attemptRepo,
+		Events:       eventRepo,
+		Checkpoints:  checkpointRepo,
+		Acceptances:  acceptanceRepo,
+		Runtime:      runtime,
+		Policy:       policyEngine,
+		PolicyBridge: policyBridge,
+		Models:       models,
+		Publisher:    publisher,
+		Flags:        flags,
 	})
 
 	lis, err := net.Listen("tcp", cfg.ListenAddress())
