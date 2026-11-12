@@ -119,6 +119,9 @@ type Runtime struct {
 	Injector    *MemoryInjector
 	HarnessHome string
 
+	Models *ModelBridge
+	Orchestrator *OrchestratorBridge
+
 	CompactionTrigger    *compaction.Trigger
 	CompactionSummarizer compaction.Summarizer
 	CompactionLimits     compaction.DegradeLimits
@@ -180,6 +183,7 @@ func (r *Runtime) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 	if maxSteps <= 0 {
 		maxSteps = 200
 	}
+	modelStage := ""
 
 	for step := 0; step < maxSteps; step++ {
 		select {
@@ -209,6 +213,14 @@ func (r *Runtime) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 		task.AttemptNo[string(stage)] = attemptNo
 		task.Version++
 
+		if r.Models != nil && r.Models.Enabled() && modelStage != string(stage) {
+			r.Models.OnStageEnter(ModelStageContext{
+				TenantID: in.TenantID, ProjectID: in.ProjectID, TaskID: in.TaskID,
+				Stage: string(stage), AttemptNo: attemptNo,
+			})
+			modelStage = string(stage)
+		}
+
 		r.saveCheckpoint(ctx, in, task, attempt, checkpoint.KindStageEntry, result)
 
 		stageInput := StageRunInput{
@@ -229,6 +241,20 @@ func (r *Runtime) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 			ModelWindow:      in.ModelWindow,
 			RequiresToolCall: in.RequiresToolCall,
 			Timeout:          in.StageTimeout,
+		}
+		if r.Models != nil && r.Models.Enabled() {
+			choice, modelErr := r.Models.SelectForStage(ctx, ModelStageRequest{
+				ModelStageContext: ModelStageContext{
+					TenantID: in.TenantID, ProjectID: in.ProjectID, TaskID: in.TaskID,
+					Stage: string(stage), AttemptNo: attemptNo,
+				},
+				RequireToolCall:  in.RequiresToolCall,
+				TaskBudgetTokens: task.BudgetTokens,
+			})
+			if modelErr == nil && choice != nil {
+				stageInput.StageModel = choice.ModelID
+				stageInput.ModelWindow = choice.Window
+			}
 		}
 		if r.Injector != nil {
 			fallback := &MDFallback{
@@ -263,6 +289,12 @@ func (r *Runtime) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 			}
 			decision := budget.RecordError(category, retry.FixedJitter)
 			r.publishError(ctx, in, stage, attempt, category, lastErr)
+			if r.Models != nil && r.Models.Enabled() {
+				r.Models.ObserveStageFailure(ModelStageContext{
+					TenantID: in.TenantID, ProjectID: in.ProjectID, TaskID: in.TaskID,
+					Stage: string(stage), AttemptNo: attemptNo,
+				}, stageInput.StageModel, modelFailureKind(category))
+			}
 			result.Category = category
 			result.LastError = lastErr
 			if decision.Terminal {
@@ -274,6 +306,7 @@ func (r *Runtime) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 		if err := r.Attempts.Finish(ctx, attempt.AttemptID, r.now()); err != nil {
 			return nil, fmt.Errorf("runtime: finish attempt: %w", err)
 		}
+		r.runOrchestration(ctx, in, task.WorkspaceRoot, stage, attempt, stageRes)
 
 		verdict := r.evaluate(ctx, in, stage, attempt, stageRes)
 		attempt.AcceptanceID = verdict.AcceptanceID
@@ -405,6 +438,37 @@ func (r *Runtime) finalize(ctx context.Context, in RunInput, res *RunResult, rea
 	res.RetryCount = retries
 	res.LastError = lastErr
 	return res, nil
+}
+
+// runOrchestration bridges b/c/d stage completion into the orchestration layer.
+// It is best-effort: a plan that cannot be parsed or a missing executor never
+// aborts the parent stage, preserving the pre-flag behaviour.
+func (r *Runtime) runOrchestration(ctx context.Context, in RunInput, workspaceRoot string, stage fsm.Stage, attempt fsm.Attempt, res *StageRunResult) {
+	if r.Orchestrator == nil || !r.Orchestrator.Enabled() || res == nil {
+		return
+	}
+	ec := OrchestratorStageContext{
+		TenantID: in.TenantID, ProjectID: in.ProjectID, TaskID: in.TaskID,
+		Stage: string(stage), AttemptNo: attempt.AttemptNo, WorkspaceRoot: workspaceRoot,
+	}
+	timeout := in.StageTimeout
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	runCtx, cancel := context.WithTimeout(ctx, orchestrationTimeout(timeout))
+	defer cancel()
+	switch stage {
+	case fsm.StagePlan:
+		raw := []byte(res.Content)
+		if len(raw) == 0 {
+			raw = []byte(res.FinishArgs.Summary)
+		}
+		_, _ = r.Orchestrator.PlanBStage(runCtx, ec, raw)
+	case fsm.StageExecute:
+		_, _ = r.Orchestrator.DispatchCStage(runCtx, ec)
+	case fsm.StageVerify:
+		_, _ = r.Orchestrator.AggregateDStage(runCtx, ec)
+	}
 }
 
 func (r *Runtime) evaluate(ctx context.Context, in RunInput, stage fsm.Stage, attempt fsm.Attempt, out *StageRunResult) acceptance.Verdict {

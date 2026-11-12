@@ -23,6 +23,7 @@ import (
 	"agent-platform/pkg/harnessloop/compaction"
 	"agent-platform/pkg/harnessloop/event"
 	"agent-platform/pkg/harnessloop/modelregistry"
+	"agent-platform/pkg/harnessloop/orchestrator"
 	"agent-platform/pkg/harnessloop/policy"
 	"agent-platform/pkg/harnessloop/policy/sandbox"
 	"agent-platform/pkg/harnessloop/retry"
@@ -149,6 +150,23 @@ func main() {
 	runtime.Injector = service.NewMemoryInjector(recaller, nil).WithEvents(publisher)
 	runtime.HarnessHome = cfg.Memory.HarnessHome
 
+	emitter := orchestrator.NewPublisherEmitter(publisher, orchestrator.EmitContext{TenantID: "platform", ProjectID: "platform"})
+	modelBridge := service.NewModelBridge(flagDefault(flags, config.FlagModelStrategyEnabled), models, "", repository.NewModelSelectionRepo(db), emitter)
+	runtime.Models = modelBridge
+	if modelBridge.Enabled() {
+		if hot := modelBridge.StartHotReload(rootCtx, cfg.Models.File, modelregistry.DefaultReloadInterval, "system", service.ModelStageContext{
+			TenantID: "platform", ProjectID: "platform", TaskID: "model-registry",
+		}); hot != nil {
+			log.Printf("harnessloop: model hot reload enabled: %s", hot.Path())
+		}
+		log.Printf("harnessloop: model strategy bridge enabled")
+	}
+	orchestratorBridge := service.NewOrchestratorBridge(flagDefault(flags, config.FlagOrchestratorEnabled), emitter, nil)
+	runtime.Orchestrator = orchestratorBridge
+	if orchestratorBridge.Enabled() {
+		log.Printf("harnessloop: orchestrator bridge enabled (subtask executor not wired, see T-P1-31)")
+	}
+
 	if os.Getenv("HARNESSLOOP_COMPACTION_ENABLED") != "false" {
 		compactionCfg, compErr := compaction.LoadConfig("")
 		if compErr != nil {
@@ -250,6 +268,17 @@ func (r modelWindowResolver) ContextWindow(model string) (int, bool) {
 		return 0, false
 	}
 	return m.ContextWindow, true
+}
+
+func flagDefault(flags *config.FlagSet, name string) bool {
+	if flags == nil {
+		return false
+	}
+	flag, ok := flags.Get(name)
+	if !ok {
+		return false
+	}
+	return flag.Default
 }
 
 func buildPolicy(cfg config.Config) (*policy.Engine, error) {
