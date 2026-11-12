@@ -13,9 +13,9 @@ type autoAcceptor struct {
 	seen []string
 }
 
-func (a *autoAcceptor) Execute(_ context.Context, st *subtask.Subtask) error {
+func (a *autoAcceptor) Execute(_ context.Context, _ OrchestratorStageContext, st *subtask.Subtask) (*SubtaskResult, error) {
 	a.seen = append(a.seen, st.SubtaskID)
-	return nil
+	return &SubtaskResult{AcceptanceID: "acc-" + st.SubtaskID, Conclusion: "done-" + st.SubtaskID}, nil
 }
 
 func newTestOrchestratorBridge() (*OrchestratorBridge, *modelEventSink, *autoAcceptor) {

@@ -161,10 +161,14 @@ func main() {
 		}
 		log.Printf("harnessloop: model strategy bridge enabled")
 	}
-	orchestratorBridge := service.NewOrchestratorBridge(flagDefault(flags, config.FlagOrchestratorEnabled), emitter, nil)
+	orchestratorBridge := service.NewOrchestratorBridge(flagDefault(flags, config.FlagOrchestratorEnabled), emitter, subtaskExecutor(agentClient, cfg))
 	runtime.Orchestrator = orchestratorBridge
 	if orchestratorBridge.Enabled() {
-		log.Printf("harnessloop: orchestrator bridge enabled (subtask executor not wired, see T-P1-31)")
+		if agentClient != nil {
+			log.Printf("harnessloop: orchestrator bridge enabled (subtask executor -> %s)", cfg.Agent.Target)
+		} else {
+			log.Printf("harnessloop: orchestrator bridge enabled without agent-service (subtasks will not execute)")
+		}
 	}
 
 	policyBridge := service.NewPolicyBridge(flagDefault(flags, config.FlagPolicyResolverEnabled), policyEngine, repository.NewAuditRepo(db), emitter, nil)
@@ -288,6 +292,17 @@ func flagDefault(flags *config.FlagSet, name string) bool {
 		return false
 	}
 	return flag.Default
+}
+
+func subtaskExecutor(client *harnessclient.Client, cfg config.Config) service.SubtaskExecutor {
+	if client == nil {
+		return nil
+	}
+	return service.NewAgentSubtaskExecutor(client, service.SubtaskExecutorConfig{
+		EntryAgent: cfg.Agent.EntryAgent,
+		Model:      cfg.Agent.StageModel,
+		Timeout:    time.Duration(cfg.Agent.TimeoutSeconds) * time.Second,
+	})
 }
 
 func buildPolicy(cfg config.Config) (*policy.Engine, error) {
