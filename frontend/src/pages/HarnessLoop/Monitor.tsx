@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { Alert, Button, Segmented, Space, Tag, Tooltip, Typography } from 'antd';
 import {
   ApiOutlined,
   DisconnectOutlined,
+  PartitionOutlined,
   ReloadOutlined,
   SyncOutlined,
 } from '@ant-design/icons';
@@ -78,6 +80,7 @@ function mergeTaskViews(
 }
 
 export default function Monitor() {
+  const navigate = useNavigate();
   const [eventStates, setEventStates] = useState<Record<string, TaskRuntimeState>>({});
   const [now, setNow] = useState(() => Date.now());
   const [streamStatus, setStreamStatus] = useState<StreamStatus>('closed');
@@ -379,6 +382,19 @@ export default function Monitor() {
             operating={operating}
             onAction={handleAction}
           />
+
+          <Button
+            block
+            icon={<PartitionOutlined />}
+            disabled={!selectedTaskId}
+            onClick={() => {
+              if (selectedTaskId) {
+                navigate(`/harness-loop/tasks/${encodeURIComponent(selectedTaskId)}`);
+              }
+            }}
+          >
+            子任务 / DAG 详情（mock 未联调）
+          </Button>
         </div>
       </div>
 

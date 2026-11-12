@@ -36,6 +36,37 @@ export interface CheckpointListResponse {
   checkpoints: unknown[];
 }
 
+export interface SubtaskListResponse {
+  subtasks: unknown[];
+}
+
+export interface ModelSelectionListResponse {
+  selections: unknown[];
+}
+
+export interface HandoffListResponse {
+  handoffs: unknown[];
+}
+
+/**
+ * 本轮数据源未实现：proto 无 ListSubtasks / ListModelSelections / handoff 查询，
+ * Gateway 也没有 subtasks、model-selections、handoff 路由。
+ * 保留函数签名并显式抛错，避免调用方误以为拿到真实空列表。
+ */
+export class ApiNotImplementedError extends Error {
+  readonly feature: string;
+
+  constructor(feature: string) {
+    super(`harness-loop: ${feature} 数据源未实现（未联调）`);
+    this.name = 'ApiNotImplementedError';
+    this.feature = feature;
+  }
+}
+
+function notImplemented<T>(feature: string): Promise<T> {
+  return Promise.reject(new ApiNotImplementedError(feature));
+}
+
 const arrayAwareParams = {
   indexes: null as null,
 };
@@ -75,6 +106,22 @@ export const harnessLoopApi = {
     getData<CheckpointListResponse>(`${BASE}/checkpoints`, {
       params: { task_id: params.task_id, limit: params.limit ?? 20 },
     }),
+
+  // 预留：后端尚无对应 RPC / Gateway 路由，调用即抛 ApiNotImplementedError。
+  listSubtasks: (taskId: string): Promise<SubtaskListResponse> => {
+    void taskId;
+    return notImplemented<SubtaskListResponse>('ListSubtasks');
+  },
+
+  listModelSelections: (taskId: string): Promise<ModelSelectionListResponse> => {
+    void taskId;
+    return notImplemented<ModelSelectionListResponse>('ListModelSelections');
+  },
+
+  listHandoffs: (taskId: string): Promise<HandoffListResponse> => {
+    void taskId;
+    return notImplemented<HandoffListResponse>('handoff 查询');
+  },
 
   pauseTask: (taskId: string, reason?: string) =>
     client.post(`${BASE}/tasks/${encodeURIComponent(taskId)}/pause`, { confirm: true, reason }),
