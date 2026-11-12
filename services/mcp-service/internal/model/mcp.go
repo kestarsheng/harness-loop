@@ -3,9 +3,10 @@ package model
 
 // Tool represents an MCP tool
 type Tool struct {
-	Name        string
-	Description string
-	InputSchema string
+	Name           string
+	Description    string
+	InputSchema    string
+	PermissionTags []string
 }
 
 // Resource represents an MCP resource

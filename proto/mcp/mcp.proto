@@ -11,6 +11,7 @@ message Tool {
     string name = 1;
     string description = 2;
     string input_schema = 3;
+    repeated string permission_tags = 4;
 }
 
 // 资源定义

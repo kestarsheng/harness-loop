@@ -306,6 +306,52 @@ func (s *MCPService) registerBuiltInTools() {
 	// security") and the project has decided not to ship code execution. Leaving
 	// it registered wastes an agent turn: the model calls it, then discovers it
 	// does nothing. The implementation stays in tools.go for future use.
+
+	// Every built-in tool must carry permission tags so that callers can map
+	// tools onto role and stage constraints. Unclassified tools keep an empty
+	// tag set and are rejected by the caller with E_TOOL_TAG_MISSING.
+	for name, tool := range s.tools {
+		if len(tool.PermissionTags) == 0 {
+			tool.PermissionTags = builtinPermissionTags(name)
+			s.tools[name] = tool
+		}
+	}
+}
+
+// builtinPermissionTags maps a built-in tool name to its governance tags.
+// Tools without an explicit entry fall back to a name-prefix heuristic.
+func builtinPermissionTags(name string) []string {
+	if tags, ok := explicitPermissionTags[name]; ok {
+		return append([]string(nil), tags...)
+	}
+	switch {
+	case strings.HasPrefix(name, "browser_"):
+		return []string{"net.read"}
+	case strings.Contains(name, "write"), strings.Contains(name, "publish"):
+		return []string{"fs.write"}
+	case strings.Contains(name, "command"), strings.Contains(name, "exec"):
+		return []string{"exec"}
+	case strings.Contains(name, "read"), strings.Contains(name, "search"),
+		strings.Contains(name, "fetch"), strings.Contains(name, "list"):
+		return []string{"fs.read"}
+	}
+	return nil
+}
+
+var explicitPermissionTags = map[string][]string{
+	"knowledge_search": {"net.read"},
+	"web_search":       {"net.read"},
+	"calculator":       {"compute"},
+	"weather":          {"net.read"},
+	"browser_execute":  {"net.read", "exec"},
+	"computer_use":     {"exec"},
+	"xhs_read_note":    {"net.read"},
+	"xhs_search":       {"net.read"},
+	"csdn_publish":     {"net.write"},
+	"quick_fetch":      {"net.read"},
+	"time":             {"compute"},
+	"data_analysis":    {"compute"},
+	"visualization":    {"compute"},
 }
 
 // ============================================================
@@ -378,22 +424,33 @@ func (s *MCPService) Connect(ctx context.Context, req *pb.ConnectRequest) (*pb.C
 	conn.Status = "connected"
 	conn.ServerName = serverInfo.Name
 	conn.ServerVersion = serverInfo.Version
-	conn.ToolCount = len(remoteTools)
+
 	s.mcpClients[connID] = client
 
-	// Register remote tools with prefixed names
+	// Register remote tools with prefixed names. Tools whose permission tags
+	// cannot be determined are rejected with E_TOOL_TAG_MISSING rather than
+	// registered, so that governance never sees an untagged tool.
+	rejected := 0
 	for _, rt := range remoteTools {
+		tags := builtinPermissionTags(rt.Name)
+		if len(tags) == 0 {
+			rejected++
+			log.Printf("[MCP] E_TOOL_TAG_MISSING: reject remote tool %q from %s: no permission tags declared", rt.Name, connID)
+			continue
+		}
 		prefixedName := connID + "__" + rt.Name
 		schemaBytes, _ := json.Marshal(rt.InputSchema)
 		s.remoteTools[prefixedName] = remoteToolEntry{
 			Tool: model.Tool{
-				Name:        prefixedName,
-				Description: rt.Description,
-				InputSchema: string(schemaBytes),
+				Name:           prefixedName,
+				Description:    rt.Description,
+				InputSchema:    string(schemaBytes),
+				PermissionTags: tags,
 			},
 			ConnectionID: connID,
 		}
 	}
+	conn.ToolCount = len(remoteTools) - rejected
 	s.mu.Unlock()
 
 	log.Printf("[MCP] Connected to %s (%s v%s), discovered %d tools",
@@ -489,9 +546,10 @@ func (s *MCPService) ListTools(ctx context.Context, req *pb.ListToolsRequest) (*
 			for _, rt := range remoteTools {
 				schemaBytes, _ := json.Marshal(rt.InputSchema)
 				toolList = append(toolList, &pb.Tool{
-					Name:        rt.Name,
-					Description: rt.Description,
-					InputSchema: string(schemaBytes),
+					Name:           rt.Name,
+					Description:    rt.Description,
+					InputSchema:    string(schemaBytes),
+					PermissionTags: builtinPermissionTags(rt.Name),
 				})
 			}
 		}
@@ -501,18 +559,20 @@ func (s *MCPService) ListTools(ctx context.Context, req *pb.ListToolsRequest) (*
 	// Built-in tools
 	for _, tool := range s.tools {
 		toolList = append(toolList, &pb.Tool{
-			Name:        tool.Name,
-			Description: tool.Description,
-			InputSchema: tool.InputSchema,
+			Name:           tool.Name,
+			Description:    tool.Description,
+			InputSchema:    tool.InputSchema,
+			PermissionTags: append([]string(nil), tool.PermissionTags...),
 		})
 	}
 
 	// Remote tools (with prefixed names)
 	for _, entry := range s.remoteTools {
 		toolList = append(toolList, &pb.Tool{
-			Name:        entry.Tool.Name,
-			Description: entry.Tool.Description,
-			InputSchema: entry.Tool.InputSchema,
+			Name:           entry.Tool.Name,
+			Description:    entry.Tool.Description,
+			InputSchema:    entry.Tool.InputSchema,
+			PermissionTags: append([]string(nil), entry.Tool.PermissionTags...),
 		})
 	}
 
