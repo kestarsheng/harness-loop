@@ -2589,7 +2589,12 @@ stage_overrides:                   # 阶段级覆盖（4.14.3）
 **打分公式（可解释、可回归）**：三个子分数都归一到 `[0,1]`，公式固定写入 `selector.go` 并单测锁定：
 
 ```
-cost_eff   = 1 - (price_in*0.7 + price_out*0.3) / max_price_in_candidates   # 越便宜越高
+cost_eff   = 1 - (price_in*0.7 + price_out*0.3) / max_blended_price_in_candidates   # 越便宜越高
+             # 分母取候选集 blended 单价（price_in*0.7 + price_out*0.3）的最大值。
+             # 早期写法误用 max_price_in_candidates：分子是 in/out 加权后的 blended 单价，
+             # 输出单价通常远高于输入单价，按字面会得到 cost_eff < 0（如 qwen-max
+             # in=0.02/out=0.06 → 0.032/0.02 = 1.6 → cost_eff = -0.6），无法归一到 [0,1]。
+             # 实现以 `pkg/harnessloop/modelregistry/selector.go` 的 blendedPrice 为准。
 quality    = 0.5*capability_match + 0.3*window_headroom + 0.2*provider_reliability
 reliability= 1 - recent_error_rate(provider, 1h)                              # 来自 model.fallback/error 计数
 
