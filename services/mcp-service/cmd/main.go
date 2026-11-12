@@ -6,10 +6,13 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 
 	"agent-platform/pkg/computeruse"
 	"agent-platform/pkg/config"
+	"agent-platform/pkg/harnessloop/policy"
+	"agent-platform/pkg/harnessloop/policy/sandbox"
 	"agent-platform/pkg/llm"
 	pb "agent-platform/pkg/pb/mcp"
 	"agent-platform/services/mcp-service/internal/handler"
@@ -55,6 +58,29 @@ func main() {
 
 	// Create MCP service
 	mcpService := service.NewMCPService(llmClient, cfg)
+
+	// Optional cross-service tool enforcement. Off by default so existing
+	// chat/gateway paths keep their behaviour; when enabled, harness stage
+	// calls are evaluated before any tool executor runs.
+	if enabled, _ := strconv.ParseBool(os.Getenv("MCP_TOOL_POLICY_ENFORCED")); enabled {
+		engine := policy.NewEngine()
+		if path := os.Getenv("HARNESS_POLICY_MATRIX_FILE"); path != "" {
+			if matrix, err := policy.LoadMatrix(path); err != nil {
+				log.Printf("MCP tool policy: matrix fallback to defaults: %v", err)
+			} else {
+				engine.Matrix = matrix
+			}
+		}
+		if path := os.Getenv("HARNESS_POLICY_EXEC_ALLOW_FILE"); path != "" {
+			if allow, err := sandbox.LoadExecAllowlist(path); err != nil {
+				log.Printf("MCP tool policy: exec allowlist fallback to defaults: %v", err)
+			} else {
+				engine.ExecAllow = allow
+			}
+		}
+		mcpService.SetToolPolicy(service.NewHarnessToolPolicy(engine))
+		log.Printf("MCP tool policy enforcement enabled (stage matrix + sandbox)")
+	}
 
 	// Create gRPC server
 	server := grpc.NewServer()

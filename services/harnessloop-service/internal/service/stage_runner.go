@@ -30,10 +30,17 @@ const (
 	VarStageModel       = "__stage_model__"
 	VarModelWindow      = "__model_window__"
 	VarRequiresToolCall = "__requires_tool_call__"
+	VarStage            = "__stage__"
+	VarTaskID           = "__task_id__"
+	VarProjectID        = "__project_id__"
+	VarTenantID         = "__tenant_id__"
+	VarWorkspaceRoot    = "__workspace_root__"
+	VarAgentID          = "__agent_id__"
 )
 
 var RequiredContextVars = []string{
 	VarStageMode, VarPolicySnapshot, VarPolicyHash, VarStageModel, VarModelWindow, VarRequiresToolCall,
+	VarStage, VarTaskID, VarProjectID, VarTenantID, VarWorkspaceRoot, VarAgentID,
 }
 
 var ErrStageRunnerInput = errors.New("stage runner: invalid input")
@@ -135,6 +142,12 @@ func (in StageRunInput) contextVars() map[string]string {
 		VarStageModel:       in.StageModel,
 		VarModelWindow:      strconv.Itoa(in.ModelWindow),
 		VarRequiresToolCall: strconv.FormatBool(in.RequiresToolCall),
+		VarStage:            in.Stage,
+		VarTaskID:           in.TaskID,
+		VarProjectID:        in.ProjectID,
+		VarTenantID:         in.TenantID,
+		VarWorkspaceRoot:    in.WorkspaceRoot,
+		VarAgentID:          in.EntryAgent,
 	}
 	if canonical, err := json.Marshal(json.RawMessage(snapshot)); err == nil && len(canonical) > 0 {
 		vars[VarPolicySnapshot] = string(snapshot)

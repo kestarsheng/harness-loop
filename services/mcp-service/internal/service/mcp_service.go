@@ -33,11 +33,12 @@ type MCPService struct {
 	cfg                  *config.Config
 	tools                map[string]model.Tool          // built-in tools
 	toolExec             map[string]tools.Executor      // built-in tool executors
-	connections          map[string]*model.Connection    // connection metadata
-	mcpClients           map[string]*mcp.Client          // connectionID → MCP client
-	remoteTools          map[string]remoteToolEntry      // prefixed name → entry (connID__toolName)
-	governance           *governance.GovernancePipeline  // ★ 治理流水线
-	callCounts           map[string]int                  // ★ 工具调用计数
+	connections          map[string]*model.Connection   // connection metadata
+	mcpClients           map[string]*mcp.Client         // connectionID → MCP client
+	remoteTools          map[string]remoteToolEntry     // prefixed name → entry (connID__toolName)
+	governance           *governance.GovernancePipeline // ★ 治理流水线
+	callCounts           map[string]int                 // ★ 工具调用计数
+	toolPolicy           ToolPolicy                     // ★ CallTool 权限决策单一入口
 	mu                   sync.RWMutex
 	knowledgeServiceAddr string
 	browserServiceAddr   string
@@ -594,6 +595,23 @@ func (s *MCPService) CallTool(ctx context.Context, req *pb.CallToolRequest) (*pb
 			return &pb.CallToolResponse{
 				IsError: true,
 				Content: fmt.Sprintf("输入被护栏拦截: %s", v.Description),
+			}, nil
+		}
+	}
+
+	// ★ Gate 1.5: harness policy preflight. This is the single entry for
+	// cross-service tool enforcement: a denied call never reaches the tool
+	// executor, built-in or remote.
+	s.mu.RLock()
+	toolPolicy := s.toolPolicy
+	s.mu.RUnlock()
+	if toolPolicy != nil {
+		decision := toolPolicy.Authorize(ctx, s.toolPolicyInput(req))
+		if !decision.Allowed {
+			fmt.Printf("[Policy] BLOCKED tool %s: %s (%s)\n", req.Name, decision.Code, decision.Reason)
+			return &pb.CallToolResponse{
+				IsError: true,
+				Content: fmt.Sprintf("工具调用被权限策略拒绝: %s (%s)", decision.Code, decision.Reason),
 			}, nil
 		}
 	}
