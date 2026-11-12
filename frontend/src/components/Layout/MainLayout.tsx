@@ -15,6 +15,7 @@ import {
   BarChartOutlined,
   ApartmentOutlined,
   ThunderboltOutlined,
+  FundProjectionScreenOutlined,
 } from '@ant-design/icons';
 
 const { Header, Sider, Content } = Layout;
@@ -26,6 +27,7 @@ const menuItems = [
   { key: '/agents', icon: <TeamOutlined />, label: 'Agent' },
   { key: '/skills', icon: <ThunderboltOutlined />, label: 'skill' },
   { key: '/harness', icon: <DashboardOutlined />, label: '治理配置' },
+  { key: '/harness-loop/monitor', icon: <FundProjectionScreenOutlined />, label: '任务监控' },
   { key: '/session', icon: <HistoryOutlined />, label: 'Session回放' },
   { key: '/prompt', icon: <CodeOutlined />, label: 'Prompt管理' },
   { key: '/playground', icon: <ExperimentOutlined />, label: 'Playground' },
@@ -41,8 +43,16 @@ export default function MainLayout() {
   const location = useLocation();
   const { token: { colorBgContainer, borderRadiusLG } } = theme.useToken();
 
-  // Match menu item by prefix so /workflow/:id highlights /workflow
-  const selectedKey = menuItems.find(item => location.pathname.startsWith(item.key))?.key ?? location.pathname;
+  // Match the longest menu key on a path-segment boundary so /harness-loop/monitor
+  // is not captured by /harness.
+  const selectedKey =
+    menuItems
+      .filter(
+        (item) =>
+          location.pathname === item.key || location.pathname.startsWith(`${item.key}/`),
+      )
+      .sort((left, right) => right.key.length - left.key.length)[0]?.key ??
+    location.pathname;
 
   return (
     <Layout style={{ height: '100vh' }}>
