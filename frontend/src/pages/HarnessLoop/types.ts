@@ -52,6 +52,34 @@ export const KNOWN_EVENT_TYPES = [
   'tool.started',
   'tool.result',
   'tool.progress',
+  'tool.denied',
+  'subtask.plan_created',
+  'subtask.queued',
+  'subtask.started',
+  'subtask.handoff_waiting',
+  'subtask.accepted',
+  'subtask.rejected',
+  'subtask.failed',
+  'subtask.cancelled',
+  'subtask.circuit_open',
+  'handoff.created',
+  'handoff.accepted',
+  'handoff.rejected',
+  'aggregation.completed',
+  'aggregation.conflict',
+  'model.selected',
+  'model.switched',
+  'model.fallback',
+  'model.capability_rejected',
+  'model.recovered',
+  'model.unavailable',
+  'model.registry_changed',
+  'model.config_applied',
+  'approval.requested',
+  'approval.approved',
+  'approval.rejected',
+  'approval.timeout',
+  'approval.cancelled',
   'error',
   'security.violation',
   'state.rebuild',
@@ -643,6 +671,93 @@ export function reduceTaskState(
       state.toolCalls += 1;
       break;
     case 'tool.progress':
+      break;
+    case 'tool.denied':
+      state.securityViolations += 1;
+      state.errorCount += 1;
+      state.anomalies = pushAnomaly(state, event, String(payload.reason ?? payload.code ?? '工具调用被策略拒绝'));
+      state.lastError = state.anomalies[0];
+      break;
+    case 'subtask.plan_created':
+      if (!isTerminalStatus(state.status)) {
+        state.status = 'running';
+      }
+      break;
+    case 'subtask.queued':
+    case 'subtask.started':
+    case 'subtask.handoff_waiting':
+    case 'subtask.accepted':
+      break;
+    case 'subtask.rejected':
+    case 'subtask.failed':
+    case 'subtask.cancelled':
+      state.anomalies = pushAnomaly(
+        state,
+        event,
+        String(payload.reason ?? payload.category ?? '子任务未完成'),
+      );
+      break;
+    case 'subtask.circuit_open':
+      state.errorCount += 1;
+      state.anomalies = pushAnomaly(
+        state,
+        event,
+        `子任务熔断 ${String(payload.class_key ?? '')}`.trim(),
+      );
+      state.lastError = state.anomalies[0];
+      break;
+    case 'handoff.created':
+    case 'handoff.accepted':
+      break;
+    case 'handoff.rejected':
+      state.anomalies = pushAnomaly(state, event, String(payload.reason ?? '交接被拒绝'));
+      break;
+    case 'aggregation.completed':
+      if (payload.complete === false) {
+        state.anomalies = pushAnomaly(state, event, '父级汇聚未完成');
+      }
+      break;
+    case 'aggregation.conflict':
+      state.errorCount += 1;
+      state.anomalies = pushAnomaly(
+        state,
+        event,
+        `汇聚冲突 ${String(payload.kind ?? '')} ${String(payload.path ?? '')}`.trim(),
+      );
+      state.lastError = state.anomalies[0];
+      break;
+    case 'model.selected':
+    case 'model.switched':
+    case 'model.fallback':
+    case 'model.recovered':
+    case 'model.registry_changed':
+    case 'model.config_applied':
+      break;
+    case 'model.capability_rejected':
+      state.anomalies = pushAnomaly(
+        state,
+        event,
+        String(payload.reason ?? payload.capability ?? '模型能力不满足'),
+      );
+      break;
+    case 'model.unavailable':
+      state.anomalies = pushAnomaly(
+        state,
+        event,
+        `模型不可用 ${String(payload.model_id ?? '')}`.trim(),
+      );
+      break;
+    case 'approval.requested':
+    case 'approval.approved':
+      break;
+    case 'approval.rejected':
+    case 'approval.timeout':
+    case 'approval.cancelled':
+      state.anomalies = pushAnomaly(
+        state,
+        event,
+        String(payload.reason ?? payload.code ?? '审批未通过'),
+      );
       break;
     case 'error':
       state.errorCount += 1;

@@ -130,6 +130,57 @@ describe('reduceSubtaskState', () => {
     expect(cancelledState.nodes['st-api'].status).toBe('cancelled');
   });
 
+  it('归约 plan_created 与 circuit_open：无 subtask_id 也推进 seq', () => {
+    const plan = makeEvent('subtask.plan_created', 1, {
+      parent_task_id: 'task-1',
+      dag_id: 'dag-1',
+      payload: payloadOf({ node_count: 3, subtask_count: 3 }),
+    });
+    let state = reduceSubtaskState(undefined, plan);
+    expect(state.dagId).toBe('dag-1');
+    expect(state.lastEventSeq).toBe(1);
+    expect(state.seenEventIds[plan.event_id]).toBe(1);
+    expect(state.order).toHaveLength(0);
+
+    const circuit = makeEvent('subtask.circuit_open', 2, {
+      payload: payloadOf({ class_key: 'backend/code', failure_rate: 0.8 }),
+    });
+    state = reduceSubtaskState(state, circuit);
+    expect(state.lastEventSeq).toBe(2);
+    expect(state.seenEventIds[circuit.event_id]).toBe(2);
+    expect(state.order).toHaveLength(0);
+  });
+
+  it('归约 handoff_waiting / accepted / rejected', () => {
+    let state = reduceSubtaskState(undefined, queued);
+    state = reduceSubtaskState(state, started);
+
+    const waiting = makeEvent('subtask.handoff_waiting', 3, {
+      subtask_id: 'st-api',
+      dag_id: 'dag-1',
+    });
+    state = reduceSubtaskState(state, waiting);
+    expect(state.nodes['st-api'].status).toBe('running');
+
+    const accepted = makeEvent('subtask.accepted', 4, {
+      subtask_id: 'st-api',
+      dag_id: 'dag-1',
+      payload: payloadOf({ acceptance_id: 'acc-1' }),
+    });
+    state = reduceSubtaskState(state, accepted);
+    expect(state.nodes['st-api'].status).toBe('accepted');
+    expect(state.nodes['st-api'].endedAtMs).toBe(accepted.timestamp_ms);
+
+    const rejected = makeEvent('subtask.rejected', 5, {
+      subtask_id: 'st-api',
+      dag_id: 'dag-1',
+      payload: payloadOf({ reason: '自验未通过' }),
+    });
+    state = reduceSubtaskState(state, rejected);
+    expect(state.nodes['st-api'].status).toBe('failed');
+    expect(state.nodes['st-api'].failureReason).toBe('自验未通过');
+  });
+
   it('忽略非 subtask 事件与缺少 subtask_id 的事件', () => {
     const state = createSubtaskSnapshot('task-1', 'dag-1');
     expect(reduceSubtaskState(state, makeEvent('tool.started', 1))).toBe(state);
@@ -285,6 +336,46 @@ describe('reduceModelUsage', () => {
     expect(ignored).toBe(state);
   });
 
+  it('归约 switched / capability_rejected / unavailable / registry_changed', () => {
+    const selectedByName = makeEvent('model.selected', 1, {
+      stage: 'b',
+      payload: payloadOf({ model_id: 'qwen-plus', tokens: 10 }),
+    });
+    let state = reduceModelUsage(undefined, selectedByName);
+    expect(state.stages.b.model).toBe('qwen-plus');
+    expect(state.modelCalls['qwen-plus']).toBe(1);
+
+    const switched = makeEvent('model.switched', 2, {
+      stage: 'b',
+      payload: payloadOf({ from: 'qwen-plus', to: 'qwen-max', trigger: 'timeout' }),
+    });
+    state = reduceModelUsage(state, switched);
+    expect(state.stages.b.model).toBe('qwen-max');
+
+    state = reduceModelUsage(
+      state,
+      makeEvent('model.capability_rejected', 3, {
+        payload: payloadOf({ capability: 'vision' }),
+      }),
+    );
+    state = reduceModelUsage(
+      state,
+      makeEvent('model.unavailable', 4, {
+        payload: payloadOf({ model_id: 'qwen-turbo', fail_count: 3 }),
+      }),
+    );
+    expect(state.stages.b.model).toBe('qwen-max');
+    expect(state.stages.b.fallbackCount).toBe(0);
+
+    const registry = makeEvent('model.registry_changed', 5, {
+      payload: payloadOf({ version: 'v9', result: 'applied' }),
+    });
+    state = reduceModelUsage(state, registry);
+    expect(state.configVersion).toBe('v9');
+    expect(state.lastEventSeq).toBe(5);
+    expect(state.seenEventIds[registry.event_id]).toBe(5);
+  });
+
   it('重复 event_id 与低 seq 事件不改变状态', () => {
     const state = reduceModelUsage(undefined, selectedA);
     expect(reduceModelUsage(state, selectedA)).toBe(state);
@@ -396,6 +487,54 @@ describe('reducePolicyDenies', () => {
     });
     expect(reducePolicyDenies(state, lowSeq)).toBe(state);
     expect(reducePolicyDenies(state, makeEvent('tool.started', 9))).toBe(state);
+  });
+
+  it('归约 approval.* 并只把拒绝类审批计入拒绝项', () => {
+    let state: PolicyDenyState = createPolicyDenyState();
+
+    const requested = makeEvent('approval.requested', 1, {
+      payload: payloadOf({
+        tool: 'git_push',
+        rule_id: 'permission.approval',
+        code: 'approval_required',
+      }),
+    });
+    state = reducePolicyDenies(state, requested);
+    expect(state.total).toBe(0);
+    expect(state.lastEventSeq).toBe(1);
+    expect(state.seenEventIds[requested.event_id]).toBe(1);
+
+    const approved = makeEvent('approval.approved', 2, {
+      payload: payloadOf({ tool: 'git_push', rule_id: 'permission.approval' }),
+    });
+    state = reducePolicyDenies(state, approved);
+    expect(state.total).toBe(0);
+
+    const rejected = makeEvent('approval.rejected', 3, {
+      payload: payloadOf({ tool: 'git_push', rule_id: 'permission.approval', code: 'E_APPROVAL_REJECTED' }),
+    });
+    state = reducePolicyDenies(state, rejected);
+    expect(state.total).toBe(1);
+    expect(state.items[0].source).toBe('approval.rejected');
+    expect(state.items[0].layer).toBe('approval');
+    expect(state.items[0].reason).toBe('E_APPROVAL_REJECTED');
+
+    state = reducePolicyDenies(
+      state,
+      makeEvent('approval.timeout', 4, {
+        payload: payloadOf({ tool: 'git_push', rule_id: 'permission.approval', code: 'E_APPROVAL_TIMEOUT' }),
+      }),
+    );
+    state = reducePolicyDenies(
+      state,
+      makeEvent('approval.cancelled', 5, {
+        payload: payloadOf({ tool: 'git_push', rule_id: 'permission.approval', code: 'E_APPROVAL_CANCELLED' }),
+      }),
+    );
+
+    expect(state.total).toBe(3);
+    expect(state.byLayer.approval).toBe(3);
+    expect(state.byRule['permission.approval']).toBe(3);
   });
 
   it('summarizeParams 脱敏凭据字段并截断超长参数', () => {
