@@ -29,6 +29,9 @@ CREATE INDEX IF NOT EXISTS idx_model_selection_task_stage
 CREATE INDEX IF NOT EXISTS idx_model_selection_cost
   ON hlp_task.model_selections (tenant_id, project_id, model_id, created_at DESC);
 
+CREATE INDEX IF NOT EXISTS idx_model_selection_combo
+  ON hlp_task.model_selections (stage, model_id);
+
 ALTER TABLE hlp_task.task_runs ADD COLUMN IF NOT EXISTS model_id text;
 ALTER TABLE hlp_task.task_runs ADD COLUMN IF NOT EXISTS model_strategy text;
 ALTER TABLE hlp_task.task_runs ADD COLUMN IF NOT EXISTS model_resolved_reason text;

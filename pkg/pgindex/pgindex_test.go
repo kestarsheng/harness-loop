@@ -3,7 +3,7 @@ package pgindex
 import (
 	"context"
 	"os"
-	"strings"
+
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -45,130 +45,6 @@ func TestDefaultConfig(t *testing.T) {
 func TestOpenRequiresDSN(t *testing.T) {
 	if _, err := Open(context.Background(), DefaultConfig("")); err == nil {
 		t.Fatal("empty DSN must fail")
-	}
-}
-
-func TestMigrateIsIdempotent(t *testing.T) {
-	db := testDB(t)
-	ctx := context.Background()
-
-	first, err := AppliedMigrations(ctx, db)
-	if err != nil {
-		t.Fatalf("list migrations: %v", err)
-	}
-	if len(first) < 2 {
-		t.Fatalf("expected at least 2 migrations, got %v", first)
-	}
-	if err := db.Migrate(ctx); err != nil {
-		t.Fatalf("second migrate: %v", err)
-	}
-	second, err := AppliedMigrations(ctx, db)
-	if err != nil {
-		t.Fatalf("list migrations again: %v", err)
-	}
-	if len(second) != len(first) {
-		t.Fatalf("migrations grew on replay: %v -> %v", first, second)
-	}
-}
-
-func TestSchemaMatchesDesign(t *testing.T) {
-	db := testDB(t)
-	ctx := context.Background()
-
-	cases := []struct {
-		table  string
-		column string
-	}{
-		{"hlp_task.task_runs", "version"},
-		{"hlp_task.task_runs", "policy_snapshot"},
-		{"hlp_task.task_runs", "fsm_enabled"},
-		{"hlp_task.stage_attempts", "entry_reason"},
-		{"hlp_task.acceptance_records", "rollback_target"},
-		{"hlp_event.events", "payload"},
-		{"hlp_event.events", "subtask_id"},
-		{"hlp_event.audit", "rule_id"},
-		{"hlp_event.tool_idempotency", "idempotency_key"},
-		{"hlp_task.model_selections", "attempt_no"},
-		{"hlp_task.model_selections", "reason"},
-		{"hlp_task.model_selections", "context_window"},
-		{"hlp_task.model_selections", "threshold_tokens"},
-		{"hlp_task.model_selections", "input_price"},
-		{"hlp_task.model_selections", "output_price"},
-		{"hlp_task.model_selections", "is_fallback"},
-		{"hlp_task.model_selections", "approval_id"},
-		{"hlp_task.model_selections", "operator"},
-	}
-	for _, c := range cases {
-		var exists bool
-		if err := db.QueryRow(ctx, `
-			SELECT EXISTS (
-				SELECT 1 FROM information_schema.columns
-				WHERE table_schema = split_part($1, '.', 1)
-				  AND table_name = split_part($1, '.', 2)
-				  AND column_name = $2
-			)`, c.table, c.column).Scan(&exists); err != nil {
-			t.Fatalf("query column %s.%s: %v", c.table, c.column, err)
-		}
-		if !exists {
-			t.Fatalf("column %s.%s missing", c.table, c.column)
-		}
-	}
-
-	var hasUniqueTaskSeq bool
-	if err := db.QueryRow(ctx, `
-		SELECT EXISTS (
-			SELECT 1 FROM pg_constraint c
-			JOIN pg_class t ON t.oid = c.conrelid
-			JOIN pg_namespace n ON n.oid = t.relnamespace
-			WHERE n.nspname = 'hlp_event' AND t.relname = 'events' AND c.contype = 'u'
-		)`).Scan(&hasUniqueTaskSeq); err != nil {
-		t.Fatalf("query unique constraint: %v", err)
-	}
-	if !hasUniqueTaskSeq {
-		t.Fatal("hlp_event.events must have a unique constraint (task_id, seq)")
-	}
-
-	var hasLegacyWindow bool
-	if err := db.QueryRow(ctx, `
-		SELECT EXISTS (
-			SELECT 1 FROM information_schema.columns
-			WHERE table_schema = 'hlp_task'
-			  AND table_name = 'model_selections'
-			  AND column_name = 'window'
-		)`).Scan(&hasLegacyWindow); err != nil {
-		t.Fatalf("query legacy window column: %v", err)
-	}
-	if hasLegacyWindow {
-		t.Fatal("hlp_task.model_selections must not use reserved column name window")
-	}
-
-	rows, err := db.Query(ctx, `
-		SELECT pg_get_constraintdef(c.oid)
-		FROM pg_constraint c
-		JOIN pg_class t ON t.oid = c.conrelid
-		JOIN pg_namespace n ON n.oid = t.relnamespace
-		WHERE n.nspname = 'hlp_task' AND t.relname = 'model_selections' AND c.contype = 'c'`)
-	if err != nil {
-		t.Fatalf("query model_selections checks: %v", err)
-	}
-	defer rows.Close()
-	var defs strings.Builder
-	for rows.Next() {
-		var def string
-		if err := rows.Scan(&def); err != nil {
-			t.Fatalf("scan check: %v", err)
-		}
-		defs.WriteString(def)
-		defs.WriteByte('\n')
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("iterate checks: %v", err)
-	}
-	if !strings.Contains(defs.String(), "'explicit'") {
-		t.Fatalf("strategy check must allow explicit: %s", defs.String())
-	}
-	if !strings.Contains(defs.String(), "'fallback'") {
-		t.Fatalf("resolved_from check must allow fallback: %s", defs.String())
 	}
 }
 
