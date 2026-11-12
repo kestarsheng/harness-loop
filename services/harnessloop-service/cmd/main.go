@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -171,12 +172,20 @@ func main() {
 		}
 	}
 
-	policyBridge := service.NewPolicyBridge(flagDefault(flags, config.FlagPolicyResolverEnabled), policyEngine, repository.NewAuditRepo(db), emitter, nil)
+	approvalGate, approvalErr := buildApprovalGate(cfg)
+	if approvalErr != nil {
+		log.Printf("harnessloop: approval gate unavailable, high-risk calls stay pending: %v", approvalErr)
+	}
+	policyBridge := service.NewPolicyBridge(flagDefault(flags, config.FlagPolicyResolverEnabled), policyEngine, repository.NewAuditRepo(db), emitter, approvalGate)
 	if sr, ok := stages.(*service.StageRunner); ok {
 		sr.WithToolGate(policyBridge)
 	}
 	if policyBridge.Enabled() {
-		log.Printf("harnessloop: policy resolver bridge enabled (approval gate not configured, high-risk calls stay pending)")
+		if approvalGate != nil {
+			log.Printf("harnessloop: policy resolver bridge enabled (approval gate -> %s)", cfg.Approval.Address)
+		} else {
+			log.Printf("harnessloop: policy resolver bridge enabled (approval gate not configured, high-risk calls stay pending)")
+		}
 	}
 
 	if os.Getenv("HARNESSLOOP_COMPACTION_ENABLED") != "false" {
@@ -292,6 +301,27 @@ func flagDefault(flags *config.FlagSet, name string) bool {
 		return false
 	}
 	return flag.Default
+}
+
+func buildApprovalGate(cfg config.Config) (service.ToolApprovalGate, error) {
+	if strings.TrimSpace(cfg.Approval.Address) == "" {
+		return nil, nil
+	}
+	approvalCfg, err := policy.LoadApprovalConfig(cfg.Policy.ApprovalFile)
+	if err != nil {
+		log.Printf("harnessloop: approval config fallback to defaults: %v", err)
+		approvalCfg = policy.DefaultApprovalConfig()
+	}
+	client, err := service.NewApprovalClient(service.ApprovalClientConfig{
+		Address:      cfg.Approval.Address,
+		Timeout:      time.Duration(cfg.Approval.TimeoutSeconds) * time.Second,
+		PollInterval: time.Duration(cfg.Approval.PollMs) * time.Millisecond,
+		Approval:     approvalCfg,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return client, nil
 }
 
 func subtaskExecutor(client *harnessclient.Client, cfg config.Config) service.SubtaskExecutor {

@@ -281,6 +281,76 @@ func main() {
 
 // registerApprovalRoutes registers HTTP routes for the approval API
 func registerApprovalRoutes(mux *http.ServeMux, am *approval.ApprovalFlowManager, re *approval.RuleEngine) {
+	// POST /approval/request — create a pending approval request. The harness
+	// loop gate creates high-risk tool approvals here; the human decision is
+	// still submitted through /approval/approve|reject.
+	mux.HandleFunc("/approval/request", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var body approval.ApprovalRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid request", http.StatusBadRequest)
+			return
+		}
+		if body.Type == "" {
+			body.Type = approval.ApprovalTypeToolCall
+		}
+		if body.Priority == "" {
+			body.Priority = approval.PriorityHigh
+		}
+		// High-risk policy approvals must never be auto-approved.
+		body.AutoApprove = false
+		created, err := am.CreateRequest(r.Context(), &body)
+		w.Header().Set("Content-Type", "application/json")
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{"code": -1, "message": err.Error()})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"code": 0,
+			"data": map[string]interface{}{
+				"request_id": created.ID,
+				"status":     created.Status,
+				"expires_at": created.ExpiresAt,
+			},
+		})
+	})
+
+	// GET /approval/status?request_id=xxx — report one request's status so the
+	// harness loop can distinguish approve / reject / timeout without polling
+	// the pending list.
+	mux.HandleFunc("/approval/status", func(w http.ResponseWriter, r *http.Request) {
+		requestID := r.URL.Query().Get("request_id")
+		if requestID == "" {
+			http.Error(w, "request_id is required", http.StatusBadRequest)
+			return
+		}
+		req, err := am.GetRequest(requestID)
+		w.Header().Set("Content-Type", "application/json")
+		if err != nil {
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]interface{}{"code": -1, "message": err.Error()})
+			return
+		}
+		decidedBy := req.ApprovedBy
+		if decidedBy == "" {
+			decidedBy = req.RejectedBy
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"code": 0,
+			"data": map[string]interface{}{
+				"request_id":       req.ID,
+				"status":           req.Status,
+				"decided_by":       decidedBy,
+				"rejection_reason": req.RejectionReason,
+				"expires_at":       req.ExpiresAt,
+			},
+		})
+	})
+
 	// GET /approval/pending?user_id=xxx — list pending approval requests
 	mux.HandleFunc("/approval/pending", func(w http.ResponseWriter, r *http.Request) {
 		userID := r.URL.Query().Get("user_id")
