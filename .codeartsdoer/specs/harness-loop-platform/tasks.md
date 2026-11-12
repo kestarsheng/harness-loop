@@ -443,7 +443,7 @@
 
 > P0 合计：实施 23 个 + 测试 4 个 = **27 个任务**。
 
-## 3.2 P1：记忆、压缩、索引、TUI、大屏、知识增强、多 Agent、模型策略、权限完整版（35 个任务）
+## 3.2 P1：记忆、压缩、索引、TUI、大屏、知识增强、多 Agent、模型策略、权限完整版（36 个任务）
 
 ### T-P1-01 markdown 记忆布局与格式
 
@@ -805,6 +805,18 @@
 | 验收标准 | `go test ./pkg/pgindex/... -run TestMigrateAll`：空库一次迁移成功、重复迁移无变更；关闭新索引开关后旧路径可用；打开后新数据仅在新索引可查；`schema_migrations` 版本连续。 |
 | 复杂度 | M |
 
+### T-P1-31 多 Agent 编排接入 runtime 与事件发布
+
+| 字段 | 内容 |
+|---|---|
+| 目标 | 把 orchestrator 的 DAG 规划、调度、handoff 与汇聚接入 harnessloop-service 运行时，并让编排事件真正写入事件仓储。 |
+| 关联需求 | REQ-123、REQ-125~134、REQ-139；design 4.13 |
+| 依赖 | T-P1-18、T-P1-19、T-P1-20、T-P1-21、T-P0-09、T-P0-17 |
+| 涉及文件 | [N] `services/harnessloop-service/internal/service/orchestrator_bridge.go`、[N] `pkg/harnessloop/orchestrator/publisher_emitter.go`、[M] `pkg/harnessloop/event/types.go`、[M] `services/harnessloop-service/internal/service/runtime.go`、[N] `services/harnessloop-service/internal/service/orchestrator_bridge_test.go` |
+| 实施要点 | 1) 新增生产 Emitter：把 `orchestrator.Event` 转为 `event.Event`，复用既有 Publisher 分配 seq，不允许各组件自行生成 seq；2) `event/types.go` 的 `knownTypes` 补 `subtask.*`、`handoff.*`、`aggregation.*` 类型，保证 `IsKnownType` 通过；3) runtime 在 b 阶段调用 planner 产出 DAG，c/d 阶段用 scheduler 调度子任务，d 阶段先走汇聚再用汇聚报告作为验收必填输入；4) 编排特性开关默认关闭，关闭时完全走现有单 Agent 路径且功能不退化；5) 事件按 tenant/task 隔离，跨租户拒绝仍走 `security.violation`。 |
+| 验收标准 | `go test ./services/harnessloop-service/... -run TestOrchestratorBridge`；真实任务可查到 `subtask.plan_created`、`subtask.queued`、`aggregation.*` 事件且 seq 连续无缺号；关闭特性开关后任务仍按原路径完成；全仓 `go build ./...`、`depcheck` 0 violations。 |
+| 复杂度 | L |
+
 ### T-P1-T1 记忆 LRU 与原子写测试
 
 | 字段 | 内容 |
@@ -859,13 +871,13 @@
 |---|---|
 | 目标 | 按 9.9/9.10/9.11 全量回归多 Agent、模型策略与权限审计一致性。 |
 | 关联需求 | REQ-123 ~ REQ-141、REQ-142 ~ REQ-155、REQ-156 ~ REQ-170；design 9.9 / 9.10 / 9.11 / 8.4 |
-| 依赖 | T-P1-18 ~ T-P1-26 |
+| 依赖 | T-P1-18 ~ T-P1-26、T-P1-31 |
 | 涉及文件 | [N] `pkg/harnessloop/orchestrator/multiagent_suite_test.go`、[N] `pkg/harnessloop/modelregistry/model_suite_test.go`、[N] `pkg/harnessloop/policy/policy_suite_test.go`、[N] `bench/p1/dag-concurrency.md`、[N] `bench/p1/model-fallback.md`、[N] `bench/p1/policy-audit.md` |
 | 实施要点 | 1) 多 Agent：父子层级、子任务状态、DAG 完整性、上限、并发、超时、熔断、三种传播、handoff、汇聚、隔离、预算、事件关联；2) 模型：注册表、三策略、阶段覆盖、能力、切换、回退、可用性、成本联动、embedding、密钥、热更新；3) 权限：标签、矩阵、双层名单、角色、路径变体、ToCToU、写入白名单、exec、自我提权、优先级、审计、事件一致、审批、性能。 |
 | 验收标准 | 三套 `go test` 全绿；9.9/9.10/9.11 表格逐条编号对照；三份报告留档；零放行（任何应拒未拒即失败）。 |
 | 复杂度 | L |
 
-> P1 合计：实施 30 个 + 测试 5 个 = **35 个任务**。
+> P1 合计：实施 31 个 + 测试 5 个 = **36 个任务**。
 
 ## 3.3 P2：多语言索引、rerank 增强、调度优化、运维完善（14 个任务）
 
@@ -1135,6 +1147,12 @@ flowchart LR
   S18 --> TT5[T-P1-T5]
   MR24 --> TT5
   POL26 --> TT5
+  S18 --> X31[T-P1-31 接入runtime]
+  S19 --> X31
+  G21 --> X31
+  MR24 --> X31
+  POL26 --> X31
+  X31 --> TT5
 ```
 
 ## 4.3 P2 依赖图
