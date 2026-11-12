@@ -11,6 +11,15 @@ import (
 
 const FlagFSMEnabled = "harness.loop.fsm.enabled"
 
+// T-P1-31 feature switches. All three default to false: when a flag is absent
+// or disabled the runtime keeps the pre-existing single-agent, static-model and
+// policy.Engine paths.
+const (
+	FlagOrchestratorEnabled   = "harness.loop.orchestrator.enabled"
+	FlagModelStrategyEnabled  = "harness.loop.model.strategy.enabled"
+	FlagPolicyResolverEnabled = "harness.loop.policy.resolver.enabled"
+)
+
 type FlagContext struct {
 	TenantID  string `json:"tenant_id"`
 	ProjectID string `json:"project_id"`
