@@ -30,13 +30,33 @@ const (
 var errInvalidTool = errors.New("policy: tool name is required")
 
 type ToolArgs struct {
-	Paths   []string
-	Command []string
+	Paths         []string
+	Command       []string
+	NetworkMethod string
+	EstimatedCost float64
 }
 
 type PolicySet struct {
 	AllowTools []string
 	DenyTools  []string
+	Rules      []Rule
+}
+
+type Effect string
+
+const (
+	EffectAllow           Effect = "allow"
+	EffectDeny            Effect = "deny"
+	EffectRequireApproval Effect = "require_approval"
+)
+
+type Rule struct {
+	ID               string
+	Tool             string
+	Tags             []string
+	Stages           []string
+	Effect           Effect
+	RequiresApproval bool
 }
 
 type Request struct {
@@ -48,6 +68,14 @@ type Request struct {
 	Tenant          *PolicySet
 	Role            *PolicySet
 	Task            *PolicySet
+
+	TenantID  string
+	ProjectID string
+	TaskID    string
+	SubtaskID string
+	RoleName  string
+	AgentID   string
+	Attempt   int
 }
 
 type Decision struct {
@@ -59,6 +87,11 @@ type Decision struct {
 	Tool          string
 	Stage         string
 	RequestedPath string
+
+	Effect           Effect
+	RequiresApproval bool
+	CacheHit         bool
+	DurationUS       int64
 }
 
 func (d Decision) Error() string {
@@ -84,6 +117,14 @@ func NewEngine() *Engine {
 }
 
 func (e *Engine) Decide(ctx context.Context, req Request) Decision {
+	d := e.SystemDecide(ctx, req)
+	if !d.Allowed {
+		return d
+	}
+	return e.applyLayers(req)
+}
+
+func (e *Engine) SystemDecide(ctx context.Context, req Request) Decision {
 	base := Decision{Tool: req.Tool, Stage: req.Stage}
 
 	if req.Tool == "" {
@@ -153,33 +194,6 @@ func (e *Engine) Decide(ctx context.Context, req Request) Decision {
 		}
 	}
 
-	for _, layer := range []struct {
-		name Layer
-		set  *PolicySet
-	}{
-		{LayerTenant, req.Tenant},
-		{LayerRole, req.Role},
-		{LayerTask, req.Task},
-	} {
-		if layer.set == nil {
-			continue
-		}
-		if contains(layer.set.DenyTools, req.Tool) {
-			base.Layer = layer.name
-			base.RuleID = string(layer.name) + ".deny"
-			base.Code = CodeToolDenied
-			base.Reason = "tool is explicitly denied at this layer"
-			return base
-		}
-		if len(layer.set.AllowTools) > 0 && !contains(layer.set.AllowTools, req.Tool) {
-			base.Layer = layer.name
-			base.RuleID = string(layer.name) + ".allow"
-			base.Code = CodeToolDenied
-			base.Reason = "tool is not in this layer's allowlist"
-			return base
-		}
-	}
-
 	if len(req.Args.Paths) > 0 {
 		hasWrite := false
 		for _, tag := range tags {
@@ -207,7 +221,7 @@ func (e *Engine) Decide(ctx context.Context, req Request) Decision {
 			base.Reason = "workspace root is required for path arguments"
 			return base
 		}
-		guard := sandbox.PathGuard{Root: req.WorkspaceRoot, AllowedSubpaths: req.AllowedSubpaths}
+		guard := sandbox.PathGuard{Root: req.WorkspaceRoot, AllowedSubpaths: req.AllowedSubpaths, Cached: !hasWrite}
 		if bad, err := guard.Check(req.Args.Paths); err != nil {
 			base.Layer = LayerSystem
 			base.RuleID = "sandbox.realpath"
@@ -224,6 +238,42 @@ func (e *Engine) Decide(ctx context.Context, req Request) Decision {
 			base.RuleID = "sandbox.exec"
 			base.Code = CodeExecDenied
 			base.Reason = err.Error()
+			return base
+		}
+	}
+
+	base.Allowed = true
+	base.Layer = LayerSystem
+	base.RuleID = "system.allow"
+	base.Reason = "system constraints satisfied"
+	return base
+}
+
+func (e *Engine) applyLayers(req Request) Decision {
+	base := Decision{Tool: req.Tool, Stage: req.Stage}
+	for _, layer := range []struct {
+		name Layer
+		set  *PolicySet
+	}{
+		{LayerTenant, req.Tenant},
+		{LayerRole, req.Role},
+		{LayerTask, req.Task},
+	} {
+		if layer.set == nil {
+			continue
+		}
+		if contains(layer.set.DenyTools, req.Tool) {
+			base.Layer = layer.name
+			base.RuleID = string(layer.name) + ".deny"
+			base.Code = CodeToolDenied
+			base.Reason = "tool is explicitly denied at this layer"
+			return base
+		}
+		if len(layer.set.AllowTools) > 0 && !contains(layer.set.AllowTools, req.Tool) {
+			base.Layer = layer.name
+			base.RuleID = string(layer.name) + ".allow"
+			base.Code = CodeToolDenied
+			base.Reason = "tool is not in this layer's allowlist"
 			return base
 		}
 	}

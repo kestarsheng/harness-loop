@@ -349,6 +349,30 @@ func (m *ApprovalFlowManager) CancelRequest(ctx context.Context, requestID, user
 	return nil
 }
 
+// ExpireRequest marks a pending request as timed out
+func (m *ApprovalFlowManager) ExpireRequest(ctx context.Context, requestID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	req, ok := m.requests[requestID]
+	if !ok {
+		return fmt.Errorf("approval request not found: %s", requestID)
+	}
+
+	if req.Status != StatusPending {
+		return fmt.Errorf("approval request is no longer pending: %s", req.Status)
+	}
+
+	req.Status = StatusTimeout
+	m.removeFromPendingQueue(req.UserID, req.ID)
+
+	if m.hooks != nil {
+		m.hooks.OnTimeout(req)
+	}
+
+	return nil
+}
+
 // EscalateRequest escalates an approval request
 func (m *ApprovalFlowManager) EscalateRequest(ctx context.Context, requestID string) error {
 	m.mu.Lock()

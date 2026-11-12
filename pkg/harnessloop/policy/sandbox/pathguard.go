@@ -9,11 +9,18 @@ import (
 type PathGuard struct {
 	Root            string
 	AllowedSubpaths []string
+	Cached          bool
 }
 
 func (g PathGuard) Check(paths []string) (string, error) {
 	for _, p := range paths {
-		resolved, err := Resolve(g.Root, p)
+		var resolved string
+		var err error
+		if g.Cached {
+			resolved, err = ResolveCached(g.Root, p)
+		} else {
+			resolved, err = Resolve(g.Root, p)
+		}
 		if err != nil {
 			return p, err
 		}

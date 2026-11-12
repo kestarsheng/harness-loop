@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 )
 
 var (
@@ -15,6 +17,14 @@ var (
 )
 
 func Resolve(root, rel string) (string, error) {
+	return resolveWith(root, rel, evalBestEffort)
+}
+
+func ResolveCached(root, rel string) (string, error) {
+	return resolveWith(root, rel, evalBestEffortCached)
+}
+
+func resolveWith(root, rel string, eval func(string) (string, error)) (string, error) {
 	if strings.ContainsRune(rel, 0) {
 		return "", fmt.Errorf("%w: NUL byte in path", ErrUnsafePath)
 	}
@@ -40,13 +50,13 @@ func Resolve(root, rel string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("%w: workspace root: %v", ErrUnsafePath, err)
 	}
-	rootResolved, err := evalBestEffort(rootAbs)
+	rootResolved, err := eval(rootAbs)
 	if err != nil {
 		rootResolved = rootAbs
 	}
 
 	target := filepath.Clean(filepath.Join(rootResolved, filepath.FromSlash(decoded)))
-	resolved, err := evalBestEffort(target)
+	resolved, err := eval(target)
 	if err != nil {
 		return "", fmt.Errorf("%w: resolve %q: %v", ErrUnsafePath, rel, err)
 	}
@@ -85,6 +95,41 @@ func evalBestEffort(target string) (string, error) {
 		return target, nil
 	}
 	parent, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return target, nil
+	}
+	return filepath.Join(parent, filepath.Base(target)), nil
+}
+
+type cachedRealpath struct {
+	resolved string
+	expires  time.Time
+}
+
+var realpathCache sync.Map
+
+func evalBestEffortCached(target string) (string, error) {
+	if entry, ok := realpathCache.Load(target); ok {
+		cached, _ := entry.(cachedRealpath)
+		if time.Now().Before(cached.expires) {
+			return cached.resolved, nil
+		}
+		realpathCache.Delete(target)
+	}
+
+	if _, err := os.Lstat(target); err == nil {
+		resolved, err := filepath.EvalSymlinks(target)
+		if err == nil {
+			realpathCache.Store(target, cachedRealpath{resolved: resolved, expires: time.Now().Add(time.Minute)})
+			return resolved, nil
+		}
+	}
+
+	dir := filepath.Dir(target)
+	if dir == target {
+		return target, nil
+	}
+	parent, err := evalBestEffortCached(dir)
 	if err != nil {
 		return target, nil
 	}
