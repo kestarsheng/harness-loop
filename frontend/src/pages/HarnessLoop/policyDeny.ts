@@ -1,9 +1,35 @@
 import type { HarnessEvent } from './types';
 import { parsePayload, toNumber } from './types';
 
-export const POLICY_DENY_EVENT_TYPES = ['tool.denied', 'security.violation'] as const;
+export const POLICY_DENY_EVENT_TYPES = [
+  'tool.denied',
+  'security.violation',
+  'approval.requested',
+  'approval.approved',
+  'approval.rejected',
+  'approval.timeout',
+  'approval.cancelled',
+] as const;
 
 export type PolicyDenyEventType = (typeof POLICY_DENY_EVENT_TYPES)[number];
+
+const DENY_RECORD_EVENT_TYPES: readonly PolicyDenyEventType[] = [
+  'tool.denied',
+  'security.violation',
+  'approval.rejected',
+  'approval.timeout',
+  'approval.cancelled',
+];
+
+function defaultLayer(source: PolicyDenyEventType): string {
+  if (source === 'security.violation') {
+    return 'security';
+  }
+  if (source.startsWith('approval.')) {
+    return 'approval';
+  }
+  return 'unknown';
+}
 
 export const MAX_POLICY_DENY_ITEMS = 200;
 
@@ -112,15 +138,24 @@ export function reducePolicyDenies(
 
   const payload = parsePayload(event.payload);
   const source = event.event_type as PolicyDenyEventType;
+
+  if (!DENY_RECORD_EVENT_TYPES.includes(source)) {
+    return {
+      ...base,
+      lastEventSeq: Math.max(base.lastEventSeq, seq),
+      seenEventIds: { ...base.seenEventIds, [event.event_id]: seq },
+    };
+  }
+
   const tool =
     payloadString(payload, ['tool', 'tool_name', 'action', 'capability']) || 'unknown_tool';
   const ruleId =
     payloadString(payload, ['rule_id', 'ruleId', 'policy_id', 'rule']) || UNCLASSIFIED_RULE;
   const layer =
     payloadString(payload, ['layer', 'decision_layer', 'enforcement_layer']) ||
-    (source === 'security.violation' ? 'security' : 'unknown');
+    defaultLayer(source);
   const reason =
-    payloadString(payload, ['reason', 'message', 'deny_reason']) || '策略拒绝';
+    payloadString(payload, ['reason', 'message', 'deny_reason', 'code']) || '策略拒绝';
   const argSummary = summarizeParams(
     payload.args ?? payload.arguments ?? payload.param_summary ?? payload.params,
   );

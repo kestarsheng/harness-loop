@@ -237,6 +237,87 @@ const CASES: EventCase[] = [
   { type: 'tool.result', assert: (s) => expect(s.toolCalls).toBe(1) },
   { type: 'tool.progress', assert: (s) => expect(s.eventCount).toBe(1) },
   {
+    type: 'tool.denied',
+    payload: { tool: 'write_file', code: 'E_TOOL_DENIED' },
+    assert: (s) => {
+      expect(s.securityViolations).toBe(1);
+      expect(s.errorCount).toBe(1);
+      expect(s.anomalies).toHaveLength(1);
+    },
+  },
+  {
+    type: 'subtask.plan_created',
+    payload: { dag_id: 'dag-1', node_count: 3 },
+    assert: (s) => {
+      expect(s.status).toBe('running');
+      expect(s.anomalies).toHaveLength(0);
+    },
+  },
+  { type: 'subtask.queued', payload: { position: 1 }, assert: (s) => expect(s.anomalies).toHaveLength(0) },
+  { type: 'subtask.started', payload: { role: 'backend' }, assert: (s) => expect(s.anomalies).toHaveLength(0) },
+  { type: 'subtask.handoff_waiting', assert: (s) => expect(s.anomalies).toHaveLength(0) },
+  { type: 'subtask.accepted', payload: { acceptance_id: 'acc-1' }, assert: (s) => expect(s.anomalies).toHaveLength(0) },
+  {
+    type: 'subtask.rejected',
+    payload: { reason: 'self verification failed' },
+    assert: (s) => expect(s.anomalies).toHaveLength(1),
+  },
+  {
+    type: 'subtask.failed',
+    payload: { category: 'timeout' },
+    assert: (s) => expect(s.anomalies).toHaveLength(1),
+  },
+  {
+    type: 'subtask.cancelled',
+    payload: { reason: 'parent replanned' },
+    assert: (s) => expect(s.anomalies).toHaveLength(1),
+  },
+  {
+    type: 'subtask.circuit_open',
+    payload: { class_key: 'backend/code', failure_rate: 0.8 },
+    assert: (s) => {
+      expect(s.errorCount).toBe(1);
+      expect(s.anomalies).toHaveLength(1);
+    },
+  },
+  { type: 'handoff.created', payload: { from_agent_id: 'a1', to_agent_id: 'a2' }, assert: (s) => expect(s.anomalies).toHaveLength(0) },
+  { type: 'handoff.accepted', assert: (s) => expect(s.anomalies).toHaveLength(0) },
+  { type: 'handoff.rejected', payload: { reason: 'contract mismatch' }, assert: (s) => expect(s.anomalies).toHaveLength(1) },
+  {
+    type: 'aggregation.completed',
+    payload: { total: 3, accepted: 2, complete: false },
+    assert: (s) => expect(s.anomalies).toHaveLength(1),
+  },
+  {
+    type: 'aggregation.conflict',
+    payload: { kind: 'file_overlap', path: 'src/a.ts' },
+    assert: (s) => {
+      expect(s.errorCount).toBe(1);
+      expect(s.anomalies).toHaveLength(1);
+    },
+  },
+  { type: 'model.selected', payload: { model_id: 'qwen-max', stage: 'c' }, assert: (s) => expect(s.anomalies).toHaveLength(0) },
+  { type: 'model.switched', payload: { from: 'qwen-plus', to: 'qwen-max' }, assert: (s) => expect(s.anomalies).toHaveLength(0) },
+  { type: 'model.fallback', payload: { primary: 'qwen-plus', fallback: 'qwen-max' }, assert: (s) => expect(s.anomalies).toHaveLength(0) },
+  {
+    type: 'model.capability_rejected',
+    payload: { capability: 'vision' },
+    assert: (s) => expect(s.anomalies).toHaveLength(1),
+  },
+  { type: 'model.recovered', payload: { model_id: 'qwen-plus' }, assert: (s) => expect(s.anomalies).toHaveLength(0) },
+  {
+    type: 'model.unavailable',
+    payload: { model_id: 'qwen-turbo', fail_count: 3 },
+    assert: (s) => expect(s.anomalies).toHaveLength(1),
+  },
+  { type: 'model.registry_changed', payload: { version: 'v2', result: 'applied' }, assert: (s) => expect(s.anomalies).toHaveLength(0) },
+  { type: 'model.config_applied', payload: { version: 'v2' }, assert: (s) => expect(s.anomalies).toHaveLength(0) },
+  { type: 'approval.requested', payload: { tool: 'git_push', code: 'approval_required' }, assert: (s) => expect(s.anomalies).toHaveLength(0) },
+  { type: 'approval.approved', assert: (s) => expect(s.anomalies).toHaveLength(0) },
+  { type: 'approval.rejected', payload: { code: 'E_APPROVAL_REJECTED' }, assert: (s) => expect(s.anomalies).toHaveLength(1) },
+  { type: 'approval.timeout', payload: { code: 'E_APPROVAL_TIMEOUT' }, assert: (s) => expect(s.anomalies).toHaveLength(1) },
+  { type: 'approval.cancelled', payload: { code: 'E_APPROVAL_CANCELLED' }, assert: (s) => expect(s.anomalies).toHaveLength(1) },
+  {
     type: 'error',
     payload: { reason: 'agent timeout' },
     assert: (s) => {
@@ -271,7 +352,8 @@ describe('reduceTaskState event coverage', () => {
     for (const type of KNOWN_EVENT_TYPES) {
       expect(covered.has(type)).toBe(true);
     }
-    expect(KNOWN_EVENT_TYPES).toHaveLength(45);
+    expect(KNOWN_EVENT_TYPES).toHaveLength(73);
+
   });
 
   it.each(CASES)('reduces $type', (item) => {

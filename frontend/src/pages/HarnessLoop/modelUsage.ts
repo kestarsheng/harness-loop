@@ -3,8 +3,12 @@ import { normalizeStage, parsePayload, toNumber } from './types';
 
 export const MODEL_USAGE_EVENT_TYPES = [
   'model.selected',
+  'model.switched',
   'model.fallback',
+  'model.capability_rejected',
   'model.recovered',
+  'model.unavailable',
+  'model.registry_changed',
   'model.config_applied',
 ] as const;
 
@@ -144,7 +148,8 @@ export function reduceModelUsage(
   switch (event.event_type) {
     case 'model.selected': {
       const model =
-        payloadString(payload, ['model', 'model_name', 'effective_model']) || 'unknown';
+        payloadString(payload, ['model', 'model_id', 'model_name', 'effective_model']) ||
+        'unknown';
       modelCalls[model] = (modelCalls[model] ?? 0) + 1;
       if (stageUsage) {
         stageUsage.model = model;
@@ -179,9 +184,28 @@ export function reduceModelUsage(
       });
       break;
     }
+    case 'model.switched': {
+      const toModel =
+        payloadString(payload, ['to', 'to_model', 'effective_model', 'model_id']);
+      if (stageUsage && toModel) {
+        stageUsage.model = toModel;
+        stageUsage.lastSelectedAtMs = timestampMs;
+      }
+      break;
+    }
+    case 'model.capability_rejected':
+    case 'model.unavailable':
+      break;
+    case 'model.registry_changed': {
+      const version = payloadString(payload, ['version', 'config_version']);
+      if (version) {
+        configVersion = version;
+      }
+      break;
+    }
     case 'model.recovered': {
       const model =
-        payloadString(payload, ['model', 'model_name', 'effective_model', 'to']);
+        payloadString(payload, ['model', 'model_id', 'model_name', 'effective_model', 'to']);
       if (stageUsage && model) {
         stageUsage.model = model;
         stageUsage.tokens += tokensDelta;

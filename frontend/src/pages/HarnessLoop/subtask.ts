@@ -136,6 +136,20 @@ export function reduceSubtaskState(
   }
 
   const payload = parsePayload(event.payload);
+
+  if (event.event_type === 'subtask.plan_created' || event.event_type === 'subtask.circuit_open') {
+    const planDagId = event.dag_id || payloadString(payload, ['dag_id', 'dagId']) || base.dagId;
+    const planParentTaskId =
+      event.parent_task_id || payloadString(payload, ['parent_task_id']) || base.parentTaskId;
+    return {
+      ...base,
+      dagId: planDagId,
+      parentTaskId: planParentTaskId,
+      lastEventSeq: Math.max(base.lastEventSeq, seq),
+      seenEventIds: { ...base.seenEventIds, [event.event_id]: seq },
+    };
+  }
+
   const subtaskId =
     event.subtask_id || payloadString(payload, ['subtask_id', 'subtaskId', 'id']);
   if (!subtaskId) {
@@ -202,6 +216,20 @@ export function reduceSubtaskState(
       node.startedAtMs = timestampMs;
       node.endedAtMs = null;
       node.attempt = attemptNo > 0 ? attemptNo : Math.max(1, node.attempt || 1);
+      break;
+    case 'subtask.handoff_waiting':
+      if (node.status !== 'accepted' && node.status !== 'failed' && node.status !== 'cancelled') {
+        node.status = 'running';
+      }
+      break;
+    case 'subtask.accepted':
+      node.status = 'accepted';
+      node.endedAtMs = timestampMs;
+      break;
+    case 'subtask.rejected':
+      node.status = 'failed';
+      node.endedAtMs = timestampMs;
+      node.failureReason = payloadString(payload, ['reason', 'failure_reason']) || '自验未通过';
       break;
     case 'subtask.ended': {
       node.status = endedStatus(payload);
