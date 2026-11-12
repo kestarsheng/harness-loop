@@ -69,6 +69,39 @@ const (
 	ToolStarted  EventType = "tool.started"
 	ToolResult   EventType = "tool.result"
 	ToolProgress EventType = "tool.progress"
+	ToolDenied   EventType = "tool.denied"
+
+	SubtaskPlanCreated    EventType = "subtask.plan_created"
+	SubtaskQueued         EventType = "subtask.queued"
+	SubtaskStarted        EventType = "subtask.started"
+	SubtaskHandoffWaiting EventType = "subtask.handoff_waiting"
+	SubtaskAccepted       EventType = "subtask.accepted"
+	SubtaskRejected       EventType = "subtask.rejected"
+	SubtaskFailed         EventType = "subtask.failed"
+	SubtaskCancelled      EventType = "subtask.cancelled"
+	SubtaskCircuitOpen    EventType = "subtask.circuit_open"
+
+	HandoffCreated  EventType = "handoff.created"
+	HandoffAccepted EventType = "handoff.accepted"
+	HandoffRejected EventType = "handoff.rejected"
+
+	AggregationCompleted EventType = "aggregation.completed"
+	AggregationConflict  EventType = "aggregation.conflict"
+
+	ModelSelected           EventType = "model.selected"
+	ModelSwitched           EventType = "model.switched"
+	ModelFallback           EventType = "model.fallback"
+	ModelCapabilityRejected EventType = "model.capability_rejected"
+	ModelRecovered          EventType = "model.recovered"
+	ModelUnavailable        EventType = "model.unavailable"
+	ModelRegistryChanged    EventType = "model.registry_changed"
+	ModelConfigApplied      EventType = "model.config_applied"
+
+	ApprovalRequested EventType = "approval.requested"
+	ApprovalApproved  EventType = "approval.approved"
+	ApprovalRejected  EventType = "approval.rejected"
+	ApprovalTimeout   EventType = "approval.timeout"
+	ApprovalCancelled EventType = "approval.cancelled"
 
 	Error EventType = "error"
 
@@ -88,7 +121,14 @@ var knownTypes = map[EventType]struct{}{
 	CompactionTriggered: {}, CompactionCompleted: {}, CompactionDegraded: {}, CompactionRejected: {},
 	MemoryWritten: {}, MemoryMerged: {}, MemoryPromoted: {}, MemoryEvicted: {}, MemoryDecayed: {}, MemoryCorrupted: {}, MemoryResync: {}, MemoryIndexDegraded: {},
 	IndexQueued: {}, IndexUpdated: {}, IndexFailed: {}, IndexRebuilt: {},
-	ToolStarted: {}, ToolResult: {}, ToolProgress: {},
+	ToolStarted: {}, ToolResult: {}, ToolProgress: {}, ToolDenied: {},
+	SubtaskPlanCreated: {}, SubtaskQueued: {}, SubtaskStarted: {}, SubtaskHandoffWaiting: {},
+	SubtaskAccepted: {}, SubtaskRejected: {}, SubtaskFailed: {}, SubtaskCancelled: {}, SubtaskCircuitOpen: {},
+	HandoffCreated: {}, HandoffAccepted: {}, HandoffRejected: {},
+	AggregationCompleted: {}, AggregationConflict: {},
+	ModelSelected: {}, ModelSwitched: {}, ModelFallback: {}, ModelCapabilityRejected: {},
+	ModelRecovered: {}, ModelUnavailable: {}, ModelRegistryChanged: {}, ModelConfigApplied: {},
+	ApprovalRequested: {}, ApprovalApproved: {}, ApprovalRejected: {}, ApprovalTimeout: {}, ApprovalCancelled: {},
 	Error:             {},
 	SecurityViolation: {},
 	StateRebuild:      {},
