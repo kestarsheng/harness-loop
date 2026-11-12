@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -34,7 +35,13 @@ type Config struct {
 	Policy struct {
 		MatrixFile    string `yaml:"matrix_file"`
 		ExecAllowFile string `yaml:"exec_allow_file"`
+		ApprovalFile  string `yaml:"approval_file"`
 	} `yaml:"policy"`
+	Approval struct {
+		Address        string `yaml:"addr"`
+		TimeoutSeconds int    `yaml:"timeout_seconds"`
+		PollMs         int    `yaml:"poll_ms"`
+	} `yaml:"approval"`
 	Models struct {
 		File string `yaml:"file"`
 	} `yaml:"models"`
@@ -64,6 +71,10 @@ func Default() Config {
 	c.Harness.GracefulTimeoutSeconds = 15
 	c.Policy.MatrixFile = "config/harness_loop/stage_matrix.yaml"
 	c.Policy.ExecAllowFile = "config/harness_loop/exec_allow.yaml"
+	c.Policy.ApprovalFile = "config/harness_loop/approval.yaml"
+	c.Approval.Address = ""
+	c.Approval.TimeoutSeconds = 300
+	c.Approval.PollMs = 200
 	c.Models.File = "config/harness_loop/models.yaml"
 	c.FeatureFlags.File = "config/harness_loop/features.yaml"
 	c.Retry.File = "config/harness_loop/retry.yaml"
@@ -95,6 +106,19 @@ func Load(path string) (Config, error) {
 	}
 	if home := os.Getenv("HARNESSLOOP_HARNESS_HOME"); home != "" {
 		c.Memory.HarnessHome = home
+	}
+	if addr := os.Getenv("HARNESSLOOP_APPROVAL_ADDR"); addr != "" {
+		c.Approval.Address = addr
+	}
+	if timeout := os.Getenv("HARNESSLOOP_APPROVAL_TIMEOUT_SECONDS"); timeout != "" {
+		if v, convErr := strconv.Atoi(timeout); convErr == nil && v > 0 {
+			c.Approval.TimeoutSeconds = v
+		}
+	}
+	if poll := os.Getenv("HARNESSLOOP_APPROVAL_POLL_MS"); poll != "" {
+		if v, convErr := strconv.Atoi(poll); convErr == nil && v > 0 {
+			c.Approval.PollMs = v
+		}
 	}
 	c.Server.Address = normalizeAddress(c.Server.Address, c.Server.Local)
 	return c, nil
@@ -134,6 +158,12 @@ func (c Config) Validate() error {
 	}
 	if c.Harness.GracefulTimeoutSeconds <= 0 {
 		return fmt.Errorf("harnessloop config: harness.graceful_timeout_seconds must be positive")
+	}
+	if c.Approval.TimeoutSeconds <= 0 {
+		return fmt.Errorf("harnessloop config: approval.timeout_seconds must be positive")
+	}
+	if c.Approval.PollMs <= 0 {
+		return fmt.Errorf("harnessloop config: approval.poll_ms must be positive")
 	}
 	return nil
 }

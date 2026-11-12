@@ -230,6 +230,7 @@ func (s *AgentService) Execute(ctx context.Context, req *pb.ExecuteRequest) (*pb
 	for k, v := range req.ContextVars {
 		contextVars[k] = v
 	}
+	ctx = withToolPolicyContext(ctx, toolPolicyContextFromVars(contextVars, req.TenantId))
 
 	// Resolve system prompt: render from Prompt Management if agent has PromptTemplateKey
 	systemPromptOverride := s.renderSystemPrompt(ctx, req.EntryAgent, req.SessionId, contextVars)
@@ -336,6 +337,7 @@ func (s *AgentService) ExecuteStream(req *pb.ExecuteStreamRequest, stream pb.Age
 	for k, v := range req.ContextVars {
 		contextVars[k] = v
 	}
+	ctx = withToolPolicyContext(ctx, toolPolicyContextFromVars(contextVars, req.TenantId))
 
 	// Resolve system prompt: render from Prompt Management if agent has PromptTemplateKey
 	systemPromptOverride := s.renderSystemPrompt(ctx, req.EntryAgent, req.SessionId, contextVars)
@@ -961,6 +963,13 @@ func (a *toolAdapter) Execute(ctx context.Context, toolName string, arguments js
 	req := &mcppb.CallToolRequest{
 		Name:      toolName,
 		Arguments: string(arguments),
+	}
+
+	// Forward harness policy context (stage/task/workspace) so mcp-service can
+	// enforce permissions at the real execution point.
+	if pc, ok := toolPolicyContextFrom(ctx); ok {
+		req.TenantId = pc.TenantID
+		toolConfig = mergeToolPolicyContext(toolConfig, pc)
 	}
 
 	// Add tool config if provided

@@ -48,6 +48,15 @@ type PreflightResult struct {
 	CacheHit         bool
 }
 
+// ToolApprovalGate is the gate contract used by the policy bridge. The
+// in-process *policy.ApprovalGate implements it; the HTTP-backed client is the
+// cross-process variant that talks to agent-service.
+type ToolApprovalGate interface {
+	Begin(ctx context.Context, req policy.Request, tags []string) (*policy.ApprovalTicket, error)
+	Await(ctx context.Context, ticket *policy.ApprovalTicket) policy.ApprovalOutcome
+	Authorize(ctx context.Context, req policy.Request, tags []string) policy.ApprovalOutcome
+}
+
 // PolicyBridge wires policy.Resolver (four-layer precedence), ApprovalGate and
 // the audit sink into the runtime. policy.Engine is kept as the fallback path
 // used when the feature flag is disabled.
@@ -57,20 +66,20 @@ type PolicyBridge struct {
 	resolver *policy.Resolver
 	writer   AuditWriter
 	emitter  *orchestrator.PublisherEmitter
-	gate     *policy.ApprovalGate
+	gate     ToolApprovalGate
 
 	lookup func(ctx context.Context, taskID string) (tenantID, projectID string, err error)
 }
 
-func NewPolicyBridge(enabled bool, engine *policy.Engine, writer AuditWriter, emitter *orchestrator.PublisherEmitter, gate *policy.ApprovalGate) *PolicyBridge {
+func NewPolicyBridge(enabled bool, engine *policy.Engine, writer AuditWriter, emitter *orchestrator.PublisherEmitter, gate ToolApprovalGate) *PolicyBridge {
 	if engine == nil {
 		engine = policy.NewEngine()
 	}
 	b := &PolicyBridge{enabled: enabled, engine: engine, writer: writer, emitter: emitter, gate: gate}
 	resolver := policy.NewResolver(engine)
 	resolver.SetAuditSink(b)
-	if gate != nil {
-		resolver.SetApprovalGate(gate)
+	if concrete, ok := gate.(*policy.ApprovalGate); ok && concrete != nil {
+		resolver.SetApprovalGate(concrete)
 	}
 	b.resolver = resolver
 	return b
@@ -131,7 +140,7 @@ func (b *PolicyBridge) Preflight(ctx context.Context, in ToolCallInput) Prefligh
 		if d.EffectiveEffect() == policy.EffectRequireApproval {
 			res.RequiresApproval = true
 			res.Allowed = false
-			approvalID, code := b.beginApproval(ctx, req)
+			approvalID, code := b.beginApproval(ctx, req, b.toolTags(req.Tool))
 			res.ApprovalID = approvalID
 			if code != "" {
 				res.Code = code
@@ -170,7 +179,7 @@ func (b *PolicyBridge) AuthorizeTool(ctx context.Context, in ToolCallInput) erro
 		if b.gate == nil {
 			return fmt.Errorf("%s: approval service unavailable", policy.CodeApprovalUnavailable)
 		}
-		outcome := b.gate.Authorize(ctx, req, nil)
+		outcome := b.gate.Authorize(ctx, req, b.toolTags(req.Tool))
 		if outcome.Allowed {
 			return nil
 		}
@@ -223,11 +232,11 @@ func (b *PolicyBridge) emit(ctx context.Context, rec policy.AuditRecord, typ eve
 	})
 }
 
-func (b *PolicyBridge) beginApproval(ctx context.Context, req policy.Request) (string, string) {
+func (b *PolicyBridge) beginApproval(ctx context.Context, req policy.Request, tags []string) (string, string) {
 	if b.gate == nil {
 		return "", policy.CodeApprovalUnavailable
 	}
-	ticket, err := b.gate.Begin(ctx, req, nil)
+	ticket, err := b.gate.Begin(ctx, req, tags)
 	if err != nil {
 		return "", approvalErrorCode(err)
 	}
@@ -314,6 +323,17 @@ func stringList(raw map[string]any, keys ...string) []string {
 		}
 	}
 	return nil
+}
+
+// toolTags returns the registry tags of a tool so the approval gate can
+// classify delete / network-write classes. Without tags only name-based
+// deploy detection would work.
+func (b *PolicyBridge) toolTags(tool string) []string {
+	if b == nil || b.engine == nil || b.engine.Registry == nil {
+		return nil
+	}
+	tags, _ := b.engine.Registry.TagsFor(tool)
+	return tags
 }
 
 func (b *PolicyBridge) request(in ToolCallInput) policy.Request {

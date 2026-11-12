@@ -11,11 +11,21 @@ import (
 	"agent-platform/pkg/harnessloop/subtask"
 )
 
+// SubtaskResult is the structured outcome reported by a subtask executor. The
+// bridge writes the conclusion and artifacts back onto the scheduler's subtask
+// before marking it accepted, so the d-stage aggregator has real data instead
+// of an incomplete plan.
+type SubtaskResult struct {
+	Conclusion   string
+	Artifacts    []subtask.ArtifactRef
+	AcceptanceID string
+}
+
 // SubtaskExecutor runs one scheduled subtask. The production implementation is
 // expected to reuse the stage runner/agent-service; the bridge itself never
 // invents a second execution path.
 type SubtaskExecutor interface {
-	Execute(ctx context.Context, st *subtask.Subtask) error
+	Execute(ctx context.Context, ec OrchestratorStageContext, st *subtask.Subtask) (*SubtaskResult, error)
 }
 
 type orchestrationState struct {
@@ -117,13 +127,38 @@ func (b *OrchestratorBridge) DispatchCStage(ctx context.Context, ec Orchestrator
 		return running, nil
 	}
 	for _, st := range running {
-		if execErr := b.executor.Execute(ctx, st); execErr != nil {
+		res, execErr := b.executor.Execute(ctx, ec, st)
+		if execErr != nil {
 			_ = state.scheduler.MarkFailed(ctx, st.SubtaskID, "subtask_failed")
 			continue
 		}
-		_ = state.scheduler.MarkAccepted(ctx, st.SubtaskID, fmt.Sprintf("acc-%s", st.SubtaskID))
+		acceptanceID := fmt.Sprintf("acc-%s", st.SubtaskID)
+		if res != nil {
+			applySubtaskResult(st, res)
+			if res.AcceptanceID != "" {
+				acceptanceID = res.AcceptanceID
+			}
+		}
+		_ = state.scheduler.MarkAccepted(ctx, st.SubtaskID, acceptanceID)
 	}
 	return running, nil
+}
+
+// applySubtaskResult writes the executor outcome back onto the subtask the
+// scheduler holds. The aggregator reads these fields in the d stage.
+func applySubtaskResult(st *subtask.Subtask, res *SubtaskResult) {
+	if st == nil || res == nil {
+		return
+	}
+	if len(res.Artifacts) > 0 {
+		st.ArtifactRefs = res.Artifacts
+	}
+	if res.Conclusion != "" {
+		if st.OutputContract == nil {
+			st.OutputContract = make(map[string]any)
+		}
+		st.OutputContract["conclusion"] = res.Conclusion
+	}
 }
 
 // AggregateDStage builds the d-stage aggregation report from the scheduler's
@@ -147,7 +182,7 @@ func (b *OrchestratorBridge) AggregateDStage(ctx context.Context, ec Orchestrato
 		latest = append(latest, st)
 	}
 	taskEmitter := b.taskEmitter(ec)
-	aggregator := orchestrator.NewAggregator(nil, taskEmitter)
+	aggregator := orchestrator.NewAggregator(orchestrator.FSVerifier{Root: ec.WorkspaceRoot}, taskEmitter)
 	return aggregator.Aggregate(ctx, orchestrator.AggregationRequest{
 		ParentTaskID: ec.TaskID,
 		DagID:        state.dagID,
