@@ -1,14 +1,17 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
 
 	"agent-platform/internal/cli/output"
+	"agent-platform/internal/cli/tui"
 	harnesspb "agent-platform/pkg/pb/harnessloop"
 )
 
@@ -22,6 +25,7 @@ func newRunCmd() *cobra.Command {
 		budgetCost float64
 		timeout    time.Duration
 		noWait     bool
+		noTUI      bool
 	)
 
 	cmd := &cobra.Command{
@@ -65,6 +69,34 @@ func newRunCmd() *cobra.Command {
 				return nil
 			}
 
+			if !opts.JSON && !noTUI && isatty.IsTerminal(os.Stdout.Fd()) {
+				runCtx, cancel := context.WithTimeout(cmd.Context(), timeout)
+				defer cancel()
+				result, tuiErr := tui.Run(runCtx, client, tenant, created.Task, tui.RunOptions{NoColor: opts.NoColor})
+				if tuiErr != nil {
+					if runCtx.Err() == context.DeadlineExceeded {
+						emit(cmd, output.Failure("E_TIMEOUT", "task did not reach a terminal state before --timeout", nil))
+						return &ExitError{Code: output.ExitConnectionFail}
+					}
+					emit(cmd, describeError(tuiErr))
+					return &ExitError{Code: exitCodeForError(tuiErr)}
+				}
+				current, getErr := client.GetTask(ctx, &harnesspb.GetTaskRequest{TenantId: tenant, TaskId: created.Task.GetTaskId()})
+				if getErr != nil {
+					emit(cmd, describeError(getErr))
+					return &ExitError{Code: exitCodeForError(getErr)}
+				}
+				emit(cmd, envelopeFromTask(current))
+				if result.QuitEarly {
+					return nil
+				}
+				code := output.ExitCodeForStatus(current.GetStatus(), current.GetTerminalReason())
+				if code != output.ExitOK {
+					return &ExitError{Code: code}
+				}
+				return nil
+			}
+
 			deadline := time.Now().Add(timeout)
 			task := created.Task
 			for !isTerminal(task.GetStatus()) {
@@ -97,6 +129,7 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().Float64Var(&budgetCost, "budget-cost", 0, "cost budget")
 	cmd.Flags().DurationVar(&timeout, "timeout", 30*time.Minute, "max wait for terminal state")
 	cmd.Flags().BoolVar(&noWait, "no-wait", false, "return immediately after submission")
+	cmd.Flags().BoolVar(&noTUI, "no-tui", false, "poll task status without the interactive TUI")
 	return cmd
 }
 
