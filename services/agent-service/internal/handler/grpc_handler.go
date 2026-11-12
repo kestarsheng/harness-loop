@@ -41,6 +41,16 @@ func (h *AgentHandler) ListAgents(ctx context.Context, req *pb.ListAgentsRequest
 	return h.service.ListAgents(ctx, req)
 }
 
+// ListAgentTools returns the tools and roles declared by an agent
+func (h *AgentHandler) ListAgentTools(ctx context.Context, req *pb.ListAgentToolsRequest) (*pb.ListAgentToolsResponse, error) {
+	return h.service.ListAgentTools(ctx, req)
+}
+
+// GetAgentRoles returns the roles declared by an agent
+func (h *AgentHandler) GetAgentRoles(ctx context.Context, req *pb.GetAgentRolesRequest) (*pb.GetAgentRolesResponse, error) {
+	return h.service.GetAgentRoles(ctx, req)
+}
+
 // Execute executes a multi-agent workflow
 func (h *AgentHandler) Execute(ctx context.Context, req *pb.ExecuteRequest) (*pb.ExecuteResponse, error) {
 	return h.service.Execute(ctx, req)

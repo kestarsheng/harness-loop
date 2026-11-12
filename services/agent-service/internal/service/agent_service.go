@@ -477,9 +477,83 @@ func (s *AgentService) toProtoAgent(ag *agent.Agent) *pb.Agent {
 		Model:             ag.Model,
 		MaxTokens:         int32(ag.MaxTokens),
 		Temperature:       ag.Temperature,
+		Metadata:          toStringMap(ag.Metadata),
 		CreatedAt:         ag.CreatedAt.Unix(),
 		UpdatedAt:         ag.UpdatedAt.Unix(),
 	}
+}
+
+// ListAgentTools returns the tools and roles declared by an agent.
+func (s *AgentService) ListAgentTools(ctx context.Context, req *pb.ListAgentToolsRequest) (*pb.ListAgentToolsResponse, error) {
+	ag := s.registry.Get(req.AgentId)
+	if ag == nil {
+		return nil, agent.ErrAgentNotFound
+	}
+	return &pb.ListAgentToolsResponse{
+		AgentId: ag.ID,
+		Tools:   append([]string(nil), ag.Tools...),
+		Roles:   rolesFromMetadata(ag.Metadata),
+	}, nil
+}
+
+// GetAgentRoles returns the roles declared by an agent.
+func (s *AgentService) GetAgentRoles(ctx context.Context, req *pb.GetAgentRolesRequest) (*pb.GetAgentRolesResponse, error) {
+	ag := s.registry.Get(req.AgentId)
+	if ag == nil {
+		return nil, agent.ErrAgentNotFound
+	}
+	return &pb.GetAgentRolesResponse{
+		AgentId: ag.ID,
+		Roles:   rolesFromMetadata(ag.Metadata),
+	}, nil
+}
+
+// toStringMap converts agent metadata to a string map; non-string values are skipped.
+func toStringMap(meta map[string]any) map[string]string {
+	if len(meta) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(meta))
+	for k, v := range meta {
+		if s, ok := v.(string); ok {
+			out[k] = s
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// rolesFromMetadata reads the role metadata, accepting a comma-separated string or a string list.
+func rolesFromMetadata(meta map[string]any) []string {
+	if meta == nil {
+		return nil
+	}
+	var roles []string
+	switch v := meta["role"].(type) {
+	case string:
+		roles = splitRoles(v)
+	case []string:
+		roles = append(roles, v...)
+	case []any:
+		for _, item := range v {
+			if s, ok := item.(string); ok {
+				roles = append(roles, splitRoles(s)...)
+			}
+		}
+	}
+	return roles
+}
+
+func splitRoles(raw string) []string {
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
 }
 
 // toProtoSkill converts a skill to proto.

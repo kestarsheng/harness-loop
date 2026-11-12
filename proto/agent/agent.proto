@@ -248,6 +248,29 @@ message ResumeResponse {
   string error = 8;
 }
 
+// ListAgentToolsRequest asks for the tools and roles declared by an agent.
+message ListAgentToolsRequest {
+  string agent_id = 1;
+}
+
+// ListAgentToolsResponse returns the declared tools and roles of an agent.
+message ListAgentToolsResponse {
+  string agent_id = 1;
+  repeated string tools = 2;
+  repeated string roles = 3;
+}
+
+// GetAgentRolesRequest asks for the roles declared by an agent.
+message GetAgentRolesRequest {
+  string agent_id = 1;
+}
+
+// GetAgentRolesResponse returns the declared roles of an agent.
+message GetAgentRolesResponse {
+  string agent_id = 1;
+  repeated string roles = 2;
+}
+
 // Agent Service
 service AgentService {
   // Register an agent
@@ -261,6 +284,12 @@ service AgentService {
 
   // List all agents
   rpc ListAgents(ListAgentsRequest) returns (ListAgentsResponse);
+
+  // List tools and roles declared by an agent
+  rpc ListAgentTools(ListAgentToolsRequest) returns (ListAgentToolsResponse);
+
+  // Get roles declared by an agent
+  rpc GetAgentRoles(GetAgentRolesRequest) returns (GetAgentRolesResponse);
 
   // Execute multi-agent workflow
   rpc Execute(ExecuteRequest) returns (ExecuteResponse);
