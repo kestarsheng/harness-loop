@@ -122,15 +122,61 @@ func (e *CapabilityError) Error() string {
 	return fmt.Sprintf("%s: %s (suggested: %s)", CodeCapabilityMismatch, e.Reason, strings.Join(e.Suggested, ", "))
 }
 
+type RegistryDefaults struct {
+	TaskModel string   `yaml:"task_model"`
+	Strategy  string   `yaml:"strategy"`
+	Fallback  []string `yaml:"fallback"`
+}
+
+type StageOverride struct {
+	Model     string
+	Strategy  string
+	Fallbacks []string
+}
+
+func (s *StageOverride) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind == yaml.ScalarNode {
+		return node.Decode(&s.Model)
+	}
+	var raw struct {
+		Model     string   `yaml:"model"`
+		Strategy  string   `yaml:"strategy"`
+		Fallback  []string `yaml:"fallback"`
+		Fallbacks []string `yaml:"fallbacks"`
+	}
+	if err := node.Decode(&raw); err != nil {
+		return err
+	}
+	s.Model = raw.Model
+	s.Strategy = raw.Strategy
+	s.Fallbacks = raw.Fallbacks
+	if len(s.Fallbacks) == 0 {
+		s.Fallbacks = raw.Fallback
+	}
+	return nil
+}
+
+type EmbeddingConfig struct {
+	MemoryModel string `yaml:"memory_model"`
+	CodeModel   string `yaml:"code_model"`
+	EnforceDim  int    `yaml:"enforce_dim"`
+}
+
 type fileFormat struct {
-	Version int     `yaml:"version"`
-	Models  []Model `yaml:"models"`
+	Version        int                      `yaml:"version"`
+	Models         []Model                  `yaml:"models"`
+	Embedding      EmbeddingConfig          `yaml:"embedding"`
+	Defaults       RegistryDefaults         `yaml:"defaults"`
+	StageOverrides map[string]StageOverride `yaml:"stage_overrides"`
 }
 
 type Registry struct {
-	Version int
-	models  map[string]*Model
-	order   []string
+	Version        int
+	models         map[string]*Model
+	order          []string
+	defaults       RegistryDefaults
+	stageOverrides map[string]StageOverride
+	embedding      EmbeddingConfig
 }
 
 //go:embed seed_models.yaml
@@ -160,9 +206,18 @@ func loadBytes(raw []byte) (*Registry, error) {
 	if err := yaml.Unmarshal(raw, &f); err != nil {
 		return nil, err
 	}
-	r := &Registry{Version: f.Version, models: make(map[string]*Model, len(f.Models))}
+	r := &Registry{
+		Version:        f.Version,
+		models:         make(map[string]*Model, len(f.Models)),
+		defaults:       f.Defaults,
+		stageOverrides: f.StageOverrides,
+		embedding:      f.Embedding,
+	}
 	if r.Version <= 0 {
 		r.Version = 1
+	}
+	if r.stageOverrides == nil {
+		r.stageOverrides = map[string]StageOverride{}
 	}
 	for i := range f.Models {
 		m := f.Models[i]
@@ -182,7 +237,62 @@ func loadBytes(raw []byte) (*Registry, error) {
 	if len(r.models) == 0 {
 		return nil, fmt.Errorf("%w: registry is empty", ErrMetaIncomplete)
 	}
+	if err := r.validateConfig(); err != nil {
+		return nil, err
+	}
 	return r, nil
+}
+
+func validStrategy(strategy string) bool {
+	switch strategy {
+	case StrategyCostFirst, StrategyQualityFirst, StrategyBalanced:
+		return true
+	}
+	return false
+}
+
+func (r *Registry) validateConfig() error {
+	if r.defaults.Strategy != "" && !validStrategy(r.defaults.Strategy) {
+		return &MetaError{Code: CodeMetaIncomplete, Fields: []string{"defaults.strategy"}}
+	}
+	if r.defaults.TaskModel != "" {
+		m, ok := r.Get(r.defaults.TaskModel)
+		if !ok || m.Kind != KindChat || m.Status == StatusDisabled {
+			return &MetaError{Code: CodeMetaIncomplete, ModelID: r.defaults.TaskModel, Fields: []string{"defaults.task_model"}}
+		}
+	}
+	for _, id := range r.defaults.Fallback {
+		m, ok := r.Get(id)
+		if !ok || m.Kind != KindChat || m.Status == StatusDisabled {
+			return &MetaError{Code: CodeMetaIncomplete, ModelID: id, Fields: []string{"defaults.fallback"}}
+		}
+	}
+	for stage, ov := range r.stageOverrides {
+		if ov.Strategy != "" && !validStrategy(ov.Strategy) {
+			return &MetaError{Code: CodeMetaIncomplete, ModelID: stage, Fields: []string{"stage_overrides." + stage + ".strategy"}}
+		}
+		if ov.Model != "" {
+			m, ok := r.Get(ov.Model)
+			if !ok || m.Kind != KindChat || m.Status == StatusDisabled {
+				return &MetaError{Code: CodeMetaIncomplete, ModelID: ov.Model, Fields: []string{"stage_overrides." + stage + ".model"}}
+			}
+		}
+		for _, id := range ov.Fallbacks {
+			m, ok := r.Get(id)
+			if !ok || m.Kind != KindChat || m.Status == StatusDisabled {
+				return &MetaError{Code: CodeMetaIncomplete, ModelID: id, Fields: []string{"stage_overrides." + stage + ".fallback"}}
+			}
+		}
+	}
+	if r.embedding.EnforceDim > 0 {
+		for _, id := range r.order {
+			m := r.models[id]
+			if m.Kind == KindEmbedding && m.EmbeddingDim != r.embedding.EnforceDim {
+				return &MetaError{Code: CodeMetaIncomplete, ModelID: m.ID, Fields: []string{"embedding_dim != enforce_dim"}}
+			}
+		}
+	}
+	return nil
 }
 
 func (r *Registry) Get(id string) (*Model, bool) {
@@ -222,6 +332,45 @@ func (r *Registry) IDs() []string {
 	copy(out, r.order)
 	return out
 }
+
+func (r *Registry) Defaults() RegistryDefaults {
+	out := r.defaults
+	out.Fallback = append([]string(nil), r.defaults.Fallback...)
+	return out
+}
+
+func (r *Registry) DefaultTaskModel() string { return r.defaults.TaskModel }
+
+func (r *Registry) DefaultStrategy() string {
+	if validStrategy(r.defaults.Strategy) {
+		return r.defaults.Strategy
+	}
+	return StrategyBalanced
+}
+
+func (r *Registry) DefaultFallbacks() []string {
+	return append([]string(nil), r.defaults.Fallback...)
+}
+
+func (r *Registry) StageOverrides() map[string]StageOverride {
+	out := make(map[string]StageOverride, len(r.stageOverrides))
+	for stage, ov := range r.stageOverrides {
+		ov.Fallbacks = append([]string(nil), ov.Fallbacks...)
+		out[stage] = ov
+	}
+	return out
+}
+
+func (r *Registry) StageOverride(stage string) (StageOverride, bool) {
+	ov, ok := r.stageOverrides[stage]
+	if !ok {
+		return StageOverride{}, false
+	}
+	ov.Fallbacks = append([]string(nil), ov.Fallbacks...)
+	return ov, true
+}
+
+func (r *Registry) EmbeddingConfig() EmbeddingConfig { return r.embedding }
 
 func sortByStrategy(models []*Model, strategy string) {
 	sort.SliceStable(models, func(i, j int) bool {
