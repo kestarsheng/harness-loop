@@ -797,12 +797,12 @@
 
 | 字段 | 内容 |
 |---|---|
-| 目标 | 四份 DDL 完整可重放，存量读写与新索引的开关/双写策略代码化并可回退。 |
-| 关联需求 | REQ-121、REQ-058、REQ-117、REQ-118、DFX-C-03、DFX-C-04；design 5.2 / 5.3 / 5.4 / 5.5 |
-| 依赖 | T-P1-04、T-P1-13、T-P0-09 |
-| 涉及文件 | [M] `pkg/pgindex/ddl/001_mem.sql`、[M] `pkg/pgindex/ddl/002_code.sql`、[M] `pkg/pgindex/ddl/003_event.sql`、[M] `pkg/pgindex/ddl/004_task.sql`、[N] `pkg/pgindex/sync_matrix.go`、[N] `pkg/pgindex/migrate_test.go` |
-| 实施要点 | 1) 四份 DDL 编号与依赖顺序固定，全部 `IF NOT EXISTS` + 索引幂等；2) 双写矩阵：md→PG 单向为主，旧 Qdrant/Mongo 只读共存，必要时双写可开关；3) 开关关闭时回退既有检索路径且功能可用；4) 事件/检查点结构变更提供向前兼容读取；5) 每份 DDL 附版本号，`schema_migrations` 可查询。 |
-| 验收标准 | `go test ./pkg/pgindex/... -run TestMigrateAll`：空库一次迁移成功、重复迁移无变更；关闭新索引开关后旧路径可用；打开后新数据仅在新索引可查；`schema_migrations` 版本连续。 |
+| 目标 | 现有 11 份 DDL（`001_mem` ~ `011_audit_index`）在空库与存量库都完整可重放，存量读写与新索引的开关/双写策略代码化并可回退。 |
+| 关联需求 | REQ-121、REQ-058、REQ-117、REQ-118、DFX-C-03、DFX-C-04；design 5.1 / 5.2 / 5.3 / 5.4 / 5.5 |
+| 依赖 | T-P0-09、T-P1-04、T-P1-13、T-P1-23、T-P1-25、T-P1-26 |
+| 涉及文件 | [M] `pkg/pgindex/ddl/001_mem.sql` ~ `011_audit_index.sql`（共 11 份，按需补幂等）、[M] `pkg/pgindex/ddl/008_model_selection.sql`（补 `idx_model_selection_combo (stage, model_id)`）、[N] `pkg/pgindex/sync_matrix.go`、[N] `pkg/pgindex/migrate_test.go`、[M] `pkg/pgindex/migrate.go`（如需扩展前置） |
+| 实施要点 | 1) **空库前置扩展**：`001/002` 使用 `vector(1024)` 且 DDL 内无 `CREATE EXTENSION`，迁移器必须在应用 DDL 前执行 `CREATE EXTENSION IF NOT EXISTS vector`，不得依赖运维手工装；2) 11 份 DDL 编号与依赖顺序固定，全部 `IF NOT EXISTS` + 索引幂等，重复迁移零变更；3) 补 `008` 缺失的 `(stage, model_id)` combo 索引，对齐 design 5.1.4 的三个业务索引；4) 双写矩阵：md→PG 单向为主，旧 Qdrant/Mongo 只读共存，必要时双写可开关；5) 开关关闭时回退既有检索路径且功能可用；6) 事件/检查点结构变更提供向前兼容读取；7) 每份 DDL 附版本号，`schema_migrations` 可查询且 001~011 连续。 |
+| 验收标准 | `go test ./pkg/pgindex/... -run "TestMigrateAll|TestMigrateIsIdempotent|TestSchemaMatchesDesign"`（真实 DSN）：**新建空库（不预装扩展）一次迁移成功**、重复迁移无变更、`schema_migrations` 含 001~011 且连续；`model_selections` 存在 `(stage, model_id)` combo 索引；关闭新索引开关后旧路径可用；打开后新数据仅在新索引可查。另需 `go build ./...`、`depcheck` 0 violations。 |
 | 复杂度 | M |
 
 ### T-P1-31 编排、模型策略与权限接入 runtime 及事件发布
