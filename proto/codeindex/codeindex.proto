@@ -1,0 +1,53 @@
+syntax = "proto3";
+
+package codeindex;
+
+option go_package = "agent-platform/pkg/pb/codeindex";
+
+// 代码索引检索（P1 契约；handler 接线随 T-P1-14 后续增量）
+service CodeIndexService {
+  rpc SearchCode(SearchCodeRequest) returns (SearchCodeResponse);
+  rpc IndexFile(IndexFileRequest) returns (IndexFileResponse);
+}
+
+message SearchCodeRequest {
+  string tenant_id = 1;
+  string project_id = 2;
+  string query = 3;
+  int32 top_k = 4;
+  bool enable_graph = 5;
+}
+
+message CodeSearchHit {
+  string chunk_id = 1;
+  string file_path = 2;
+  int32 start_line = 3;
+  int32 end_line = 4;
+  string symbol = 5;
+  string snippet = 6;
+  double score = 7;
+  repeated string sources = 8;
+}
+
+message SearchCodeResponse {
+  repeated CodeSearchHit hits = 1;
+  int32 vector_hits = 2;
+  int32 keyword_hits = 3;
+  int32 graph_hits = 4;
+  int64 latency_ms = 5;
+}
+
+message IndexFileRequest {
+  string tenant_id = 1;
+  string project_id = 2;
+  string file_path = 3;
+  bytes content = 4;
+  bool force = 5;
+}
+
+message IndexFileResponse {
+  bool skipped = 1;
+  int32 chunks = 2;
+  int32 edges = 3;
+  string status = 4;
+}

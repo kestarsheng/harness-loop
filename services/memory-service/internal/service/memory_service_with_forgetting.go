@@ -8,9 +8,9 @@ import (
 	"time"
 
 	"agent-platform/pkg/llm"
-	"agent-platform/pkg/qdrant"
-	pb "agent-platform/pkg/pb/memory"
 	commonpb "agent-platform/pkg/pb/common"
+	pb "agent-platform/pkg/pb/memory"
+	"agent-platform/pkg/qdrant"
 	"agent-platform/services/memory-service/internal/repository"
 )
 
@@ -40,9 +40,9 @@ func DefaultForgettingConfig() ForgettingConfig {
 type MemoryServiceWithForgetting struct {
 	pb.UnimplementedMemoryServiceServer
 	llmClient llm.Client
-	qdrant   *qdrant.Client
-	repo     *repository.MemoryRepository
-	config   ForgettingConfig
+	qdrant    *qdrant.Client
+	repo      *repository.MemoryRepository
+	config    ForgettingConfig
 }
 
 // NewMemoryServiceWithForgetting creates a new memory service
@@ -83,8 +83,8 @@ func (s *MemoryServiceWithForgetting) Save(ctx context.Context, req *pb.SaveMemo
 	}
 
 	return &pb.SaveMemoryResponse{
-		Id:         memory.ID,
-		CreatedAt:  memory.CreatedAt.Unix(),
+		Id:        memory.ID,
+		CreatedAt: memory.CreatedAt.Unix(),
 	}, nil
 }
 
@@ -119,8 +119,8 @@ func (s *MemoryServiceWithForgetting) SaveBatch(ctx context.Context, req *pb.Sav
 	}
 
 	return &pb.SaveMemoryBatchResponse{
-		Ids:        ids,
-		CreatedAt:  now.Unix(),
+		Ids:       ids,
+		CreatedAt: now.Unix(),
 	}, nil
 }
 

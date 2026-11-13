@@ -7,17 +7,20 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"agent-platform/pkg/config"
 	"agent-platform/pkg/llm"
 	"agent-platform/pkg/observability"
-	"agent-platform/pkg/qdrant"
 	pb "agent-platform/pkg/pb/memory"
+	"agent-platform/pkg/pgindex"
+	"agent-platform/pkg/qdrant"
 	"agent-platform/services/memory-service/internal/cases"
 	"agent-platform/services/memory-service/internal/episodic"
 	"agent-platform/services/memory-service/internal/handler"
+	mempg "agent-platform/services/memory-service/internal/pgindex"
 	"agent-platform/services/memory-service/internal/repository"
 	"agent-platform/services/memory-service/internal/semantic"
 	"agent-platform/services/memory-service/internal/service"
@@ -123,6 +126,58 @@ func main() {
 	// Create gRPC handler with all subsystems
 	h := handler.NewMemoryHandler(memoryService, episodicMemory, semanticMemory, workingMemory, caseLibrary, caseRetriever)
 
+	// markdown 是唯一事实源：可选启用 PG 派生索引同步（无 DSN 时禁用，不影响 md 写入）
+	var mdCancel context.CancelFunc
+	if dsn := os.Getenv("HARNESS_MEM_PG_DSN"); dsn != "" {
+		idxCtx, idxCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		idxDB, idxErr := pgindex.Open(idxCtx, pgindex.DefaultConfig(dsn))
+		idxCancel()
+		if idxErr != nil {
+			log.Printf("mdsync disabled: open pg failed: %v", idxErr)
+		} else if err := idxDB.Migrate(context.Background()); err != nil {
+			log.Printf("mdsync disabled: migrate failed: %v", err)
+			idxDB.Close()
+		} else {
+			writer := mempg.NewMemoryWriter(idxDB)
+			opts := service.DefaultMDSyncOptions()
+			opts.TenantID = envOr("HARNESS_MEM_TENANT", "default")
+			opts.ProjectID = envOr("HARNESS_MEM_PROJECT", "default")
+			syncer := service.NewSyncer(writer, opts)
+			registered := 0
+			for _, spec := range strings.Split(os.Getenv("HARNESS_MEMORY_FILES"), ",") {
+				spec = strings.TrimSpace(spec)
+				if spec == "" {
+					continue
+				}
+				path, scope, ok := strings.Cut(spec, ":")
+				if !ok {
+					scope = "project"
+				}
+				syncer.Register(path, scope)
+				registered++
+			}
+			h.SetMDSync(writer)
+			h.SetRecallEmbedder(func(ctx context.Context, text string) ([]float32, error) {
+				vec, embedErr := llmClient.Embed(ctx, text)
+				if embedErr != nil {
+					return nil, embedErr
+				}
+				out := make([]float32, len(vec))
+				for i, v := range vec {
+					out[i] = float32(v)
+				}
+				return out, nil
+			})
+			mdCtx, cancel := context.WithCancel(context.Background())
+			mdCancel = cancel
+			go func() { _ = syncer.Run(mdCtx) }()
+			log.Printf("mdsync enabled: %d file(s), tenant=%s project=%s", registered, opts.TenantID, opts.ProjectID)
+			defer idxDB.Close()
+		}
+	} else {
+		log.Printf("mdsync disabled: HARNESS_MEM_PG_DSN not set (markdown remains the source of truth)")
+	}
+
 	// Create gRPC server with OTel interceptor
 	server := grpc.NewServer(
 		grpc.UnaryInterceptor(otelgrpc.UnaryServerInterceptor()),
@@ -151,10 +206,20 @@ func main() {
 	<-quit
 
 	log.Println("Shutting down Memory Service...")
+	if mdCancel != nil {
+		mdCancel()
+	}
 	server.GracefulStop()
 
 	// Close connections
 	memoryRepo.Close()
 
 	log.Println("Memory Service stopped")
+}
+
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
 }

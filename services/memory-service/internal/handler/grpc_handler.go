@@ -7,24 +7,30 @@ import (
 	"fmt"
 	"time"
 
-	pb "agent-platform/pkg/pb/memory"
 	commonpb "agent-platform/pkg/pb/common"
+	pb "agent-platform/pkg/pb/memory"
 	"agent-platform/services/memory-service/internal/cases"
 	"agent-platform/services/memory-service/internal/episodic"
+	mempg "agent-platform/services/memory-service/internal/pgindex"
 	"agent-platform/services/memory-service/internal/semantic"
 	"agent-platform/services/memory-service/internal/service"
 	"agent-platform/services/memory-service/internal/working"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // MemoryHandler implements MemoryServiceServer with layered memory subsystems
 type MemoryHandler struct {
 	pb.UnimplementedMemoryServiceServer
-	service      *service.MemoryServiceWithForgetting
-	episodic     *episodic.EpisodicMemory
-	semantic     *semantic.SemanticMemory
-	working      *working.WorkingMemory
-	caseLibrary  *cases.CaseLibrary
-	caseRetriever *cases.CaseRetriever
+	service        *service.MemoryServiceWithForgetting
+	episodic       *episodic.EpisodicMemory
+	semantic       *semantic.SemanticMemory
+	working        *working.WorkingMemory
+	caseLibrary    *cases.CaseLibrary
+	caseRetriever  *cases.CaseRetriever
+	mdWriter       *mempg.MemoryWriter
+	recallEmbedder func(ctx context.Context, text string) ([]float32, error)
 }
 
 // NewMemoryHandler creates a new memory handler with all subsystems
@@ -347,4 +353,105 @@ func (h *MemoryHandler) RetrieveCasesByPattern(ctx context.Context, pattern stri
 		return nil, fmt.Errorf("case retriever not initialized")
 	}
 	return h.caseRetriever.RetrieveByPattern(ctx, pattern, topK)
+}
+
+// SetMDSync enables the markdown-derived index writer for SyncFromMarkdown.
+func (h *MemoryHandler) SetMDSync(writer *mempg.MemoryWriter) {
+	h.mdWriter = writer
+}
+
+func (h *MemoryHandler) SyncFromMarkdown(ctx context.Context, req *pb.SyncFromMarkdownRequest) (*pb.SyncFromMarkdownResponse, error) {
+	if h.mdWriter == nil {
+		return nil, status.Error(codes.Unavailable, "E_MDSYNC_DISABLED: markdown sync is not configured")
+	}
+	if req.GetTenantId() == "" || req.GetProjectId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "tenant_id and project_id are required")
+	}
+	scope := req.GetScope()
+	if scope == "" {
+		scope = "project"
+	}
+
+	var records []mempg.TopicRecord
+	var deleteKeys []string
+	for _, ref := range req.GetTopics() {
+		if ref.GetDeleted() {
+			deleteKeys = append(deleteKeys, ref.GetTopicKey())
+			continue
+		}
+		records = append(records, mempg.TopicRecord{
+			TenantID:    req.GetTenantId(),
+			ProjectID:   req.GetProjectId(),
+			Scope:       scope,
+			TopicKey:    ref.GetTopicKey(),
+			Category:    ref.GetCategory(),
+			Title:       ref.GetTitle(),
+			Body:        ref.GetBody(),
+			Pinned:      ref.GetPinned(),
+			OrderRank:   int(ref.GetOrderRank()),
+			ContentHash: ref.GetContentHash(),
+			SourceFile:  req.GetFile(),
+			UpdatedAt:   time.UnixMilli(ref.GetUpdatedAtMs()).UTC(),
+		})
+	}
+
+	indexed, err := h.mdWriter.UpsertTopics(ctx, records)
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	deleted, err := h.mdWriter.DeleteTopics(ctx, req.GetTenantId(), req.GetProjectId(), scope, deleteKeys)
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	return &pb.SyncFromMarkdownResponse{
+		Indexed:     int32(indexed),
+		Deleted:     int32(deleted),
+		IndexedAtMs: time.Now().UnixMilli(),
+	}, nil
+}
+
+// SetRecallEmbedder enables semantic recall (nil keeps full-text-only recall).
+func (h *MemoryHandler) SetRecallEmbedder(embedder func(ctx context.Context, text string) ([]float32, error)) {
+	h.recallEmbedder = embedder
+}
+
+func (h *MemoryHandler) RecallTopics(ctx context.Context, req *pb.RecallTopicsRequest) (*pb.RecallTopicsResponse, error) {
+	if h.mdWriter == nil {
+		return nil, status.Error(codes.Unavailable, "E_MEMORY_INDEX_DISABLED: memory index is not configured")
+	}
+	if req.GetTenantId() == "" || req.GetProjectId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "tenant_id and project_id are required")
+	}
+	hits, stats, err := h.mdWriter.Recall(ctx, mempg.RecallOptions{
+		TenantID:   req.GetTenantId(),
+		ProjectID:  req.GetProjectId(),
+		Query:      req.GetQuery(),
+		Scope:      req.GetScope(),
+		Categories: req.GetCategories(),
+		TopK:       int(req.GetTopK()),
+		RRFK:       int(req.GetRrfK()),
+		Semantic:   req.GetSemantic(),
+		Embedder:   h.recallEmbedder,
+	})
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	resp := &pb.RecallTopicsResponse{
+		VectorCalled: stats.VectorCalled,
+		Trigger:      stats.Trigger,
+		LatencyMs:    stats.LatencyMs,
+	}
+	for _, hit := range hits {
+		resp.Hits = append(resp.Hits, &pb.RecallTopicHit{
+			TopicKey:    hit.TopicKey,
+			Title:       hit.Title,
+			Body:        hit.Body,
+			Category:    hit.Category,
+			SourceFile:  hit.SourceFile,
+			UpdatedAtMs: hit.UpdatedAt.UnixMilli(),
+			Score:       hit.RRFScore,
+			Sources:     hit.Sources,
+		})
+	}
+	return resp, nil
 }

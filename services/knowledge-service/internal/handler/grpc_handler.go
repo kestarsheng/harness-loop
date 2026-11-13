@@ -4,8 +4,8 @@ package handler
 import (
 	"context"
 
-	pb "agent-platform/pkg/pb/knowledge"
 	commonpb "agent-platform/pkg/pb/common"
+	pb "agent-platform/pkg/pb/knowledge"
 	"agent-platform/services/knowledge-service/internal/service"
 )
 

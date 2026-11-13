@@ -1,0 +1,11 @@
+version: 1
+approval:
+  enabled: true
+  timeout_seconds: 300
+  cost_threshold: 0.10
+  timeout_auto_approve: false
+  high_risk:
+    delete: true
+    network_write: true
+    deploy: true
+    cost: true

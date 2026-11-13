@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path"
 	"strings"
 
 	"agent-platform/pkg/harnessloop/policy/sandbox"
@@ -30,13 +31,33 @@ const (
 var errInvalidTool = errors.New("policy: tool name is required")
 
 type ToolArgs struct {
-	Paths   []string
-	Command []string
+	Paths         []string
+	Command       []string
+	NetworkMethod string
+	EstimatedCost float64
 }
 
 type PolicySet struct {
 	AllowTools []string
 	DenyTools  []string
+	Rules      []Rule
+}
+
+type Effect string
+
+const (
+	EffectAllow           Effect = "allow"
+	EffectDeny            Effect = "deny"
+	EffectRequireApproval Effect = "require_approval"
+)
+
+type Rule struct {
+	ID               string
+	Tool             string
+	Tags             []string
+	Stages           []string
+	Effect           Effect
+	RequiresApproval bool
 }
 
 type Request struct {
@@ -48,6 +69,14 @@ type Request struct {
 	Tenant          *PolicySet
 	Role            *PolicySet
 	Task            *PolicySet
+
+	TenantID  string
+	ProjectID string
+	TaskID    string
+	SubtaskID string
+	RoleName  string
+	AgentID   string
+	Attempt   int
 }
 
 type Decision struct {
@@ -59,6 +88,11 @@ type Decision struct {
 	Tool          string
 	Stage         string
 	RequestedPath string
+
+	Effect           Effect
+	RequiresApproval bool
+	CacheHit         bool
+	DurationUS       int64
 }
 
 func (d Decision) Error() string {
@@ -84,6 +118,14 @@ func NewEngine() *Engine {
 }
 
 func (e *Engine) Decide(ctx context.Context, req Request) Decision {
+	d := e.SystemDecide(ctx, req)
+	if !d.Allowed {
+		return d
+	}
+	return e.applyLayers(req)
+}
+
+func (e *Engine) SystemDecide(ctx context.Context, req Request) Decision {
 	base := Decision{Tool: req.Tool, Stage: req.Stage}
 
 	if req.Tool == "" {
@@ -153,6 +195,63 @@ func (e *Engine) Decide(ctx context.Context, req Request) Decision {
 		}
 	}
 
+	if len(req.Args.Paths) > 0 {
+		hasWrite := false
+		for _, tag := range tags {
+			if tag == TagWrite {
+				hasWrite = true
+			}
+		}
+		if hasWrite {
+			for _, p := range req.Args.Paths {
+				if isSelfElevationPath(p) {
+					base.Layer = LayerSystem
+					base.RuleID = "policy.self_elevation"
+					base.Code = CodeSelfElevation
+					base.RequestedPath = p
+					base.Reason = "agents must not modify policy, credential or secret files"
+					return base
+				}
+			}
+		}
+		if req.WorkspaceRoot == "" {
+			base.Layer = LayerSystem
+			base.RuleID = "sandbox.workspace"
+			base.Code = CodePathEscape
+			base.RequestedPath = req.Args.Paths[0]
+			base.Reason = "workspace root is required for path arguments"
+			return base
+		}
+		guard := sandbox.PathGuard{Root: req.WorkspaceRoot, AllowedSubpaths: req.AllowedSubpaths, Cached: !hasWrite}
+		if bad, err := guard.Check(req.Args.Paths); err != nil {
+			base.Layer = LayerSystem
+			base.RuleID = "sandbox.realpath"
+			base.RequestedPath = bad
+			base.Code = CodePathEscape
+			base.Reason = err.Error()
+			return base
+		}
+	}
+
+	if len(req.Args.Command) > 0 {
+		if err := e.ExecAllow.Check(req.Args.Command); err != nil {
+			base.Layer = LayerSystem
+			base.RuleID = "sandbox.exec"
+			base.Code = CodeExecDenied
+			base.Reason = err.Error()
+			return base
+		}
+	}
+
+	base.Allowed = true
+	base.Layer = LayerSystem
+	base.RuleID = "system.allow"
+	base.Reason = "system constraints satisfied"
+	return base
+}
+
+func (e *Engine) applyLayers(req Request) Decision {
+	base := Decision{Tool: req.Tool, Stage: req.Stage}
 	for _, layer := range []struct {
 		name Layer
 		set  *PolicySet
@@ -180,54 +279,6 @@ func (e *Engine) Decide(ctx context.Context, req Request) Decision {
 		}
 	}
 
-	if len(req.Args.Paths) > 0 {
-		hasWrite := false
-		for _, tag := range tags {
-			if tag == TagWrite {
-				hasWrite = true
-			}
-		}
-		if hasWrite {
-			for _, p := range req.Args.Paths {
-				if isSelfElevationPath(p) {
-					base.Layer = LayerSystem
-					base.RuleID = "policy.self_elevation"
-					base.Code = CodeSelfElevation
-					base.RequestedPath = p
-					base.Reason = "agents must not modify policy or permission files"
-					return base
-				}
-			}
-		}
-		if req.WorkspaceRoot == "" {
-			base.Layer = LayerSystem
-			base.RuleID = "sandbox.workspace"
-			base.Code = CodePathEscape
-			base.RequestedPath = req.Args.Paths[0]
-			base.Reason = "workspace root is required for path arguments"
-			return base
-		}
-		guard := sandbox.PathGuard{Root: req.WorkspaceRoot, AllowedSubpaths: req.AllowedSubpaths}
-		if bad, err := guard.Check(req.Args.Paths); err != nil {
-			base.Layer = LayerSystem
-			base.RuleID = "sandbox.realpath"
-			base.RequestedPath = bad
-			base.Code = CodePathEscape
-			base.Reason = err.Error()
-			return base
-		}
-	}
-
-	if len(req.Args.Command) > 0 {
-		if err := e.ExecAllow.Check(req.Args.Command); err != nil {
-			base.Layer = LayerSystem
-			base.RuleID = "sandbox.exec"
-			base.Code = CodeExecDenied
-			base.Reason = err.Error()
-			return base
-		}
-	}
-
 	base.Allowed = true
 	base.Layer = LayerSystem
 	base.RuleID = "default.allow"
@@ -235,10 +286,33 @@ func (e *Engine) Decide(ctx context.Context, req Request) Decision {
 	return base
 }
 
+// policyPathFragments and sensitive* cover the system hard limits: policy
+// files, credential stores and secret material must never be writable by an
+// agent, regardless of tenant/role/task allowlists.
 var policyPathFragments = []string{
 	"config/harness_loop/",
 	".harness/policy/",
 	".harness/config",
+	"secrets/",
+	".ssh/",
+}
+
+var sensitiveBaseNames = map[string]struct{}{
+	"id_rsa":      {},
+	"id_dsa":      {},
+	"id_ecdsa":    {},
+	"id_ed25519":  {},
+	"credentials": {},
+	"api_key":     {},
+	"apikey":      {},
+	"api-key":     {},
+}
+
+var sensitiveExtensions = map[string]struct{}{
+	".pem": {},
+	".key": {},
+	".p12": {},
+	".pfx": {},
 }
 
 func isSelfElevationPath(p string) bool {
@@ -247,6 +321,22 @@ func isSelfElevationPath(p string) bool {
 		if strings.Contains(norm, frag) {
 			return true
 		}
+	}
+	base := path.Base(norm)
+	if base == "." || base == "/" {
+		return false
+	}
+	if base == ".env" || strings.HasPrefix(base, ".env.") {
+		return true
+	}
+	if _, ok := sensitiveBaseNames[base]; ok {
+		return true
+	}
+	if strings.HasPrefix(base, "credentials.") || strings.HasPrefix(base, "api_key") || strings.HasPrefix(base, "api-key") {
+		return true
+	}
+	if _, ok := sensitiveExtensions[path.Ext(base)]; ok {
+		return true
 	}
 	return false
 }

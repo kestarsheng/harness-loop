@@ -30,10 +30,17 @@ const (
 	VarStageModel       = "__stage_model__"
 	VarModelWindow      = "__model_window__"
 	VarRequiresToolCall = "__requires_tool_call__"
+	VarStage            = "__stage__"
+	VarTaskID           = "__task_id__"
+	VarProjectID        = "__project_id__"
+	VarTenantID         = "__tenant_id__"
+	VarWorkspaceRoot    = "__workspace_root__"
+	VarAgentID          = "__agent_id__"
 )
 
 var RequiredContextVars = []string{
 	VarStageMode, VarPolicySnapshot, VarPolicyHash, VarStageModel, VarModelWindow, VarRequiresToolCall,
+	VarStage, VarTaskID, VarProjectID, VarTenantID, VarWorkspaceRoot, VarAgentID,
 }
 
 var ErrStageRunnerInput = errors.New("stage runner: invalid input")
@@ -46,8 +53,13 @@ type EventPublisher interface {
 	Publish(ctx context.Context, e *event.Event) error
 }
 
+type ToolGate interface {
+	AuthorizeTool(ctx context.Context, in ToolCallInput) error
+}
+
 type StageRunInput struct {
 	TaskID           string
+	WorkspaceRoot    string
 	TenantID         string
 	ProjectID        string
 	SessionID        string
@@ -80,6 +92,7 @@ type StageRunResult struct {
 type StageRunner struct {
 	agents AgentStreamer
 	events EventPublisher
+	gate   ToolGate
 }
 
 func NewStageRunner(agents AgentStreamer) *StageRunner {
@@ -88,6 +101,13 @@ func NewStageRunner(agents AgentStreamer) *StageRunner {
 
 func (r *StageRunner) WithEvents(p EventPublisher) *StageRunner {
 	r.events = p
+	return r
+}
+
+// WithToolGate routes every agent tool call through the policy resolver. When
+// no gate is wired the stage runner keeps the pre-T-P1-31 behaviour.
+func (r *StageRunner) WithToolGate(g ToolGate) *StageRunner {
+	r.gate = g
 	return r
 }
 
@@ -122,6 +142,12 @@ func (in StageRunInput) contextVars() map[string]string {
 		VarStageModel:       in.StageModel,
 		VarModelWindow:      strconv.Itoa(in.ModelWindow),
 		VarRequiresToolCall: strconv.FormatBool(in.RequiresToolCall),
+		VarStage:            in.Stage,
+		VarTaskID:           in.TaskID,
+		VarProjectID:        in.ProjectID,
+		VarTenantID:         in.TenantID,
+		VarWorkspaceRoot:    in.WorkspaceRoot,
+		VarAgentID:          in.EntryAgent,
 	}
 	if canonical, err := json.Marshal(json.RawMessage(snapshot)); err == nil && len(canonical) > 0 {
 		vars[VarPolicySnapshot] = string(snapshot)
@@ -183,6 +209,18 @@ func (r *StageRunner) Run(ctx context.Context, in StageRunInput) (*StageRunResul
 		}
 
 		if tc := chunk.ToolCall; tc != nil {
+			if r.gate != nil && !fsm.IsStageFinishTool(tc.Name) {
+				gateErr := r.gate.AuthorizeTool(ctx, ToolCallInput{
+					TenantID: in.TenantID, ProjectID: in.ProjectID, TaskID: in.TaskID,
+					Stage: in.Stage, AgentID: in.EntryAgent, WorkspaceRoot: in.WorkspaceRoot,
+					Tool: tc.Name, Arguments: []byte(tc.Arguments),
+				})
+				if gateErr != nil {
+					res.Classification = &retry.Classification{Category: retry.System, Retryable: false, Reason: gateErr.Error()}
+					res.Decision = retry.FinishDecision{Action: retry.ActionFail, Category: retry.System, Reason: gateErr.Error()}
+					return gateErr
+				}
+			}
 			tracker.Touch(watchdog.ActivityToolResult)
 			if fsm.IsStageFinishTool(tc.Name) {
 				args, perr := fsm.ParseStageFinish([]byte(tc.Arguments))
@@ -203,6 +241,9 @@ func (r *StageRunner) Run(ctx context.Context, in StageRunInput) (*StageRunResul
 	res.Elapsed = time.Since(start)
 
 	if err != nil {
+		if res.Classification != nil && !res.Classification.Retryable {
+			return res, err
+		}
 		stated := ClassifyStageError(err, streamErr)
 		res.Classification = &stated
 		res.Decision = retry.FinishDecision{Action: retry.ActionRetry, Category: stated.Category, Reason: stated.Reason}

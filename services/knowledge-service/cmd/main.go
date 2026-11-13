@@ -12,10 +12,11 @@ import (
 	"agent-platform/pkg/config"
 	"agent-platform/pkg/llm"
 	"agent-platform/pkg/mongodb"
-	"agent-platform/pkg/qdrant"
 	pb "agent-platform/pkg/pb/knowledge"
+	"agent-platform/pkg/qdrant"
 	"agent-platform/services/knowledge-service/internal/handler"
 	"agent-platform/services/knowledge-service/internal/repository"
+	"agent-platform/services/knowledge-service/internal/rerank"
 	"agent-platform/services/knowledge-service/internal/service"
 
 	"google.golang.org/grpc"
@@ -94,6 +95,12 @@ func main() {
 
 	// Create knowledge service
 	knowledgeService := service.NewKnowledgeService(llmClient, docRepo, cfg)
+	if os.Getenv("KNOWLEDGE_RERANK_ENABLED") != "false" {
+		knowledgeService.SetReranker(rerank.NewLLMReranker(llmClient, cfg.LLM.Model))
+		log.Printf("knowledge rerank enabled (model=%s, timeout=3s, fallback=degraded)", cfg.LLM.Model)
+	} else {
+		log.Printf("knowledge rerank disabled, fusion order will be used")
+	}
 
 	// Create gRPC server
 	server := grpc.NewServer()

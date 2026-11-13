@@ -24,6 +24,15 @@ harness:
 policy:
   matrix_file: "config/harness_loop/stage_matrix.yaml"
   exec_allow_file: "config/harness_loop/exec_allow.yaml"
+  approval_file: "config/harness_loop/approval.yaml"
+
+approval:
+  # agent-service approval HTTP API; empty means high-risk calls stay pending
+  addr: "http://127.0.0.1:50009"
+  # human decision timeout; timeout never auto-approves
+  timeout_seconds: 300
+  # status polling interval used by Await
+  poll_ms: 200
 
 models:
   file: "config/harness_loop/models.yaml"
@@ -33,3 +42,9 @@ retry:
 
 feature_flags:
   file: "config/harness_loop/features.yaml"
+
+memory:
+  # memory-service gRPC address; empty disables recall and degrades to markdown
+  addr: "memory-service:50003"
+  # long-term memory home; empty uses ~/.harness
+  harness_home: ""

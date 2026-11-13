@@ -21,6 +21,8 @@ import SessionListPage from "./pages/Session";
 import SessionReplayPage from "./pages/Session/Replay";
 import PlaygroundPage from "./pages/Playground";
 import WorkflowEditor from "./pages/Workflow";
+import HarnessLoopMonitor from "./pages/HarnessLoop";
+import HarnessLoopTaskDetail from "./pages/HarnessLoop/TaskDetail";
 
 function App() {
   return (
@@ -33,6 +35,8 @@ function App() {
         <Route path="agents" element={<AgentsPage />} />
         <Route path="skills" element={<SkillsPage />} />
         <Route path="harness" element={<HarnessPage />} />
+        <Route path="harness-loop/monitor" element={<HarnessLoopMonitor />} />
+        <Route path="harness-loop/tasks/:taskId" element={<HarnessLoopTaskDetail />} />
         <Route path="gateway" element={<GatewayPage />} />
         <Route path="session" element={<SessionListPage />} />
         <Route path="session/replay/:sessionId" element={<SessionReplayPage />} />

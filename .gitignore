@@ -71,8 +71,14 @@ docs/internal/
 # =========================================
 # Harness Loop 运行期产物
 # =========================================
-# 工作区记忆文件由用户与 Agent 共同维护，属本地状态
-.harness/
+# 工作区记忆文件由用户与 Agent 共同维护；md 允许版本化，备份/锁/临时仍忽略
+.harness/*
+!.harness/memory/
+.harness/memory/*
+!.harness/memory/*.md
+.harness/memory/backup/
+.harness/memory/.lock
+.harness/tmp/
 .harness.local/
 
 # =========================================

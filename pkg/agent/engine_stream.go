@@ -87,6 +87,8 @@ func (e *Engine) RunStream(ctx context.Context, req *ExecutionRequest, callback 
 	execCtx.UserID = req.UserID
 	execCtx.EntryAgent = req.EntryAgent
 	execCtx.StageMode = req.StageMode
+	execCtx.Goal = req.Goal
+	execCtx.SuccessCriteria = req.SuccessCriteria
 	execCtx.MarkRunning()
 
 	// Set initial variables
@@ -154,6 +156,9 @@ func (e *Engine) executeLoopStream(ctx context.Context, execCtx *ExecutionContex
 
 		// Build tools for this agent
 		tools, err := e.buildAgentTools(ctx, currentAgent)
+		if err == nil && execCtx.StageMode {
+			tools = appendStageFinishTool(ctx, e.tools, tools)
+		}
 		if err != nil {
 			callback(StreamEvent{Type: EventError, Error: fmt.Sprintf("build tools: %v", err)})
 			return nil, fmt.Errorf("build tools: %w", err)
@@ -201,6 +206,17 @@ func (e *Engine) executeLoopStream(ctx context.Context, execCtx *ExecutionContex
 			// No tool calls — we're done, unless stage mode requires a stage_finish call.
 			execCtx.AddMessage("assistant", llmResp.Content)
 			if execCtx.StageMode {
+				if args, ok := ParseStageFinishProtocol(llmResp.Content); ok {
+					callback(StreamEvent{
+						Type: EventToolStart, AgentID: currentAgent.ID, AgentName: currentAgent.Name,
+						ToolName: "stage_finish", ToolArgs: args,
+					})
+					callback(StreamEvent{
+						Type: EventToolResult, AgentID: currentAgent.ID, AgentName: currentAgent.Name,
+						ToolName: "stage_finish", ToolResult: `{"status":"finished"}`,
+					})
+					return e.buildResult(execCtx, llmResp.Content), nil
+				}
 				execCtx.MarkError(ErrStageNotFinished.Error())
 				callback(StreamEvent{
 					Type:    EventError,

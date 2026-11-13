@@ -19,7 +19,7 @@ DOCKER_COMPOSE_PROD := docker/docker-compose.yaml
 # Protobuf 生成
 # ============================================================
 
-proto: proto-common proto-chat proto-knowledge proto-memory proto-a2a proto-mcp proto-harness
+proto: proto-common proto-chat proto-knowledge proto-memory proto-a2a proto-agent proto-mcp proto-harness
 	@echo "✅ Protobuf generation completed"
 
 proto-common:
@@ -61,6 +61,14 @@ proto-a2a:
 		--go-grpc_opt=module=agent-platform \
 		-I . \
 		$(PROTO_DIR)/a2a/*.proto
+
+proto-agent:
+	@echo "Generating agent protobuf..."
+	@protoc --go_out=. --go-grpc_out=. \
+		--go_opt=module=agent-platform \
+		--go-grpc_opt=module=agent-platform \
+		-I . \
+		$(PROTO_DIR)/agent/*.proto
 
 proto-mcp:
 	@echo "Generating mcp protobuf..."

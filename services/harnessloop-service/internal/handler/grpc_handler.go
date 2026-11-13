@@ -28,50 +28,53 @@ import (
 type Handler struct {
 	harnesspb.UnimplementedHarnessLoopServiceServer
 
-	cfg         config.Config
-	tasks       *repository.TaskRepo
-	attempts    *repository.AttemptRepo
-	events      *repository.EventRepo
-	checkpoints *repository.CheckpointRepo
-	acceptances *repository.AcceptanceRepo
-	runtime     *service.Runtime
-	policy      *policy.Engine
-	models      *modelregistry.Registry
-	publisher   *event.Publisher
-	flags       *config.FlagSet
+	cfg          config.Config
+	tasks        *repository.TaskRepo
+	attempts     *repository.AttemptRepo
+	events       *repository.EventRepo
+	checkpoints  *repository.CheckpointRepo
+	acceptances  *repository.AcceptanceRepo
+	runtime      *service.Runtime
+	policy       *policy.Engine
+	policyBridge *service.PolicyBridge
+	models       *modelregistry.Registry
+	publisher    *event.Publisher
+	flags        *config.FlagSet
 
 	mu      sync.Mutex
 	running map[string]context.CancelFunc
 }
 
 type Deps struct {
-	Config      config.Config
-	Tasks       *repository.TaskRepo
-	Attempts    *repository.AttemptRepo
-	Events      *repository.EventRepo
-	Checkpoints *repository.CheckpointRepo
-	Acceptances *repository.AcceptanceRepo
-	Runtime     *service.Runtime
-	Policy      *policy.Engine
-	Models      *modelregistry.Registry
-	Publisher   *event.Publisher
-	Flags       *config.FlagSet
+	Config       config.Config
+	Tasks        *repository.TaskRepo
+	Attempts     *repository.AttemptRepo
+	Events       *repository.EventRepo
+	Checkpoints  *repository.CheckpointRepo
+	Acceptances  *repository.AcceptanceRepo
+	Runtime      *service.Runtime
+	Policy       *policy.Engine
+	PolicyBridge *service.PolicyBridge
+	Models       *modelregistry.Registry
+	Publisher    *event.Publisher
+	Flags        *config.FlagSet
 }
 
 func New(d Deps) *Handler {
 	return &Handler{
-		cfg:         d.Config,
-		tasks:       d.Tasks,
-		attempts:    d.Attempts,
-		events:      d.Events,
-		checkpoints: d.Checkpoints,
-		acceptances: d.Acceptances,
-		runtime:     d.Runtime,
-		policy:      d.Policy,
-		models:      d.Models,
-		publisher:   d.Publisher,
-		flags:       d.Flags,
-		running:     make(map[string]context.CancelFunc),
+		cfg:          d.Config,
+		tasks:        d.Tasks,
+		attempts:     d.Attempts,
+		events:       d.Events,
+		checkpoints:  d.Checkpoints,
+		acceptances:  d.Acceptances,
+		runtime:      d.Runtime,
+		policy:       d.Policy,
+		policyBridge: d.PolicyBridge,
+		models:       d.Models,
+		publisher:    d.Publisher,
+		flags:        d.Flags,
+		running:      make(map[string]context.CancelFunc),
 	}
 }
 
@@ -200,9 +203,20 @@ func (h *Handler) runInput(tenantID, taskID string) service.RunInput {
 	if model, ok := h.models.Get(h.cfg.Agent.StageModel); ok {
 		window = model.ContextWindow
 	}
+	projectID := ""
+	goal := ""
+	goalHash := ""
+	if task, err := h.tasks.Get(context.Background(), tenantID, taskID); err == nil {
+		projectID = task.ProjectID
+		goal = task.Goal
+		goalHash = task.GoalHash
+	}
 	return service.RunInput{
 		TenantID:         tenantID,
+		ProjectID:        projectID,
 		TaskID:           taskID,
+		Goal:             goal,
+		GoalHash:         goalHash,
 		EntryAgent:       h.cfg.Agent.EntryAgent,
 		StageModel:       h.cfg.Agent.StageModel,
 		ModelWindow:      window,
@@ -416,10 +430,28 @@ func (h *Handler) ResolveModel(ctx context.Context, req *harnesspb.ResolveModelR
 func (h *Handler) PreflightTool(ctx context.Context, req *harnesspb.PreflightToolRequest) (*harnesspb.ToolDecision, error) {
 	tenantID := tenantFrom(ctx, req.GetTenantId())
 	root := ""
+	projectID := ""
 	if req.GetTaskId() != "" {
 		if t, err := h.tasks.Get(ctx, tenantID, req.GetTaskId()); err == nil {
 			root = t.WorkspaceRoot
+			projectID = t.ProjectID
 		}
+	}
+	if h.policyBridge != nil {
+		res := h.policyBridge.Preflight(ctx, service.ToolCallInput{
+			TenantID: tenantID, ProjectID: projectID, TaskID: req.GetTaskId(),
+			Stage: req.GetStage(), WorkspaceRoot: root, Tool: req.GetToolName(),
+			Paths: req.GetPathArgs(), Command: req.GetCommandArgs(),
+		})
+		return &harnesspb.ToolDecision{
+			Allowed:          res.Allowed,
+			ReasonCode:       res.Code,
+			RuleId:           res.RuleID,
+			Layer:            string(res.Layer),
+			RequiresApproval: res.RequiresApproval,
+			ApprovalId:       res.ApprovalID,
+			Detail:           res.Reason,
+		}, nil
 	}
 	d := h.policy.Decide(ctx, policy.Request{
 		Tool:          req.GetToolName(),

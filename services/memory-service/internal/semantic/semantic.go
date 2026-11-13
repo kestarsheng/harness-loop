@@ -31,7 +31,7 @@ const (
 	RelationTypePartOf     RelationType = "part_of"     // Part-whole
 	RelationTypeRelatedTo  RelationType = "related_to"  // General relation
 	RelationTypeCauses     RelationType = "causes"      // Causation
-	RelationTypePrecedes   RelationType = "precedes"   // Temporal order
+	RelationTypePrecedes   RelationType = "precedes"    // Temporal order
 	RelationTypeFollows    RelationType = "follows"     // Temporal order
 	RelationTypeInstanceOf RelationType = "instance_of" // Instance
 	RelationTypeSameAs     RelationType = "same_as"     // Equivalence
@@ -55,23 +55,23 @@ type Concept struct {
 
 // Relation represents a relation between concepts
 type Relation struct {
-	ID          string      `json:"id"`
-	FromConcept string      `json:"from_concept"` // Source concept ID
-	ToConcept   string      `json:"to_concept"`   // Target concept ID
+	ID          string       `json:"id"`
+	FromConcept string       `json:"from_concept"` // Source concept ID
+	ToConcept   string       `json:"to_concept"`   // Target concept ID
 	Type        RelationType `json:"type"`
-	Weight      float64     `json:"weight"`       // Strength of relation (0-1)
-	Confidence  float64     `json:"confidence"`   // Confidence in this relation
-	Evidence    []string    `json:"evidence"`     // Supporting evidence
-	CreatedAt   time.Time   `json:"created_at"`
+	Weight      float64      `json:"weight"`     // Strength of relation (0-1)
+	Confidence  float64      `json:"confidence"` // Confidence in this relation
+	Evidence    []string     `json:"evidence"`   // Supporting evidence
+	CreatedAt   time.Time    `json:"created_at"`
 }
 
 // KnowledgeGraph represents a graph of concepts and relations
 type KnowledgeGraph struct {
-	Concepts   map[string]*Concept   `json:"concepts"`
-	Relations  map[string]*Relation  `json:"relations"`
-	Edges      map[string][]string   `json:"edges"`      // concept -> related concept IDs
-	ReverseEdges map[string][]string `json:"reverse_edges"` // reverse edges
-	mu         sync.RWMutex
+	Concepts     map[string]*Concept  `json:"concepts"`
+	Relations    map[string]*Relation `json:"relations"`
+	Edges        map[string][]string  `json:"edges"`         // concept -> related concept IDs
+	ReverseEdges map[string][]string  `json:"reverse_edges"` // reverse edges
+	mu           sync.RWMutex
 }
 
 // NewKnowledgeGraph creates a new knowledge graph
@@ -306,11 +306,11 @@ func (g *KnowledgeGraph) GetStats() map[string]interface{} {
 	defer g.mu.RUnlock()
 
 	stats := map[string]interface{}{
-		"total_concepts": len(g.Concepts),
-		"total_relations": len(g.Relations),
-		"by_concept_type": make(map[ConceptType]int),
+		"total_concepts":   len(g.Concepts),
+		"total_relations":  len(g.Relations),
+		"by_concept_type":  make(map[ConceptType]int),
 		"by_relation_type": make(map[RelationType]int),
-		"avg_connections": 0,
+		"avg_connections":  0,
 	}
 
 	for _, c := range g.Concepts {

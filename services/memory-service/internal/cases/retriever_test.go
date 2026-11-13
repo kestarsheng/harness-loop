@@ -30,11 +30,11 @@ func TestLearnWithLLMPassesPrompt(t *testing.T) {
 	// Arrange
 	lib := NewCaseLibrary(100)
 	c := &Case{
-		ID:       "case-1",
-		Type:     CaseTypeSuccess,
-		Status:   CaseStatusActive,
-		Task:     "deploy service",
-		Success:  true,
+		ID:        "case-1",
+		Type:      CaseTypeSuccess,
+		Status:    CaseStatusActive,
+		Task:      "deploy service",
+		Success:   true,
 		ToolsUsed: []string{"kubectl"},
 	}
 	_ = lib.Store(context.Background(), c)

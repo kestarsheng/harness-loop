@@ -81,7 +81,7 @@ func NewAgentService(registry *agent.Registry, llmClient llm.Client, mcpClient m
 	s.engine = agent.NewEngine(
 		registry,
 		&llmAdapter{client: metricsLLM},
-		&toolAdapter{mcpClient: mcpClient},
+		&stageFinishExecutor{inner: &toolAdapter{mcpClient: mcpClient}},
 		store,
 		agent.DefaultEngineConfig(),
 	)
@@ -230,6 +230,7 @@ func (s *AgentService) Execute(ctx context.Context, req *pb.ExecuteRequest) (*pb
 	for k, v := range req.ContextVars {
 		contextVars[k] = v
 	}
+	ctx = withToolPolicyContext(ctx, toolPolicyContextFromVars(contextVars, req.TenantId))
 
 	// Resolve system prompt: render from Prompt Management if agent has PromptTemplateKey
 	systemPromptOverride := s.renderSystemPrompt(ctx, req.EntryAgent, req.SessionId, contextVars)
@@ -336,6 +337,7 @@ func (s *AgentService) ExecuteStream(req *pb.ExecuteStreamRequest, stream pb.Age
 	for k, v := range req.ContextVars {
 		contextVars[k] = v
 	}
+	ctx = withToolPolicyContext(ctx, toolPolicyContextFromVars(contextVars, req.TenantId))
 
 	// Resolve system prompt: render from Prompt Management if agent has PromptTemplateKey
 	systemPromptOverride := s.renderSystemPrompt(ctx, req.EntryAgent, req.SessionId, contextVars)
@@ -383,8 +385,10 @@ func (s *AgentService) ExecuteStream(req *pb.ExecuteStreamRequest, stream pb.Age
 			}
 		}
 
-		// Add tool call info
-		if event.ToolName != "" {
+		// Only tool-start events carry actionable call arguments. Tool-result
+		// events reuse ToolName but have empty ToolArgs; mapping them as a tool
+		// call would overwrite the real arguments downstream.
+		if event.ToolName != "" && event.Type == agent.EventToolStart && len(event.ToolArgs) > 0 {
 			chunk.ToolCall = &pb.ToolCall{
 				Name:      event.ToolName,
 				Arguments: string(event.ToolArgs),
@@ -475,9 +479,83 @@ func (s *AgentService) toProtoAgent(ag *agent.Agent) *pb.Agent {
 		Model:             ag.Model,
 		MaxTokens:         int32(ag.MaxTokens),
 		Temperature:       ag.Temperature,
+		Metadata:          toStringMap(ag.Metadata),
 		CreatedAt:         ag.CreatedAt.Unix(),
 		UpdatedAt:         ag.UpdatedAt.Unix(),
 	}
+}
+
+// ListAgentTools returns the tools and roles declared by an agent.
+func (s *AgentService) ListAgentTools(ctx context.Context, req *pb.ListAgentToolsRequest) (*pb.ListAgentToolsResponse, error) {
+	ag := s.registry.Get(req.AgentId)
+	if ag == nil {
+		return nil, agent.ErrAgentNotFound
+	}
+	return &pb.ListAgentToolsResponse{
+		AgentId: ag.ID,
+		Tools:   append([]string(nil), ag.Tools...),
+		Roles:   rolesFromMetadata(ag.Metadata),
+	}, nil
+}
+
+// GetAgentRoles returns the roles declared by an agent.
+func (s *AgentService) GetAgentRoles(ctx context.Context, req *pb.GetAgentRolesRequest) (*pb.GetAgentRolesResponse, error) {
+	ag := s.registry.Get(req.AgentId)
+	if ag == nil {
+		return nil, agent.ErrAgentNotFound
+	}
+	return &pb.GetAgentRolesResponse{
+		AgentId: ag.ID,
+		Roles:   rolesFromMetadata(ag.Metadata),
+	}, nil
+}
+
+// toStringMap converts agent metadata to a string map; non-string values are skipped.
+func toStringMap(meta map[string]any) map[string]string {
+	if len(meta) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(meta))
+	for k, v := range meta {
+		if s, ok := v.(string); ok {
+			out[k] = s
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// rolesFromMetadata reads the role metadata, accepting a comma-separated string or a string list.
+func rolesFromMetadata(meta map[string]any) []string {
+	if meta == nil {
+		return nil
+	}
+	var roles []string
+	switch v := meta["role"].(type) {
+	case string:
+		roles = splitRoles(v)
+	case []string:
+		roles = append(roles, v...)
+	case []any:
+		for _, item := range v {
+			if s, ok := item.(string); ok {
+				roles = append(roles, splitRoles(s)...)
+			}
+		}
+	}
+	return roles
+}
+
+func splitRoles(raw string) []string {
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
 }
 
 // toProtoSkill converts a skill to proto.
@@ -885,6 +963,13 @@ func (a *toolAdapter) Execute(ctx context.Context, toolName string, arguments js
 	req := &mcppb.CallToolRequest{
 		Name:      toolName,
 		Arguments: string(arguments),
+	}
+
+	// Forward harness policy context (stage/task/workspace) so mcp-service can
+	// enforce permissions at the real execution point.
+	if pc, ok := toolPolicyContextFrom(ctx); ok {
+		req.TenantId = pc.TenantID
+		toolConfig = mergeToolPolicyContext(toolConfig, pc)
 	}
 
 	// Add tool config if provided

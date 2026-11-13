@@ -184,7 +184,11 @@ func (h *HarnessLoopHandler) ListTasks(c *gin.Context) {
 		writeRPCError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"tasks": resp.Tasks})
+	tasks := resp.Tasks
+	if tasks == nil {
+		tasks = []*harnesspb.TaskView{}
+	}
+	c.JSON(http.StatusOK, gin.H{"tasks": tasks})
 }
 
 func (h *HarnessLoopHandler) GetTask(c *gin.Context) {
@@ -350,7 +354,11 @@ func (h *HarnessLoopHandler) ListEvents(c *gin.Context) {
 		writeRPCError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"events": resp.Events, "next_since_seq": resp.NextSinceSeq})
+	events := resp.Events
+	if events == nil {
+		events = []*harnesspb.HarnessEvent{}
+	}
+	c.JSON(http.StatusOK, gin.H{"events": events, "next_since_seq": resp.NextSinceSeq})
 }
 
 func (h *HarnessLoopHandler) ListCheckpoints(c *gin.Context) {
@@ -366,7 +374,11 @@ func (h *HarnessLoopHandler) ListCheckpoints(c *gin.Context) {
 		writeRPCError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"checkpoints": resp.Checkpoints})
+	checkpoints := resp.Checkpoints
+	if checkpoints == nil {
+		checkpoints = []*harnesspb.CheckpointView{}
+	}
+	c.JSON(http.StatusOK, gin.H{"checkpoints": checkpoints})
 }
 
 func (h *HarnessLoopHandler) RestoreCheckpoint(c *gin.Context) {

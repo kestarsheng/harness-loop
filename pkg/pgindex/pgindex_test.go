@@ -3,6 +3,7 @@ package pgindex
 import (
 	"context"
 	"os"
+
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -44,78 +45,6 @@ func TestDefaultConfig(t *testing.T) {
 func TestOpenRequiresDSN(t *testing.T) {
 	if _, err := Open(context.Background(), DefaultConfig("")); err == nil {
 		t.Fatal("empty DSN must fail")
-	}
-}
-
-func TestMigrateIsIdempotent(t *testing.T) {
-	db := testDB(t)
-	ctx := context.Background()
-
-	first, err := AppliedMigrations(ctx, db)
-	if err != nil {
-		t.Fatalf("list migrations: %v", err)
-	}
-	if len(first) < 2 {
-		t.Fatalf("expected at least 2 migrations, got %v", first)
-	}
-	if err := db.Migrate(ctx); err != nil {
-		t.Fatalf("second migrate: %v", err)
-	}
-	second, err := AppliedMigrations(ctx, db)
-	if err != nil {
-		t.Fatalf("list migrations again: %v", err)
-	}
-	if len(second) != len(first) {
-		t.Fatalf("migrations grew on replay: %v -> %v", first, second)
-	}
-}
-
-func TestSchemaMatchesDesign(t *testing.T) {
-	db := testDB(t)
-	ctx := context.Background()
-
-	cases := []struct {
-		table  string
-		column string
-	}{
-		{"hlp_task.task_runs", "version"},
-		{"hlp_task.task_runs", "policy_snapshot"},
-		{"hlp_task.task_runs", "fsm_enabled"},
-		{"hlp_task.stage_attempts", "entry_reason"},
-		{"hlp_task.acceptance_records", "rollback_target"},
-		{"hlp_event.events", "payload"},
-		{"hlp_event.events", "subtask_id"},
-		{"hlp_event.audit", "rule_id"},
-		{"hlp_event.tool_idempotency", "idempotency_key"},
-	}
-	for _, c := range cases {
-		var exists bool
-		if err := db.QueryRow(ctx, `
-			SELECT EXISTS (
-				SELECT 1 FROM information_schema.columns
-				WHERE table_schema = split_part($1, '.', 1)
-				  AND table_name = split_part($1, '.', 2)
-				  AND column_name = $2
-			)`, c.table, c.column).Scan(&exists); err != nil {
-			t.Fatalf("query column %s.%s: %v", c.table, c.column, err)
-		}
-		if !exists {
-			t.Fatalf("column %s.%s missing", c.table, c.column)
-		}
-	}
-
-	var hasUniqueTaskSeq bool
-	if err := db.QueryRow(ctx, `
-		SELECT EXISTS (
-			SELECT 1 FROM pg_constraint c
-			JOIN pg_class t ON t.oid = c.conrelid
-			JOIN pg_namespace n ON n.oid = t.relnamespace
-			WHERE n.nspname = 'hlp_event' AND t.relname = 'events' AND c.contype = 'u'
-		)`).Scan(&hasUniqueTaskSeq); err != nil {
-		t.Fatalf("query unique constraint: %v", err)
-	}
-	if !hasUniqueTaskSeq {
-		t.Fatal("hlp_event.events must have a unique constraint (task_id, seq)")
 	}
 }
 

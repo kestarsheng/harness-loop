@@ -254,3 +254,13 @@ func (c *Client) GetAllChunks(ctx context.Context) ([]Chunk, error) {
 	}
 	return chunks, nil
 }
+
+// UpdateDocumentMetadata merges metadata fields for a document.
+func (c *Client) UpdateDocumentMetadata(ctx context.Context, id string, updates map[string]interface{}) error {
+	set := bson.M{}
+	for k, v := range updates {
+		set["metadata."+k] = v
+	}
+	_, err := c.database.Collection("documents").UpdateOne(ctx, bson.M{"_id": id}, bson.M{"$set": set})
+	return err
+}

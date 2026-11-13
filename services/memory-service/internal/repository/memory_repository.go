@@ -16,9 +16,9 @@ import (
 
 // Memory represents a memory entry
 type Memory struct {
-	ID         string    `gorm:"primaryKey"`
-	SessionID  string    `gorm:"index"`
-	AgentID    string    `gorm:"index"`
+	ID         string `gorm:"primaryKey"`
+	SessionID  string `gorm:"index"`
+	AgentID    string `gorm:"index"`
 	Type       string
 	Content    string
 	Importance float64
@@ -74,13 +74,13 @@ func (r *MemoryRepository) Save(ctx context.Context, memory *Memory) error {
 			ID:     memory.ID,
 			Vector: memory.Vector,
 			Payload: map[string]interface{}{
-				"session_id":  memory.SessionID,
-				"agent_id":    memory.AgentID,
-				"type":        memory.Type,
-				"content":     memory.Content,
-				"importance":  memory.Importance,
-				"tenant_id":   memory.TenantID,
-				"created_at":  memory.CreatedAt.Unix(),
+				"session_id": memory.SessionID,
+				"agent_id":   memory.AgentID,
+				"type":       memory.Type,
+				"content":    memory.Content,
+				"importance": memory.Importance,
+				"tenant_id":  memory.TenantID,
+				"created_at": memory.CreatedAt.Unix(),
 			},
 		}
 		if err := r.qdrant.Upsert(ctx, []qdrant.Point{point}); err != nil {

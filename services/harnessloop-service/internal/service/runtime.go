@@ -2,13 +2,18 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
 	"agent-platform/pkg/harnessloop/acceptance"
 	"agent-platform/pkg/harnessloop/checkpoint"
+	"agent-platform/pkg/harnessloop/compaction"
 	"agent-platform/pkg/harnessloop/event"
 	"agent-platform/pkg/harnessloop/fsm"
 	"agent-platform/pkg/harnessloop/retry"
@@ -111,6 +116,17 @@ type Runtime struct {
 	Policy      retry.Policy
 	Now         func() time.Time
 
+	Injector    *MemoryInjector
+	HarnessHome string
+
+	Models       *ModelBridge
+	Orchestrator *OrchestratorBridge
+
+	CompactionTrigger    *compaction.Trigger
+	CompactionSummarizer compaction.Summarizer
+	CompactionLimits     compaction.DegradeLimits
+	CompactionDir        string
+
 	mu                sync.Mutex
 	pubMu             sync.Mutex
 	aborts            map[abortKey]AbortResult
@@ -167,6 +183,7 @@ func (r *Runtime) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 	if maxSteps <= 0 {
 		maxSteps = 200
 	}
+	modelStage := ""
 
 	for step := 0; step < maxSteps; step++ {
 		select {
@@ -196,10 +213,19 @@ func (r *Runtime) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 		task.AttemptNo[string(stage)] = attemptNo
 		task.Version++
 
+		if r.Models != nil && r.Models.Enabled() && modelStage != string(stage) {
+			r.Models.OnStageEnter(ModelStageContext{
+				TenantID: in.TenantID, ProjectID: in.ProjectID, TaskID: in.TaskID,
+				Stage: string(stage), AttemptNo: attemptNo,
+			})
+			modelStage = string(stage)
+		}
+
 		r.saveCheckpoint(ctx, in, task, attempt, checkpoint.KindStageEntry, result)
 
-		stageRes, stageErr := r.Stages.Run(ctx, StageRunInput{
+		stageInput := StageRunInput{
 			TaskID:           in.TaskID,
+			WorkspaceRoot:    task.WorkspaceRoot,
 			TenantID:         in.TenantID,
 			ProjectID:        in.ProjectID,
 			SessionID:        in.SessionID,
@@ -216,13 +242,52 @@ func (r *Runtime) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 			ModelWindow:      in.ModelWindow,
 			RequiresToolCall: in.RequiresToolCall,
 			Timeout:          in.StageTimeout,
-		})
+		}
+		if r.Models != nil && r.Models.Enabled() {
+			choice, modelErr := r.Models.SelectForStage(ctx, ModelStageRequest{
+				ModelStageContext: ModelStageContext{
+					TenantID: in.TenantID, ProjectID: in.ProjectID, TaskID: in.TaskID,
+					Stage: string(stage), AttemptNo: attemptNo,
+				},
+				RequireToolCall:  in.RequiresToolCall,
+				TaskBudgetTokens: task.BudgetTokens,
+			})
+			if modelErr == nil && choice != nil {
+				stageInput.StageModel = choice.ModelID
+				stageInput.ModelWindow = choice.Window
+			}
+		}
+		if r.Injector != nil {
+			fallback := &MDFallback{
+				GlobalFile:  r.globalMemoryPath(),
+				ProjectFile: filepath.Join(task.WorkspaceRoot, ".harness", "memory", "project.md"),
+			}
+			if injected, injErr := r.Injector.Inject(ctx, InjectOptions{
+				TenantID: in.TenantID, ProjectID: in.ProjectID, Stage: string(stage),
+				Query: in.Goal, ContextBudget: in.ModelWindow, Fallback: fallback,
+			}); injErr == nil && len(injected.Items) > 0 {
+				stageInput.Message = formatInjectedMessage(injected, stageInput.Message)
+			}
+		}
+		stageInput.Message = r.maybeCompact(ctx, in, task, stage, attempt, stageInput.Message, result)
+		stageRes, stageErr := r.Stages.Run(ctx, stageInput)
 		result.Steps++
+		entryReason = fsm.EntryRetry
 		if stageRes == nil {
 			stageRes = &StageRunResult{}
 		}
 
 		if stageErr != nil || stageRes.Decision.Action != retry.ActionDone {
+			if stageErr != nil && stageRes.Decision.Action == retry.ActionFail {
+				category := retry.System
+				lastErr := stageRes.Decision.Reason
+				if stageRes.Classification != nil {
+					category = stageRes.Classification.Category
+					lastErr = stageRes.Classification.Reason
+				}
+				r.publishError(ctx, in, stage, attempt, category, lastErr)
+				return r.finalize(ctx, in, result, ReasonFailed, stage, string(stage), string(category), 0, lastErr, task.Version)
+			}
 			category := retry.System
 			lastErr := "stage did not finish"
 			if stageRes.Classification != nil {
@@ -235,6 +300,12 @@ func (r *Runtime) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 			}
 			decision := budget.RecordError(category, retry.FixedJitter)
 			r.publishError(ctx, in, stage, attempt, category, lastErr)
+			if r.Models != nil && r.Models.Enabled() {
+				r.Models.ObserveStageFailure(ModelStageContext{
+					TenantID: in.TenantID, ProjectID: in.ProjectID, TaskID: in.TaskID,
+					Stage: string(stage), AttemptNo: attemptNo,
+				}, stageInput.StageModel, modelFailureKind(category))
+			}
 			result.Category = category
 			result.LastError = lastErr
 			if decision.Terminal {
@@ -246,6 +317,7 @@ func (r *Runtime) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 		if err := r.Attempts.Finish(ctx, attempt.AttemptID, r.now()); err != nil {
 			return nil, fmt.Errorf("runtime: finish attempt: %w", err)
 		}
+		r.runOrchestration(ctx, in, task.WorkspaceRoot, stage, attempt, stageRes)
 
 		verdict := r.evaluate(ctx, in, stage, attempt, stageRes)
 		attempt.AcceptanceID = verdict.AcceptanceID
@@ -379,6 +451,37 @@ func (r *Runtime) finalize(ctx context.Context, in RunInput, res *RunResult, rea
 	return res, nil
 }
 
+// runOrchestration bridges b/c/d stage completion into the orchestration layer.
+// It is best-effort: a plan that cannot be parsed or a missing executor never
+// aborts the parent stage, preserving the pre-flag behaviour.
+func (r *Runtime) runOrchestration(ctx context.Context, in RunInput, workspaceRoot string, stage fsm.Stage, attempt fsm.Attempt, res *StageRunResult) {
+	if r.Orchestrator == nil || !r.Orchestrator.Enabled() || res == nil {
+		return
+	}
+	ec := OrchestratorStageContext{
+		TenantID: in.TenantID, ProjectID: in.ProjectID, TaskID: in.TaskID,
+		Stage: string(stage), AttemptNo: attempt.AttemptNo, WorkspaceRoot: workspaceRoot,
+	}
+	timeout := in.StageTimeout
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	runCtx, cancel := context.WithTimeout(ctx, orchestrationTimeout(timeout))
+	defer cancel()
+	switch stage {
+	case fsm.StagePlan:
+		raw := []byte(res.Content)
+		if len(raw) == 0 {
+			raw = []byte(res.FinishArgs.Summary)
+		}
+		_, _ = r.Orchestrator.PlanBStage(runCtx, ec, raw)
+	case fsm.StageExecute:
+		_, _ = r.Orchestrator.DispatchCStage(runCtx, ec)
+	case fsm.StageVerify:
+		_, _ = r.Orchestrator.AggregateDStage(runCtx, ec)
+	}
+}
+
 func (r *Runtime) evaluate(ctx context.Context, in RunInput, stage fsm.Stage, attempt fsm.Attempt, out *StageRunResult) acceptance.Verdict {
 	if r.Acceptor != nil {
 		v, err := r.Acceptor.Evaluate(ctx, AcceptanceInput{
@@ -495,6 +598,129 @@ func (r *Runtime) publishError(ctx context.Context, in RunInput, stage fsm.Stage
 		ProjectID:     in.ProjectID,
 		Payload:       payload,
 	})
+}
+
+func (r *Runtime) compactionLimits() compaction.DegradeLimits {
+	limits := r.CompactionLimits
+	if limits.KeepRecent == 0 {
+		limits = compaction.DefaultDegradeLimits()
+	}
+	return limits
+}
+
+func (r *Runtime) maybeCompact(ctx context.Context, in RunInput, task *repository.TaskRun, stage fsm.Stage, attempt fsm.Attempt, message string, res *RunResult) string {
+	if r.CompactionTrigger == nil {
+		return message
+	}
+	r.CompactionTrigger.SetModel(in.StageModel)
+	decision := r.CompactionTrigger.EvaluateText(message)
+	if !decision.Should {
+		return message
+	}
+
+	r.saveCheckpoint(ctx, in, task, attempt, checkpoint.KindPreCompaction, res)
+	r.publishCompaction(ctx, in, stage, attempt, event.CompactionTriggered, compaction.TriggerEventPayload(decision))
+
+	history := compaction.History{
+		Goal:     in.Goal,
+		GoalHash: in.GoalHash,
+		Phase:    string(stage),
+		Messages: []compaction.Message{{Role: "user", Content: message}},
+	}
+
+	if r.CompactionSummarizer != nil {
+		summary, err := r.CompactionSummarizer.Summarize(ctx, history, compaction.TemplateV1)
+		if err == nil {
+			if lines, buildErr := compaction.BuildLines(summary, string(stage), r.now()); buildErr == nil {
+				outputRef := ""
+				if r.CompactionDir != "" {
+					if path, writeErr := compaction.WriteJSONL(r.CompactionDir, task.TaskID, string(stage), lines); writeErr == nil {
+						outputRef = path
+					}
+				}
+				compacted := compaction.RenderLinesAsMessage(lines).Content
+				payload := map[string]any{
+					"trigger_reason": decision.Reason,
+					"tokens_before":  decision.EstimatedTokens,
+					"tokens_after":   len(compacted) / 2,
+					"ratio":          0.5,
+					"degraded":       false,
+					"strategy_id":    string(compaction.TemplateV1),
+					"prompt_version": string(compaction.TemplateV1),
+				}
+				if outputRef != "" {
+					payload["output_ref"] = outputRef
+				}
+				r.publishCompaction(ctx, in, stage, attempt, event.CompactionCompleted, payload)
+				return compacted
+			}
+		}
+	}
+
+	degraded, degradeErr := compaction.DegradeL1([]compaction.ChatMessage{{Role: "user", Content: message}}, history, r.compactionLimits())
+	if degradeErr == nil {
+		payload := map[string]any{
+			"trigger_reason": decision.Reason,
+			"tokens_before":  degraded.TokensBefore,
+			"tokens_after":   degraded.TokensAfter,
+			"ratio":          degraded.Ratio,
+			"degraded":       true,
+			"degrade_level":  degraded.Level,
+			"reason":         degraded.Reason,
+		}
+		r.publishCompaction(ctx, in, stage, attempt, event.CompactionDegraded, payload)
+		return compaction.RenderLinesAsMessage(degraded.Lines).Content
+	}
+	return message
+}
+
+func (r *Runtime) publishCompaction(ctx context.Context, in RunInput, stage fsm.Stage, attempt fsm.Attempt, eventType event.EventType, payload map[string]any) {
+	if r.Events == nil {
+		return
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	_ = r.Events.Publish(ctx, &event.Event{
+		EventID:       fmt.Sprintf("%s-%s-%d", in.TaskID, eventType, time.Now().UnixNano()),
+		EventType:     eventType,
+		SchemaVersion: event.CurrentSchemaVersion,
+		TaskID:        in.TaskID,
+		Stage:         string(stage),
+		Attempt:       attempt.AttemptNo,
+		Timestamp:     r.now().UTC(),
+		Severity:      event.SeverityInfo,
+		TenantID:      in.TenantID,
+		ProjectID:     in.ProjectID,
+		Payload:       raw,
+	})
+}
+
+func (r *Runtime) globalMemoryPath() string {
+	home := r.HarnessHome
+	if home == "" {
+		if h, err := os.UserHomeDir(); err == nil {
+			home = filepath.Join(h, ".harness")
+		}
+	}
+	if home == "" {
+		return ""
+	}
+	return filepath.Join(home, "memory", "global.md")
+}
+
+func formatInjectedMessage(injected *InjectResult, base string) string {
+	var b strings.Builder
+	b.WriteString(base)
+	b.WriteString("\n\n[injected memory]\n")
+	for rank, item := range injected.Items {
+		b.WriteString(fmt.Sprintf("[topic=%s file=%s updated=%s score=%.3f rank=%d]\n",
+			item.TopicKey, item.SourceFile, item.UpdatedAt.UTC().Format(time.RFC3339), item.Score, rank+1))
+		b.WriteString(item.Body)
+		b.WriteString("\n")
+	}
+	return b.String()
 }
 
 func (r *Runtime) now() time.Time {
