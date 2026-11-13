@@ -1,16 +1,26 @@
 import { useState } from 'react';
 import { Descriptions, Empty, Tag } from 'antd';
-import type { HandoffContractSummary } from '../subtask';
+import type { HandoffRowView } from '../adapters';
 
 export interface HandoffGraphProps {
-  handoffs: HandoffContractSummary[];
+  handoffs: HandoffRowView[];
+}
+
+const STATUS_COLORS: Record<string, string> = {
+  created: 'default',
+  accepted: 'success',
+  rejected: 'error',
+};
+
+function agentLabel(value: string): string {
+  return value || '未提供';
 }
 
 function formatTime(value: number): string {
   if (!Number.isFinite(value) || value <= 0) {
     return '—';
   }
-  return new Date(value).toLocaleTimeString('zh-CN', { hour12: false });
+  return new Date(value).toLocaleString('zh-CN', { hour12: false });
 }
 
 export default function HandoffGraph({ handoffs }: HandoffGraphProps) {
@@ -20,7 +30,12 @@ export default function HandoffGraph({ handoffs }: HandoffGraphProps) {
   const selected = handoffs.find((entry) => entry.handoffId === selectedId) ?? null;
 
   if (handoffs.length === 0) {
-    return <Empty description="暂无 handoff 契约" image={Empty.PRESENTED_IMAGE_SIMPLE} />;
+    return (
+      <Empty
+        description="暂无 handoff 记录（该任务的事件流中没有 handoff.* 事件）"
+        image={Empty.PRESENTED_IMAGE_SIMPLE}
+      />
+    );
   }
 
   return (
@@ -53,17 +68,24 @@ export default function HandoffGraph({ handoffs }: HandoffGraphProps) {
               }}
             >
               <Tag
-                style={{
-                  marginInlineEnd: 0,
-                  fontSize: 10,
-                  lineHeight: '16px',
-                  background: 'transparent',
-                  borderColor: 'var(--hlp-border, #2a2f38)',
-                  color: 'var(--hlp-text-secondary, #9aa3ae)',
-                }}
+                color={STATUS_COLORS[handoff.status] ?? 'default'}
+                style={{ marginInlineEnd: 0, fontSize: 10, lineHeight: '16px' }}
               >
-                {handoff.fromRole}
+                {handoff.status}
               </Tag>
+              <span
+                style={{
+                  fontSize: 11,
+                  color: 'var(--hlp-text-secondary, #9aa3ae)',
+                  maxWidth: 120,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                }}
+                title={handoff.fromAgentId || undefined}
+              >
+                {agentLabel(handoff.fromAgentId)}
+              </span>
               <span
                 aria-hidden="true"
                 style={{
@@ -85,18 +107,19 @@ export default function HandoffGraph({ handoffs }: HandoffGraphProps) {
                   ▶
                 </span>
               </span>
-              <Tag
+              <span
                 style={{
-                  marginInlineEnd: 0,
-                  fontSize: 10,
-                  lineHeight: '16px',
-                  background: 'transparent',
-                  borderColor: 'var(--hlp-border, #2a2f38)',
+                  fontSize: 11,
                   color: 'var(--hlp-text-secondary, #9aa3ae)',
+                  maxWidth: 120,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
                 }}
+                title={handoff.toAgentId || undefined}
               >
-                {handoff.toRole}
-              </Tag>
+                {agentLabel(handoff.toAgentId)}
+              </span>
               <span
                 style={{
                   fontSize: 10,
@@ -107,7 +130,7 @@ export default function HandoffGraph({ handoffs }: HandoffGraphProps) {
                   maxWidth: 160,
                 }}
               >
-                {handoff.scope}
+                {handoff.reason || handoff.inputDigest || handoff.handoffId}
               </span>
             </button>
           );
@@ -121,27 +144,40 @@ export default function HandoffGraph({ handoffs }: HandoffGraphProps) {
               {selected.handoffId}
             </span>
           </Descriptions.Item>
-          <Descriptions.Item label="方向">
-            {selected.fromRole} → {selected.toRole}
+          <Descriptions.Item label="发起 Agent">
+            <span style={{ fontFamily: 'ui-monospace, monospace', fontSize: 11 }}>
+              {agentLabel(selected.fromAgentId)}
+            </span>
           </Descriptions.Item>
-          <Descriptions.Item label="范围">{selected.scope}</Descriptions.Item>
-          <Descriptions.Item label="产物">
-            {selected.artifactCount} 项 · 建立于 {formatTime(selected.createdAtMs)}
+          <Descriptions.Item label="接收 Agent">
+            <span style={{ fontFamily: 'ui-monospace, monospace', fontSize: 11 }}>
+              {agentLabel(selected.toAgentId)}
+            </span>
           </Descriptions.Item>
-          <Descriptions.Item label="验收条款">
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-              {selected.acceptedCriteria.map((criterion) => (
-                <Tag key={criterion} style={{ marginInlineEnd: 0, fontSize: 10 }}>
-                  {criterion}
-                </Tag>
-              ))}
-            </div>
+          <Descriptions.Item label="状态">
+            <Tag color={STATUS_COLORS[selected.status] ?? 'default'}>
+              {selected.status}
+            </Tag>
+          </Descriptions.Item>
+          <Descriptions.Item label="原因">
+            {selected.reason || '—'}
+          </Descriptions.Item>
+          <Descriptions.Item label="输入摘要">
+            <span style={{ fontFamily: 'ui-monospace, monospace', fontSize: 11 }}>
+              {selected.inputDigest || '—'}
+            </span>
+          </Descriptions.Item>
+          <Descriptions.Item label="时间">
+            {formatTime(selected.createdAtMs)}
+            {selected.updatedAtMs > selected.createdAtMs
+              ? ` · 更新于 ${formatTime(selected.updatedAtMs)}`
+              : ''}
           </Descriptions.Item>
         </Descriptions>
       )}
 
       <div style={{ fontSize: 11, color: 'var(--hlp-muted, #6b7280)', lineHeight: 1.6 }}>
-        只展示契约摘要（角色、范围、产物数、验收条款），不展示原始对话与完整产物内容。
+        数据由后端把 handoff.* 事件按 handoff_id 折叠得到；后端无角色字段，因此只展示 agent id、状态与摘要。
       </div>
     </div>
   );
