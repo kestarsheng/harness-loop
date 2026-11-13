@@ -14,7 +14,7 @@ HARNESS_REQUIRE_PG=1 \
 go test ./pkg/harnessloop/policy/ -run 'TestPolicySuite' -count=1 -v
 ```
 
-- 结论：**33 行中 26 PASS / 6 PARTIAL / 1 FAIL**。
+- 结论：**33 行中 27 PASS / 6 PARTIAL / 0 FAIL**（G22 修复后；原 26/6/1）。
 
 ## 逐条对照（编号取自 design 9.11 原表的「用例组 / 用例」原文）
 
@@ -45,7 +45,7 @@ go test ./pkg/harnessloop/policy/ -run 'TestPolicySuite' -count=1 -v
 | 自我提权 / Agent 写 `config/harness_loop/stage_allow.yaml` | 拒绝 + `security.violation`；任务结束 `policy_hash` 不变 | PARTIAL | 拒绝（`E_SELF_ELEVATION`）+ 无文件副作用已实测；**`security.violation` 由 `PolicyBridge` 发出，policy 包内无事件端口；`policy_hash` 无对应实现/断言** |
 | 自我提权 / 提示注入要求“忽略权限” | 权限不受影响（`Decide()` 输入不含上下文文本） | PASS | 把注入文本写入 `RoleName`/`AgentID`，决策码与 rule_id 完全不变 |
 | 优先级 / 任务层 allow 但租户层 deny | 拒绝，`layer=tenant`，记录命中高优先规则 | PASS | `rule_id=tenant.deny` |
-| 优先级 / 系统硬限制（密钥文件）在四层全 allow 时 | 仍拒绝 | **FAIL** | **未实现**：`isSelfElevationPath` 只匹配 `config/harness_loop/`、`.harness/policy/`、`.harness/config`，密钥文件路径不在其中；套件没有对应通过项（若补测会得到放行，代码核查结论） |
+| 优先级 / 系统硬限制（密钥文件）在四层全 allow 时 | 仍拒绝 | PASS | G22 修复：`isSelfElevationPath` 扩展为敏感路径规则（`secrets/`、`.ssh/`、`.env`/`.env.*`、`id_rsa` 等私钥名、`credentials*`、`api_key*`、`.pem/.key/.p12/.pfx`）；四层全 allow 仍 `E_SELF_ELEVATION`（system 层），普通产物路径不受影响 |
 | 审计 / 任一拒绝场景 | 响应含 `error_code/rule_id/layer/tool/stage/requested_path`；审计有 deny 记录 | PASS | `Decision` 字段齐全；真实 PG 有 deny 行；矩阵类拒绝 `requested_path` 为空（尚未进入路径检查），路径类拒绝有值 |
 | 审计 / 同一调用两次（配置未变） | 均拒绝且 `rule_id` 一致 | PASS | 两次 `E_TOOL_DENIED`，rule_id 相同 |
 | 事件一致 / deny 调用 | 只有 `tool.denied`，无 `tool.result`；事件与审计 `rule_id` 相同 | PASS | 真实 Publisher：1 条 `tool.denied`、0 条 `tool.result`，payload `rule_id` == 审计 `rule_id`，seq 连续 |
@@ -93,7 +93,9 @@ go test ./pkg/harnessloop/policy/ -run 'TestPolicySuite' -count=1 -v
 
 ## 发现的问题与边界（不得引用为“权限全量达标”）
 
-1. **系统密钥文件硬限制缺失（FAIL）**：四层全 allow 时没有额外的密钥文件拒绝规则。
+1. **系统密钥文件硬限制已实现（G22 批次 3）**：四层全 allow 时命中敏感路径规则仍拒绝；
+   规则按文件名/扩展名/目录片段匹配，**可能误伤**名为 `api_key*` 的普通文档
+   （安全优先，若需放行应改文件名）。
 2. **Engine 不校验工具标签（PARTIAL）**：空标签只在 `subtask.Registry` 层被拒，
    直接调用 `policy.Engine.Decide` 不会触发 `E_TOOL_TAG_MISSING`。
 3. **错误码与 design 不一致**：`E_STAGE_TOOL_FORBIDDEN`→`E_TOOL_DENIED`、

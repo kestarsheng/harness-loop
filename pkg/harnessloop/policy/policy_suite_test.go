@@ -487,6 +487,56 @@ func TestPolicySuiteWriteWhitelistAndSelfElevation(t *testing.T) {
 	}
 }
 
+// 9.11 系统硬限制：密钥/凭证类文件在四层全 allow 时仍必须拒绝；
+// 普通产物路径不得被误伤。
+func TestPolicySuiteSensitiveFileHardLimit(t *testing.T) {
+	psSuitePG(t)
+	e := policy.NewEngine()
+	root := t.TempDir()
+
+	withAllLayers := func(p string) policy.Request {
+		req := psRequest("write_file", "c", policy.ToolArgs{Paths: []string{p}}, root)
+		req.Tenant = &policy.PolicySet{AllowTools: []string{"write_file"}}
+		req.Role = &policy.PolicySet{AllowTools: []string{"write_file"}}
+		req.Task = &policy.PolicySet{AllowTools: []string{"write_file"}}
+		return req
+	}
+
+	for _, p := range []string{
+		"secrets/db.yaml",
+		".env",
+		".env.local",
+		"id_rsa",
+		"certs/server.pem",
+		"private/client.key",
+		"config/credentials.json",
+		"keys/api_key",
+		"pki/keystore.p12",
+	} {
+		d := e.Decide(context.Background(), withAllLayers(p))
+		psDenied(t, d, policy.CodeSelfElevation)
+		if d.Layer != policy.LayerSystem {
+			t.Fatalf("%s must be denied at system layer, got %s", p, d.Layer)
+		}
+	}
+
+	for _, p := range []string{"artifacts/report.json", "src/main.go", "docs/readme.md"} {
+		psAllowed(t, e.Decide(context.Background(), withAllLayers(p)))
+	}
+
+	// 拒绝必须在执行前，且不产生文件。
+	executed := false
+	if err := e.Guard(context.Background(), withAllLayers(".env"), func() error {
+		executed = true
+		return nil
+	}); err == nil || executed {
+		t.Fatalf("sensitive-file guard failed: err=%v executed=%v", err, executed)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".env")); !os.IsNotExist(err) {
+		t.Fatal("sensitive-file attempt created a file")
+	}
+}
+
 // 9.11 提示注入：Decide 只接受结构化字段，上下文文本无法影响权限。
 func TestPolicySuitePromptInjectionIgnored(t *testing.T) {
 	psSuitePG(t)
