@@ -56,6 +56,8 @@ type Store struct {
 	evicted  []Eviction
 	warnings []Event
 	now      func() time.Time
+	sink     EventSink
+	path     string
 }
 
 func NewStore(doc *Document, limits Limits) *Store {
@@ -66,6 +68,67 @@ func NewStore(doc *Document, limits Limits) *Store {
 		limits = DefaultLimits()
 	}
 	return &Store{doc: doc, limits: limits, now: func() time.Time { return time.Now().UTC() }}
+}
+
+// WithSink wires an EventSink into the store. Once wired, Get publishes
+// memory.lru_promoted whenever it actually moves a topic to the front, and
+// Insert publishes memory.evicted as soon as an LRU victim is removed. Callers
+// no longer need to forward Writer.EmitPromotion / Store.DrainEvictions by hand.
+//
+// De-duplication contract:
+//   - At most one promoted event is published per actual reorder. Reading a
+//     topic that is already at the front publishes nothing.
+//   - At most one evicted event is published per key in the same eviction
+//     cycle. An eviction cycle ends when the victim leaves the store (Insert)
+//     or when pending evictions are drained by Writer.Save; the same key is
+//     never re-queued without being re-inserted and evicted again.
+//   - An evicted event is NOT a replacement for the deleted topic change
+//     produced by Writer.Save's diffTopics. They carry different meanings
+//     (LRU removal vs. file diff); consumers must de-duplicate on
+//     (topic_key, event_type) and must not drop deleted entries.
+func (s *Store) WithSink(sink EventSink) *Store {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sink = sink
+	return s
+}
+
+func (s *Store) setPath(path string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.path = path
+}
+
+func (s *Store) emitLocked(e ChangeEvent) {
+	if s.sink == nil {
+		return
+	}
+	s.sink.Emit(e)
+}
+
+// promoteLocked applies the LRU promotion and publishes it through the single
+// event exit. It reports whether key exists, so manual callers can fall back
+// only for unknown keys instead of double-publishing an automatic promotion.
+func (s *Store) promoteLocked(key string) bool {
+	if _, ok := s.doc.TopicByKey(key); !ok {
+		return false
+	}
+	// Long-term memory (global.md) is not LRU: reads never reorder it.
+	if s.doc.Scope == ScopeGlobal {
+		return true
+	}
+	if keyIndex(s.doc.Topics, key) <= 0 {
+		return true
+	}
+	s.doc.MoveToFront(key)
+	s.emitLocked(newPromotionEvent(s.path, s.doc.Scope, key, 0, s.now()))
+	return true
+}
+
+func (s *Store) promote(key string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.promoteLocked(key)
 }
 
 func (s *Store) SetClock(now func() time.Time) {
@@ -95,10 +158,7 @@ func (s *Store) Get(key string) (Topic, bool) {
 	if !ok {
 		return Topic{}, false
 	}
-	// Long-term memory (global.md) is not LRU: reads never reorder it.
-	if s.doc.Scope != ScopeGlobal {
-		s.doc.MoveToFront(key)
-	}
+	s.promoteLocked(key)
 	return topic, true
 }
 
@@ -163,7 +223,15 @@ func (s *Store) insertLocked(topic Topic) error {
 			return fmt.Errorf("%w: %d topics all pinned", ErrMemoryFullPinned, len(s.doc.Topics))
 		}
 		s.doc.RemoveTopic(victim.Key)
-		s.evicted = append(s.evicted, Eviction{Key: victim.Key, Reason: "lru"})
+		ev := Eviction{Key: victim.Key, Reason: "lru"}
+		if s.sink != nil {
+			// Publish immediately and keep the key out of the pending queue so
+			// Writer.Save and manual DrainEvictions cannot publish it again in
+			// the same eviction cycle.
+			s.emitLocked(newEvictionEvent(s.path, s.doc.Scope, ev, s.now()))
+		} else {
+			s.evicted = append(s.evicted, ev)
+		}
 	}
 	s.doc.UpsertTopic(topic, s.doc.Scope != ScopeGlobal)
 	return nil
@@ -196,6 +264,10 @@ func (s *Store) Touch(key string) bool {
 	return true
 }
 
+// DrainEvictions returns and clears the evictions that have not been published
+// yet. When a sink is wired with WithSink, Insert publishes evicted events
+// immediately and does not enqueue them, so this returns an empty slice and the
+// same key is never published twice in one eviction cycle.
 func (s *Store) DrainEvictions() []Eviction {
 	s.mu.Lock()
 	defer s.mu.Unlock()

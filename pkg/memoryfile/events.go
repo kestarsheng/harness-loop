@@ -46,6 +46,29 @@ type EventSink interface {
 	Emit(ChangeEvent)
 }
 
+func newPromotionEvent(file, scope, key string, rank int, ts time.Time) ChangeEvent {
+	return ChangeEvent{
+		Type:      EventPromoted,
+		File:      file,
+		Scope:     scope,
+		Topics:    []TopicChange{{Key: key, Action: string(ActionPromoted), OrderRank: rank}},
+		Source:    "read",
+		Timestamp: ts,
+	}
+}
+
+func newEvictionEvent(file, scope string, ev Eviction, ts time.Time) ChangeEvent {
+	return ChangeEvent{
+		Type:      EventEvicted,
+		File:      file,
+		Scope:     scope,
+		Topics:    []TopicChange{{Key: ev.Key, Action: string(ActionEvicted)}},
+		Source:    "lru",
+		Detail:    ev.Reason,
+		Timestamp: ts,
+	}
+}
+
 type TopicAction string
 
 const (
