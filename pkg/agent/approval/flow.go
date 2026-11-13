@@ -146,21 +146,29 @@ func NewApprovalFlowManager() *ApprovalFlowManager {
 
 // SetHooks sets approval hooks
 func (m *ApprovalFlowManager) SetHooks(hooks ApprovalHooks) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.hooks = hooks
 }
 
 // SetNotifier sets approval notifier
 func (m *ApprovalFlowManager) SetNotifier(notifier ApprovalNotifier) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.notifier = notifier
 }
 
 // SetTimeout sets default timeout in seconds
 func (m *ApprovalFlowManager) SetTimeout(seconds int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.timeoutSeconds = seconds
 }
 
 // SetAutoApprove sets auto-approve mode
 func (m *ApprovalFlowManager) SetAutoApprove(enabled bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.autoApprove = enabled
 }
 
@@ -191,36 +199,34 @@ func (m *ApprovalFlowManager) CreateRequest(ctx context.Context, req *ApprovalRe
 	}
 	req.ExpiresAt = req.CreatedAt.Add(time.Duration(timeout) * time.Second)
 
-	// Store request
-	m.requests[req.ID] = req
-
-	// Add to pending queue
-	m.pendingQueue[req.UserID] = append(m.pendingQueue[req.UserID], req.ID)
-
-	// Add to history
-	m.history[req.AgentID] = append(m.history[req.AgentID], req)
+	// Store a private copy: callers must not be able to mutate manager state
+	// through the pointer they passed in or the pointer they get back.
+	stored := cloneApprovalRequest(req)
+	m.requests[stored.ID] = stored
+	m.pendingQueue[stored.UserID] = append(m.pendingQueue[stored.UserID], stored.ID)
+	m.history[stored.AgentID] = append(m.history[stored.AgentID], stored)
 
 	// Notify
 	if m.hooks != nil {
-		m.hooks.OnRequestCreated(req)
+		m.hooks.OnRequestCreated(stored)
 	}
 	if m.notifier != nil {
-		m.notifier.NotifyPending(req)
+		m.notifier.NotifyPending(stored)
 	}
 
 	// Check auto-approve
-	if m.autoApprove && req.AutoApprove {
+	if m.autoApprove && stored.AutoApprove {
 		decision := &ApprovalDecision{
-			RequestID: req.ID,
+			RequestID: stored.ID,
 			Decision:  StatusApproved,
 			UserID:    "system",
 			Reason:    "auto-approved",
 			Timestamp: time.Now(),
 		}
-		m.applyDecision(req, decision)
+		m.applyDecision(stored, decision)
 	}
 
-	return req, nil
+	return cloneApprovalRequest(stored), nil
 }
 
 // GetPendingRequests gets pending requests for a user
@@ -231,13 +237,14 @@ func (m *ApprovalFlowManager) GetPendingRequests(userID string) []*ApprovalReque
 	var requests []*ApprovalRequest
 	for _, id := range m.pendingQueue[userID] {
 		if req, ok := m.requests[id]; ok && req.Status == StatusPending {
-			requests = append(requests, req)
+			requests = append(requests, cloneApprovalRequest(req))
 		}
 	}
 	return requests
 }
 
-// GetRequest gets a request by ID
+// GetRequest gets a request by ID. The returned value is a deep copy so callers
+// can read it without racing with SubmitDecision/CancelRequest.
 func (m *ApprovalFlowManager) GetRequest(id string) (*ApprovalRequest, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -246,7 +253,7 @@ func (m *ApprovalFlowManager) GetRequest(id string) (*ApprovalRequest, error) {
 	if !ok {
 		return nil, fmt.Errorf("approval request not found: %s", id)
 	}
-	return req, nil
+	return cloneApprovalRequest(req), nil
 }
 
 // SubmitDecision submits an approval decision
@@ -420,70 +427,68 @@ func (m *ApprovalFlowManager) GetHistory(agentID string) []*ApprovalRequest {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	return m.history[agentID]
+	stored := m.history[agentID]
+	out := make([]*ApprovalRequest, 0, len(stored))
+	for _, req := range stored {
+		out = append(out, cloneApprovalRequest(req))
+	}
+	return out
 }
 
-// WaitForApproval waits for approval decision
+// WaitForApproval waits for approval decision. The request is inspected under
+// the manager lock and only copied scalar fields are used outside it, so a
+// concurrent SubmitDecision cannot race with this poll loop.
 func (m *ApprovalFlowManager) WaitForApproval(ctx context.Context, requestID string) (*ApprovalDecision, error) {
-	// Create a channel for the decision
-	decisionChan := make(chan *ApprovalDecision, 1)
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
 
-	// Start checking for decision
-	go func() {
-		for {
-			m.mu.RLock()
-			req, ok := m.requests[requestID]
-			m.mu.RUnlock()
-
-			if !ok {
-				decisionChan <- nil
-				return
-			}
-
-			if req.Status != StatusPending {
-				decision := &ApprovalDecision{
-					RequestID: requestID,
-					Decision:  req.Status,
-					Timestamp: time.Now(),
-				}
-				if req.Status == StatusApproved {
-					decision.UserID = req.ApprovedBy
-				} else if req.Status == StatusRejected {
-					decision.UserID = req.RejectedBy
-					decision.Reason = req.RejectionReason
-				}
-				decisionChan <- decision
-				return
-			}
-
-			// Check timeout
-			if time.Now().After(req.ExpiresAt) {
-				m.mu.Lock()
-				req.Status = StatusTimeout
-				m.mu.Unlock()
-
-				decisionChan <- &ApprovalDecision{
-					RequestID: requestID,
-					Decision:  StatusTimeout,
-					Reason:    "approval request timed out",
-					Timestamp: time.Now(),
-				}
-				return
-			}
-
-			time.Sleep(100 * time.Millisecond)
-		}
-	}()
-
-	// Wait for decision or context cancellation
-	select {
-	case decision := <-decisionChan:
-		if decision == nil {
+	for {
+		m.mu.Lock()
+		req, ok := m.requests[requestID]
+		if !ok {
+			m.mu.Unlock()
 			return nil, fmt.Errorf("approval request not found")
 		}
-		return decision, nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
+		status := req.Status
+		approvedBy := req.ApprovedBy
+		rejectedBy := req.RejectedBy
+		rejectionReason := req.RejectionReason
+		expired := status == StatusPending && time.Now().After(req.ExpiresAt)
+		if expired {
+			req.Status = StatusTimeout
+			m.removeFromPendingQueue(req.UserID, req.ID)
+		}
+		m.mu.Unlock()
+
+		if status != StatusPending {
+			decision := &ApprovalDecision{
+				RequestID: requestID,
+				Decision:  status,
+				Timestamp: time.Now(),
+			}
+			switch status {
+			case StatusApproved:
+				decision.UserID = approvedBy
+			case StatusRejected:
+				decision.UserID = rejectedBy
+				decision.Reason = rejectionReason
+			}
+			return decision, nil
+		}
+		if expired {
+			return &ApprovalDecision{
+				RequestID: requestID,
+				Decision:  StatusTimeout,
+				Reason:    "approval request timed out",
+				Timestamp: time.Now(),
+			}, nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-ticker.C:
+		}
 	}
 }
 
@@ -589,6 +594,48 @@ func (e *RuleEngine) NeedsApproval(agentID, toolName string, context map[string]
 // ============================================================
 // Helper Functions
 // ============================================================
+
+// cloneApprovalRequest returns a deep copy so callers never share the pointer
+// stored inside ApprovalFlowManager. Maps and comment slices are copied too,
+// because callers may mutate them after reading.
+func cloneApprovalRequest(req *ApprovalRequest) *ApprovalRequest {
+	if req == nil {
+		return nil
+	}
+	out := *req
+	out.Details = cloneStringAnyMap(req.Details)
+	out.Metadata = cloneStringAnyMap(req.Metadata)
+	out.Comments = append([]ApprovalComment(nil), req.Comments...)
+	return &out
+}
+
+func cloneStringAnyMap(in map[string]interface{}) map[string]interface{} {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]interface{}, len(in))
+	for k, v := range in {
+		out[k] = cloneAny(v)
+	}
+	return out
+}
+
+func cloneAny(v interface{}) interface{} {
+	switch typed := v.(type) {
+	case map[string]interface{}:
+		return cloneStringAnyMap(typed)
+	case []interface{}:
+		out := make([]interface{}, len(typed))
+		for i := range typed {
+			out[i] = cloneAny(typed[i])
+		}
+		return out
+	case []string:
+		return append([]string(nil), typed...)
+	default:
+		return v
+	}
+}
 
 func generateApprovalID() string {
 	return fmt.Sprintf("approval-%d", time.Now().UnixNano())

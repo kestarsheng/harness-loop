@@ -13,7 +13,7 @@ HARNESS_REQUIRE_PG=1 \
 go test ./pkg/harnessloop/modelregistry/ -run 'TestModelSuite' -count=1 -v
 ```
 
-- 结论：**20 行中 16 PASS / 3 PARTIAL / 1 FAIL**。
+- 结论：**20 行中 17 PASS / 3 PARTIAL / 0 FAIL**（G22 修复后；原 16/3/1）。
 
 ## 逐条对照（编号取自 design 9.10 原表的「用例组 / 用例」原文）
 
@@ -36,7 +36,7 @@ go test ./pkg/harnessloop/modelregistry/ -run 'TestModelSuite' -count=1 -v
 | 回退 / 回退列表为空 | 直接按 timeout/quota 处理，不挂起 | PASS | 同步返回 `E_MODEL_FALLBACK_UNAVAILABLE`，`Exhausted=true`，无重试 |
 | 可用性 / 连续 5 次失败 | `status=unavailable`，三策略均不再选中；恢复后 `model.recovered` 且重新可选 | PASS | 第 5 次失败发 `model.unavailable`；三策略均不选 strong；`ObserveSuccess` 发 recovered，显式选择成功 |
 | 成本联动 / 32k → 128k 窗口切换 | `threshold_tokens` 重算且触发点后移；预算估算按新单价 | PASS | threshold 26214 → 104857；strong 估算成本 > cheap |
-| embedding / 768 维模型写入 1536 维索引 | `E_EMBEDDING_DIM_MISMATCH`，无部分写入 | **FAIL** | 实现中**不存在**该错误码，也没有“768 写 1536 索引”的写入路径；现有拒绝是注册表加载期 `enforce_dim` 校验（`E_MODEL_META_INCOMPLETE: embedding_dim != enforce_dim`）。套件已验证“维度不一致被拒”，但错误码与场景与 design 不一致 |
+| embedding / 768 维模型写入 1536 维索引 | `E_EMBEDDING_DIM_MISMATCH`，无部分写入 | PASS | G22 修复：新增 `CodeEmbeddingDimMismatch` 与 `Registry.ValidateEmbeddingWrite/ValidateEmbeddingVector`；768 模型写 1536 索引、1536 长度向量、enforce_dim 不符均返回该码，校验在写入前完成。加载期 `enforce_dim` 校验保留（`E_MODEL_META_INCOMPLETE`）。**codeindex 写入点尚未调用该守卫**（边界外，见边界 1） |
 | 密钥 / 事件/日志/任务详情/`GET /models` | 无密钥明文；`api_key_ref` 不出现在响应 | PASS | `View` JSON 与 `model.selected` payload 均无 `api_key_ref`/`SUITE_KEY`；`ResolveCredential` 仅供运行时取 ref。**`GET /models` 是 service 层，未在本包验证** |
 | 热更新 / 运行中改 d 阶段模型 | 当前调用用原模型完成；下一次用新配置；无报错 | PASS | 旧 Selector 仍返回 strong；`Reload` 报告 `stage_overrides.d` 变更；新 Selector 返回 cheap |
 
@@ -64,8 +64,9 @@ go test ./pkg/harnessloop/modelregistry/ -run 'TestModelSuite' -count=1 -v
 
 ## 发现的问题与边界
 
-1. **embedding 维度错误码缺失**（FAIL）：`E_EMBEDDING_DIM_MISMATCH` 在代码中不存在；
-   写入侧没有维度校验路径，只有注册表 `enforce_dim` 一致性校验。
+1. **embedding 维度守卫已实现、调用点未接线**：`ValidateEmbeddingWrite` / `ValidateEmbeddingVector`
+   返回 `E_EMBEDDING_DIM_MISMATCH` 并在写入前拒绝；但 `pkg/codeindex` 不属于本轮允许范围，
+   **索引写入路径仍需调用该守卫**，否则生产写入仍不会触发此码。
 2. **未审批升级无审计**：`ValidateSwitch` 拒绝生效，但模型模块没有 audit sink，
    无法满足“拒绝 + 审计”。
 3. **`model_selections` 写入口径**：`pkg` 测试受 Go internal 规则限制，无法 import

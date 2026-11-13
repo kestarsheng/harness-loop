@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path"
 	"strings"
 
 	"agent-platform/pkg/harnessloop/policy/sandbox"
@@ -208,7 +209,7 @@ func (e *Engine) SystemDecide(ctx context.Context, req Request) Decision {
 					base.RuleID = "policy.self_elevation"
 					base.Code = CodeSelfElevation
 					base.RequestedPath = p
-					base.Reason = "agents must not modify policy or permission files"
+					base.Reason = "agents must not modify policy, credential or secret files"
 					return base
 				}
 			}
@@ -285,10 +286,33 @@ func (e *Engine) applyLayers(req Request) Decision {
 	return base
 }
 
+// policyPathFragments and sensitive* cover the system hard limits: policy
+// files, credential stores and secret material must never be writable by an
+// agent, regardless of tenant/role/task allowlists.
 var policyPathFragments = []string{
 	"config/harness_loop/",
 	".harness/policy/",
 	".harness/config",
+	"secrets/",
+	".ssh/",
+}
+
+var sensitiveBaseNames = map[string]struct{}{
+	"id_rsa":      {},
+	"id_dsa":      {},
+	"id_ecdsa":    {},
+	"id_ed25519":  {},
+	"credentials": {},
+	"api_key":     {},
+	"apikey":      {},
+	"api-key":     {},
+}
+
+var sensitiveExtensions = map[string]struct{}{
+	".pem": {},
+	".key": {},
+	".p12": {},
+	".pfx": {},
 }
 
 func isSelfElevationPath(p string) bool {
@@ -297,6 +321,22 @@ func isSelfElevationPath(p string) bool {
 		if strings.Contains(norm, frag) {
 			return true
 		}
+	}
+	base := path.Base(norm)
+	if base == "." || base == "/" {
+		return false
+	}
+	if base == ".env" || strings.HasPrefix(base, ".env.") {
+		return true
+	}
+	if _, ok := sensitiveBaseNames[base]; ok {
+		return true
+	}
+	if strings.HasPrefix(base, "credentials.") || strings.HasPrefix(base, "api_key") || strings.HasPrefix(base, "api-key") {
+		return true
+	}
+	if _, ok := sensitiveExtensions[path.Ext(base)]; ok {
+		return true
 	}
 	return false
 }

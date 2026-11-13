@@ -487,6 +487,56 @@ func TestPolicySuiteWriteWhitelistAndSelfElevation(t *testing.T) {
 	}
 }
 
+// 9.11 系统硬限制：密钥/凭证类文件在四层全 allow 时仍必须拒绝；
+// 普通产物路径不得被误伤。
+func TestPolicySuiteSensitiveFileHardLimit(t *testing.T) {
+	psSuitePG(t)
+	e := policy.NewEngine()
+	root := t.TempDir()
+
+	withAllLayers := func(p string) policy.Request {
+		req := psRequest("write_file", "c", policy.ToolArgs{Paths: []string{p}}, root)
+		req.Tenant = &policy.PolicySet{AllowTools: []string{"write_file"}}
+		req.Role = &policy.PolicySet{AllowTools: []string{"write_file"}}
+		req.Task = &policy.PolicySet{AllowTools: []string{"write_file"}}
+		return req
+	}
+
+	for _, p := range []string{
+		"secrets/db.yaml",
+		".env",
+		".env.local",
+		"id_rsa",
+		"certs/server.pem",
+		"private/client.key",
+		"config/credentials.json",
+		"keys/api_key",
+		"pki/keystore.p12",
+	} {
+		d := e.Decide(context.Background(), withAllLayers(p))
+		psDenied(t, d, policy.CodeSelfElevation)
+		if d.Layer != policy.LayerSystem {
+			t.Fatalf("%s must be denied at system layer, got %s", p, d.Layer)
+		}
+	}
+
+	for _, p := range []string{"artifacts/report.json", "src/main.go", "docs/readme.md"} {
+		psAllowed(t, e.Decide(context.Background(), withAllLayers(p)))
+	}
+
+	// 拒绝必须在执行前，且不产生文件。
+	executed := false
+	if err := e.Guard(context.Background(), withAllLayers(".env"), func() error {
+		executed = true
+		return nil
+	}); err == nil || executed {
+		t.Fatalf("sensitive-file guard failed: err=%v executed=%v", err, executed)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".env")); !os.IsNotExist(err) {
+		t.Fatal("sensitive-file attempt created a file")
+	}
+}
+
 // 9.11 提示注入：Decide 只接受结构化字段，上下文文本无法影响权限。
 func TestPolicySuitePromptInjectionIgnored(t *testing.T) {
 	psSuitePG(t)
@@ -732,16 +782,23 @@ func TestPolicySuiteApprovalHoldAndApprove(t *testing.T) {
 	if err != nil || st != agentapproval.StatusPending {
 		t.Fatalf("status = %s err=%v, want pending", st, err)
 	}
-	// 顺序驱动：先提交决策，再调用 Await。避免与实现中
-	// pkg/agent/approval 的 GetRequest/applyDecision 无锁读写产生数据竞争。
+	// 真实并发：Await 在挂起轮询，外部同时提交决策。修复前会与
+	// pkg/agent/approval 的 applyDecision 写 Status 形成数据竞争。
+	done := make(chan policy.ApprovalOutcome, 1)
+	go func() { done <- gate.Await(context.Background(), ticket) }()
+	psWaitPending(t, manager, ticket.ID)
 	if err := manager.SubmitDecision(context.Background(), &agentapproval.ApprovalDecision{
 		RequestID: ticket.ID, Decision: agentapproval.StatusApproved, UserID: "reviewer",
 	}); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
-	out := gate.Await(context.Background(), ticket)
-	if !out.Allowed {
-		t.Fatalf("approved call must proceed: %+v", out)
+	select {
+	case out := <-done:
+		if !out.Allowed {
+			t.Fatalf("approved call must proceed: %+v", out)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("approval await timeout")
 	}
 }
 
@@ -760,12 +817,15 @@ func TestPolicySuiteApprovalRejectedNoRetry(t *testing.T) {
 	if err != nil || st != agentapproval.StatusPending {
 		t.Fatalf("status = %s err=%v, want pending", st, err)
 	}
+	done := make(chan policy.ApprovalOutcome, 1)
+	go func() { done <- gate.Await(context.Background(), ticket) }()
+	psWaitPending(t, manager, ticket.ID)
 	if err := manager.SubmitDecision(context.Background(), &agentapproval.ApprovalDecision{
 		RequestID: ticket.ID, Decision: agentapproval.StatusRejected, UserID: "reviewer", Reason: "no",
 	}); err != nil {
 		t.Fatalf("reject: %v", err)
 	}
-	out := gate.Await(context.Background(), ticket)
+	out := <-done
 	if out.Allowed || out.Code != policy.CodeApprovalRejected {
 		t.Fatalf("rejected call = %+v", out)
 	}
@@ -818,9 +878,13 @@ func TestPolicySuiteDecisionP95(t *testing.T) {
 	psSuitePG(t)
 	e := policy.NewEngine()
 	root := t.TempDir()
+	cache := policy.NewDecisionCache(10000, time.Minute)
 	resolver := policy.NewResolver(e)
+	resolver.SetCache(cache)
 
 	// 1000 次调用，700 次命中缓存（同一工具/路径/task），300 次未命中（唯一 task）。
+	// 采样前先回收，减少并行包/GC 噪声对 P95 的干扰；阈值本身不调整。
+	runtime.GC()
 	var hitSamples, missSamples []time.Duration
 	var totalCached time.Duration
 	start := time.Now()
@@ -869,9 +933,79 @@ func TestPolicySuiteDecisionP95(t *testing.T) {
 	// 反向抵消；报告中如实记录实测增幅与结论，不在此处放宽成“必然通过”。
 	overhead := float64(totalCached-totalNoCache) / float64(totalNoCache) * 100
 	t.Logf("policy cache overhead vs nocache: %.2f%% (cached=%v nocache=%v)", overhead, totalCached, totalNoCache)
+	// 命中率不变：700 次相同请求 = 1 miss + 699 hit，300 次唯一请求 = 300 miss。
+	hits, misses := cache.Stats()
+	if hits != 699 || misses != 301 {
+		t.Fatalf("cache hit ratio changed: hits=%d misses=%d, want 699/301", hits, misses)
+	}
+	if overhead > 10 {
+		t.Fatalf("cached total overhead = %.2f%%, must be <= 10%%", overhead)
+	}
 	// 挂死保护：1000 次决策不得出现数量级异常。
 	if totalCached > 1000*20*time.Millisecond {
 		t.Fatalf("1000 decisions took %v, far above the 20ms/call ceiling", totalCached)
+	}
+}
+
+// key 稳定性：相同输入必须得到相同 key；任一维度变化必须换 key。
+func TestPolicySuiteDecisionKeyStability(t *testing.T) {
+	psSuitePG(t)
+	root := t.TempDir()
+	base := psRequest("read_file", "c", policy.ToolArgs{Paths: []string{"a.go"}}, root)
+
+	if got, want := policy.DecisionKey(base, 3, 4), policy.DecisionKey(base, 3, 4); got != want {
+		t.Fatalf("same input produced different keys: %s vs %s", got, want)
+	}
+	// 同内容不同指针也必须命中同一 key。
+	tenant := &policy.PolicySet{AllowTools: []string{"read_file", "grep"}}
+	role := &policy.PolicySet{Rules: []policy.Rule{{ID: "r1", Tool: "read_file", Effect: policy.EffectAllow}}}
+	withPolicies := base
+	withPolicies.Tenant = tenant
+	withPolicies.Role = role
+	withPolicies2 := base
+	withPolicies2.Tenant = &policy.PolicySet{AllowTools: []string{"read_file", "grep"}}
+	withPolicies2.Role = &policy.PolicySet{Rules: []policy.Rule{{ID: "r1", Tool: "read_file", Effect: policy.EffectAllow}}}
+	if policy.DecisionKey(withPolicies, 3, 4) != policy.DecisionKey(withPolicies2, 3, 4) {
+		t.Fatal("equal policy content must produce the same key")
+	}
+
+	variants := []struct {
+		name string
+		mut  func() string
+	}{
+		{"tool", func() string {
+			r := base
+			r.Tool = "write_file"
+			return policy.DecisionKey(r, 3, 4)
+		}},
+		{"stage", func() string {
+			r := base
+			r.Stage = "d"
+			return policy.DecisionKey(r, 3, 4)
+		}},
+		{"path", func() string {
+			r := base
+			r.Args.Paths = []string{"b.go"}
+			return policy.DecisionKey(r, 3, 4)
+		}},
+		{"task", func() string {
+			r := base
+			r.TaskID = "another-task"
+			return policy.DecisionKey(r, 3, 4)
+		}},
+		{"policy_version", func() string { return policy.DecisionKey(base, 4, 4) }},
+		{"approval_version", func() string { return policy.DecisionKey(base, 3, 5) }},
+		{"tenant_policy", func() string {
+			r := base
+			r.Tenant = &policy.PolicySet{DenyTools: []string{"read_file"}}
+			return policy.DecisionKey(r, 3, 4)
+		}},
+	}
+	reference := policy.DecisionKey(base, 3, 4)
+	for _, v := range variants {
+		if got := v.mut(); got == reference {
+			t.Fatalf("%s change must produce a different key", v.name)
+		}
 	}
 }
 
@@ -887,9 +1021,80 @@ func psP95(samples []time.Duration) time.Duration {
 	return samples[idx]
 }
 
+func psWaitPending(t *testing.T, manager *agentapproval.ApprovalFlowManager, id string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		req, err := manager.GetRequest(id)
+		if err == nil && req.Status == agentapproval.StatusPending {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("approval %s never became pending", id)
+}
 
-// 9.11 审批性能口径：审批决策提交 → Await 返回放行的耗时。
-// 顺序驱动以避开 pkg/agent/approval 既有的无锁读写竞态（见报告边界）。
+// 并发专项：Await 挂起 + 外部 approve/reject 并发执行 60 轮，且持续并发读取
+// gate.Status（走 manager.GetRequest）。修复前会触发 applyDecision 写 Status
+// 与 GetRequest 返回共享指针的 -race 报告。
+func TestPolicySuiteApprovalConcurrentDecision(t *testing.T) {
+	psSuitePG(t)
+	manager := agentapproval.NewApprovalFlowManager()
+	gate := policy.NewApprovalGate(policy.DefaultApprovalConfig(), manager)
+	gate.SetPollInterval(time.Millisecond)
+	for round := 0; round < 60; round++ {
+		req := psRequest("deploy_app", "c", policy.ToolArgs{}, t.TempDir())
+		req.TaskID = fmt.Sprintf("ps-suite-concurrent-%d", round)
+		ticket, err := gate.Begin(context.Background(), req, []string{policy.TagExec})
+		if err != nil {
+			t.Fatalf("round %d begin: %v", round, err)
+		}
+		stop := make(chan struct{})
+		var readers sync.WaitGroup
+		for i := 0; i < 2; i++ {
+			readers.Add(1)
+			go func() {
+				defer readers.Done()
+				for {
+					select {
+					case <-stop:
+						return
+					default:
+						_, _ = gate.Status(context.Background(), ticket.ID)
+					}
+				}
+			}()
+		}
+		done := make(chan policy.ApprovalOutcome, 1)
+		go func() { done <- gate.Await(context.Background(), ticket) }()
+		psWaitPending(t, manager, ticket.ID)
+		decision := agentapproval.StatusApproved
+		if round%2 == 1 {
+			decision = agentapproval.StatusRejected
+		}
+		if err := manager.SubmitDecision(context.Background(), &agentapproval.ApprovalDecision{
+			RequestID: ticket.ID, Decision: decision, UserID: "reviewer", Reason: "probe",
+		}); err != nil {
+			t.Fatalf("round %d submit: %v", round, err)
+		}
+		select {
+		case out := <-done:
+			if decision == agentapproval.StatusApproved && !out.Allowed {
+				t.Fatalf("round %d approved call not allowed: %+v", round, out)
+			}
+			if decision == agentapproval.StatusRejected && (out.Allowed || out.Code != policy.CodeApprovalRejected) {
+				t.Fatalf("round %d rejected call = %+v", round, out)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatalf("round %d wait timeout", round)
+		}
+		close(stop)
+		readers.Wait()
+	}
+}
+
+
+// 9.11 审批性能口径：Await 挂起 → 外部提交决策 → Await 返回放行的耗时。
 func TestPolicySuiteApprovalLatency(t *testing.T) {
 	psSuitePG(t)
 	manager := agentapproval.NewApprovalFlowManager()
@@ -904,15 +1109,22 @@ func TestPolicySuiteApprovalLatency(t *testing.T) {
 			t.Fatalf("round %d begin: %v", i, err)
 		}
 		start := time.Now()
+		done := make(chan policy.ApprovalOutcome, 1)
+		go func() { done <- gate.Await(context.Background(), ticket) }()
+		psWaitPending(t, manager, ticket.ID)
 		if err := manager.SubmitDecision(context.Background(), &agentapproval.ApprovalDecision{
 			RequestID: ticket.ID, Decision: agentapproval.StatusApproved, UserID: "reviewer",
 		}); err != nil {
 			t.Fatalf("round %d approve: %v", i, err)
 		}
-		out := gate.Await(context.Background(), ticket)
-		samples = append(samples, time.Since(start))
-		if !out.Allowed {
-			t.Fatalf("round %d not allowed: %+v", i, out)
+		select {
+		case out := <-done:
+			samples = append(samples, time.Since(start))
+			if !out.Allowed {
+				t.Fatalf("round %d not allowed: %+v", i, out)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("round %d approval timeout", i)
 		}
 	}
 	p95 := psP95(samples)
