@@ -910,14 +910,50 @@ func TestModelSuiteCostLinkedToWindow(t *testing.T) {
 
 func TestModelSuiteEmbeddingDimGuard(t *testing.T) {
 	msSuitePG(t)
-	// design 9.10 期望 E_EMBEDDING_DIM_MISMATCH；实现只在注册表加载期做
-	// enforce_dim 一致性校验，因此这里断言“拒绝”这一硬要求，并记录实际码。
-	body := strings.Replace(msBaseRegistry, "enforce_dim: 1024", "enforce_dim: 1536", 1)
-	_, err := modelregistry.Load(msWriteRegistry(t, body))
+	// 加载期 enforce_dim 校验保留（整份快照拒绝）。
+	badLoad := strings.Replace(msBaseRegistry, "enforce_dim: 1024", "enforce_dim: 1536", 1)
+	_, err := modelregistry.Load(msWriteRegistry(t, badLoad))
 	msReject(t, err, modelregistry.CodeMetaIncomplete)
 	msReject(t, err, "embedding_dim != enforce_dim")
-	if strings.Contains(err.Error(), "E_EMBEDDING_DIM_MISMATCH") {
-		t.Fatal("implementation unexpectedly has E_EMBEDDING_DIM_MISMATCH; update the report")
+}
+
+// 9.10 embedding：768 维模型写入 1536 维索引必须返回 E_EMBEDDING_DIM_MISMATCH，
+// 且校验发生在写入前（向量长度/索引维度均可拒绝）。
+func TestModelSuiteEmbeddingDimMismatch(t *testing.T) {
+	msSuitePG(t)
+	body768 := strings.Replace(msBaseRegistry, "embedding_dim: 1024", "embedding_dim: 768", 1)
+	body768 = strings.Replace(body768, "enforce_dim: 1024", "enforce_dim: 768", 1)
+	reg := msLoadRegistry(t, body768)
+
+	if err := reg.ValidateEmbeddingWrite("embed", 768); err != nil {
+		t.Fatalf("768-dim write must pass: %v", err)
+	}
+	err := reg.ValidateEmbeddingWrite("embed", 1536)
+	if err == nil {
+		t.Fatal("768-dim model writing a 1536-dim index must be rejected")
+	}
+	var dimErr *modelregistry.EmbeddingDimError
+	if !errors.As(err, &dimErr) {
+		t.Fatalf("expected EmbeddingDimError, got %T: %v", err, err)
+	}
+	if !strings.Contains(err.Error(), modelregistry.CodeEmbeddingDimMismatch) {
+		t.Fatalf("error = %v, want %s", err, modelregistry.CodeEmbeddingDimMismatch)
+	}
+	if dimErr.ModelDim != 768 || dimErr.IndexDim != 1536 {
+		t.Fatalf("dimension error = %+v", dimErr)
+	}
+
+	// 向量长度路径同样在写入前拒绝。
+	if err := reg.ValidateEmbeddingVector("embed", make([]float32, 768)); err != nil {
+		t.Fatalf("768-length vector must pass: %v", err)
+	}
+	if err := reg.ValidateEmbeddingVector("embed", make([]float32, 1536)); !errors.As(err, &dimErr) {
+		t.Fatalf("1536-length vector must be rejected with %s: %v", modelregistry.CodeEmbeddingDimMismatch, err)
+	}
+
+	// 加载期 enforce_dim 与写入维度同时校验：模型 768 / enforce 768 时写 1024 也拒绝。
+	if err := reg.ValidateEmbeddingWrite("embed", 1024); !errors.As(err, &dimErr) {
+		t.Fatalf("enforce_dim path must reject 1024: %v", err)
 	}
 }
 
