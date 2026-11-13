@@ -878,9 +878,13 @@ func TestPolicySuiteDecisionP95(t *testing.T) {
 	psSuitePG(t)
 	e := policy.NewEngine()
 	root := t.TempDir()
+	cache := policy.NewDecisionCache(10000, time.Minute)
 	resolver := policy.NewResolver(e)
+	resolver.SetCache(cache)
 
 	// 1000 次调用，700 次命中缓存（同一工具/路径/task），300 次未命中（唯一 task）。
+	// 采样前先回收，减少并行包/GC 噪声对 P95 的干扰；阈值本身不调整。
+	runtime.GC()
 	var hitSamples, missSamples []time.Duration
 	var totalCached time.Duration
 	start := time.Now()
@@ -929,9 +933,79 @@ func TestPolicySuiteDecisionP95(t *testing.T) {
 	// 反向抵消；报告中如实记录实测增幅与结论，不在此处放宽成“必然通过”。
 	overhead := float64(totalCached-totalNoCache) / float64(totalNoCache) * 100
 	t.Logf("policy cache overhead vs nocache: %.2f%% (cached=%v nocache=%v)", overhead, totalCached, totalNoCache)
+	// 命中率不变：700 次相同请求 = 1 miss + 699 hit，300 次唯一请求 = 300 miss。
+	hits, misses := cache.Stats()
+	if hits != 699 || misses != 301 {
+		t.Fatalf("cache hit ratio changed: hits=%d misses=%d, want 699/301", hits, misses)
+	}
+	if overhead > 10 {
+		t.Fatalf("cached total overhead = %.2f%%, must be <= 10%%", overhead)
+	}
 	// 挂死保护：1000 次决策不得出现数量级异常。
 	if totalCached > 1000*20*time.Millisecond {
 		t.Fatalf("1000 decisions took %v, far above the 20ms/call ceiling", totalCached)
+	}
+}
+
+// key 稳定性：相同输入必须得到相同 key；任一维度变化必须换 key。
+func TestPolicySuiteDecisionKeyStability(t *testing.T) {
+	psSuitePG(t)
+	root := t.TempDir()
+	base := psRequest("read_file", "c", policy.ToolArgs{Paths: []string{"a.go"}}, root)
+
+	if got, want := policy.DecisionKey(base, 3, 4), policy.DecisionKey(base, 3, 4); got != want {
+		t.Fatalf("same input produced different keys: %s vs %s", got, want)
+	}
+	// 同内容不同指针也必须命中同一 key。
+	tenant := &policy.PolicySet{AllowTools: []string{"read_file", "grep"}}
+	role := &policy.PolicySet{Rules: []policy.Rule{{ID: "r1", Tool: "read_file", Effect: policy.EffectAllow}}}
+	withPolicies := base
+	withPolicies.Tenant = tenant
+	withPolicies.Role = role
+	withPolicies2 := base
+	withPolicies2.Tenant = &policy.PolicySet{AllowTools: []string{"read_file", "grep"}}
+	withPolicies2.Role = &policy.PolicySet{Rules: []policy.Rule{{ID: "r1", Tool: "read_file", Effect: policy.EffectAllow}}}
+	if policy.DecisionKey(withPolicies, 3, 4) != policy.DecisionKey(withPolicies2, 3, 4) {
+		t.Fatal("equal policy content must produce the same key")
+	}
+
+	variants := []struct {
+		name string
+		mut  func() string
+	}{
+		{"tool", func() string {
+			r := base
+			r.Tool = "write_file"
+			return policy.DecisionKey(r, 3, 4)
+		}},
+		{"stage", func() string {
+			r := base
+			r.Stage = "d"
+			return policy.DecisionKey(r, 3, 4)
+		}},
+		{"path", func() string {
+			r := base
+			r.Args.Paths = []string{"b.go"}
+			return policy.DecisionKey(r, 3, 4)
+		}},
+		{"task", func() string {
+			r := base
+			r.TaskID = "another-task"
+			return policy.DecisionKey(r, 3, 4)
+		}},
+		{"policy_version", func() string { return policy.DecisionKey(base, 4, 4) }},
+		{"approval_version", func() string { return policy.DecisionKey(base, 3, 5) }},
+		{"tenant_policy", func() string {
+			r := base
+			r.Tenant = &policy.PolicySet{DenyTools: []string{"read_file"}}
+			return policy.DecisionKey(r, 3, 4)
+		}},
+	}
+	reference := policy.DecisionKey(base, 3, 4)
+	for _, v := range variants {
+		if got := v.mut(); got == reference {
+			t.Fatalf("%s change must produce a different key", v.name)
+		}
 	}
 }
 

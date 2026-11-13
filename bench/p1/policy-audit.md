@@ -14,7 +14,7 @@ HARNESS_REQUIRE_PG=1 \
 go test ./pkg/harnessloop/policy/ -run 'TestPolicySuite' -count=1 -v
 ```
 
-- 结论：**33 行中 27 PASS / 6 PARTIAL / 0 FAIL**（G22 修复后；原 26/6/1）。
+- 结论：**33 行中 28 PASS / 5 PARTIAL / 0 FAIL**（G22 修复后；原 26/6/1）。
 
 ## 逐条对照（编号取自 design 9.11 原表的「用例组 / 用例」原文）
 
@@ -52,7 +52,7 @@ go test ./pkg/harnessloop/policy/ -run 'TestPolicySuite' -count=1 -v
 | 审批 / 部署类工具触发 | 挂起 + 审批请求；通过则继续，拒绝则 `E_APPROVAL_REJECTED` 不重试 | PASS | `EffectRequireApproval` + pending ticket；approve 放行；reject 后再次 Begin 被拒且 `RequestCount` 不增加 |
 | 审批 / 审批超时 | `E_APPROVAL_TIMEOUT`，**不放行** | PASS | 假时钟推进，`Allowed=false` |
 | 审批 / 配置尝试设“超时自动通过” | 配置校验拒绝该取值 | PASS | `timeout_auto_approve=true` 加载失败 |
-| 性能 / 1000 次调用（70% 缓存命中） | 命中 P95 ≤ 5ms、未命中 P95 ≤ 20ms；整体时延增幅 ≤ 10% | PARTIAL | P95 两项达标（见下）；**“整体增幅 ≤10%”在容器 4 次运行中 2 次超阈值**，区间 −5.9%～+132.3% |
+| 性能 / 1000 次调用（70% 缓存命中） | 命中 P95 ≤ 5ms、未命中 P95 ≤ 20ms；整体时延增幅 ≤ 10% | PASS | G22 修复后容器 4 次全部达标（增幅 −24.7%～−59.3%）；命中 P95 1–2µs、未命中 21–30µs；缓存命中率保持 699 hit / 301 miss |
 
 ## 8.4 P1 门槛对照
 
@@ -71,20 +71,34 @@ go test ./pkg/harnessloop/policy/ -run 'TestPolicySuite' -count=1 -v
   - 未命中 P95 **1.59–1.88ms**；
   - 增幅 **−68.6%～−77.7%**（缓存显著更快）。
 - 容器（`golang:1.22-bookworm`，4 次）：
-  - 命中 P95 **7–10µs**；未命中 P95 **25–51µs**；
-  - 增幅 **−5.9% / +54.6% / +118.2% / +132.3%**（4 次中 2 次 >10%）。
-- 阈值：命中 ≤5ms、未命中 ≤20ms → **PASS**；“整体增幅 ≤10%” → **不达标（容器波动，2/4 超阈值）**。
-- 原因：决策本身极轻（数十微秒），缓存 key 需两次 sha256 + policy 指纹 JSON 序列化，
-  命中路径的 key 计算成本可能高于直接决策；这是实现特征，不是测量噪声可完全解释。
-  报告如实记为未达标，未通过放宽断言“凑绿”。
+  - 命中 P95 **1–2µs**；未命中 P95 **21–30µs**；
+  - 增幅 **−24.7% / −24.9% / −59.3% / −28.5%**（4 次全部 ≤10%）。
+- 阈值：命中 ≤5ms、未命中 ≤20ms → **PASS**；“整体增幅 ≤10%” → **PASS（4/4）**。
+
+**修复前后对比（同一口径，容器各 4 次）**
+
+| 运行 | 修复前增幅 | 修复后增幅 |
+|---|---|---|
+| 1 | −5.9% | −24.7% |
+| 2 | +54.6% | −24.9% |
+| 3 | +118.2% | −59.3% |
+| 4 | +132.3% | −28.5% |
+| 超 10% 次数 | 2/4 | **0/4** |
+
+修复内容：`DecisionKey` 由“两次预哈希 + policy 指纹 JSON + 最终哈希”改为**单个长度前缀 buffer + 一次 SHA-256**；
+`DecisionCache` 由线性扫描 `order` 列表改为 `container/list` + map 的 O(1) LRU touch。
+语义等价由 `TestPolicySuiteDecisionKeyStability` 断言（同输入同 key、同内容不同指针同 key、
+tool/stage/path/task/policy 版本/租户策略任一变化换 key），命中率由 699 hit / 301 miss 断言保持不变。
+
+**修复前原因（保留记录）**：决策本身极轻（数微秒），旧 key 计算成本与决策同量级甚至更高，
+命中路径不产生收益；这不是测量噪声可完全解释的问题。
 
 **审批**
-- 口径：`SubmitDecision(approved)` → `Await` 返回放行的耗时（50 次采样）。
-  由于 `pkg/agent/approval` 存在既有无锁读写竞态（见边界 10），套件改为**顺序驱动**：
-  先提交决策再调用 `Await`，测量的是“决策已落库后的处理延迟”，**不含人工审批员等待时间**。
+- 口径：Await 挂起 → 外部提交决策 → Await 返回放行/拒绝的耗时（50 次采样，真实并发）。
 - 宿主（4 次）：P95 **0s（<1µs）**，max 0–1.02ms。
-- 容器（4 次）：P95 **5.4–113.7µs**，min 1.0–2.5µs，max 64–160µs。
-- 挂起语义（Begin 后 Status=pending、approve 放行、reject 不重试）由同一组用例断言。
+- 容器（4 次）：P95 **5.4–113.7µs**（修复竞态前采集；顺序驱动版本为 5.4–113.7µs）。
+- 挂起语义（Begin 后 Status=pending、approve 放行、reject 不重试）由同一组用例断言；
+  并发专项 60 轮在容器 `-race` 下 0 报错。
 
 **审计落库**
 - 每次拒绝 1 条 `hlp_event.audit(kind=tool_decision, decision=deny, rule_id≠null, payload.layer)`；
@@ -111,12 +125,24 @@ go test ./pkg/harnessloop/policy/ -run 'TestPolicySuite' -count=1 -v
 8. **`.../` 不是逃逸**：design 把它列为 `..` 变体，但操作系统语义上它是普通目录名，
    实现放行是合理的；不应当作“应拒未拒”。
 9. 本报告证明的是**权限库与审计 SQL 契约**；生产 `MCP_TOOL_POLICY_ENFORCED`
-   默认关闭，未验证开启后的 MCP 全链路。10. **`pkg/agent/approval` 存在真实数据竞争（容器 `-race` 已复现）**：
-    `flow.go:293 applyDecision` 写 `ApprovalRequest.Status`，而 `policy.ApprovalGate.status`
-    （`approval.go:384`）经 `GetRequest` 返回的同一指针无锁读取该字段。
-    改前的自定义并发审批用例已捕获完整堆栈；T5 边界不允许改实现，因此新增审批用例改为
-    顺序驱动。改后验收：三包 `-race` **连续 10 次通过**、policy 包单独 **11 次通过**；
-    期间有 1 次三包连跑在 policy 包报 `DATA RACE`（未捕获堆栈，疑为既有
-    `TestApprovalDeployPendingAndStatus` 的并发 `Await`+`SubmitDecision`）。
-    **真实运行时“Await 挂起 + 外部提交决策”仍会触发该竞态，需单独立项修复；本报告不宣称
-    审批并发路径已无竞态。**
+   默认关闭，未验证开启后的 MCP 全链路。
+10. **`pkg/agent/approval` 数据竞争已修复（G22 批次 1）**：
+    修复前 `flow.go` 的 `applyDecision` 写 `ApprovalRequest.Status`，`GetRequest` 返回共享指针，
+    `policy.ApprovalGate.status` 在锁外读同一字段；容器 `-race` 已捕获完整堆栈。
+    修复方式：`GetRequest/GetPendingRequests/GetHistory/CreateRequest` 返回深拷贝，
+    `WaitForApproval` 锁内快照，`SetHooks/SetNotifier/SetTimeout/SetAutoApprove` 补写锁。
+    修复后新增 60 轮 `Await` 挂起 + 外部 approve/reject 并发用例，
+    `pkg/agent/approval` 与 policy 审批并发专项在容器 `-race` 下 0 报错；
+    policy suite 的审批用例已恢复真实并发（不再顺序驱动）。
+11. **缓存 key 语义**：新 key 不再包含旧的“两次预哈希 + JSON 指纹”字节序列，
+    属于进程内缓存，未持久化，故无跨版本兼容问题；稳定性与换 key 条件由
+    `TestPolicySuiteDecisionKeyStability` 覆盖。
+## G22 修复记录（本报告内 FAIL → PASS 的证据）
+
+| 批次 | 修复 | 证据 |
+|---|---|---|
+| 1 | 审批管理器并发读写（`pkg/agent/approval`） | `TestApprovalManagerConcurrentDecisions` 60 轮 + `TestPolicySuiteApprovalConcurrentDecision` 60 轮；修复前容器 `-race` 捕获 `applyDecision` 写 Status 堆栈，修复后 `-race` 0 报错 |
+| 3 | 系统密钥/凭证文件硬限制（`policy.Engine`） | `TestPolicySuiteSensitiveFileHardLimit`：四层全 allow 下 `secrets/`、`.env*`、`id_rsa`、`*.pem/*.key/*.p12`、`credentials*`、`api_key*` 全部 `E_SELF_ELEVATION`，普通产物路径仍允许 |
+| 4 | 缓存 key 与 LRU 性能 | `TestPolicySuiteDecisionKeyStability` + `TestPolicySuiteDecisionP95`：命中率 699/301 不变，容器增幅 4/4 ≤10%（−24.7%～−59.3%），对比表见上 |
+
+限制：批 1 修复的是库层并发；生产 `MCP_TOOL_POLICY_ENFORCED` 仍默认关闭，未验证启用后的跨服务端到端路径。
