@@ -31,6 +31,9 @@ func newRouterWithHarnessLoop(t *testing.T) (*gin.Engine, *HarnessLoopHandler) {
 	hl.GET("/tasks/:id", h.GetTask)
 	hl.POST("/tasks/:id/pause", h.PauseTask)
 	hl.POST("/tasks/:id/abort", h.AbortTask)
+	hl.GET("/tasks/:id/subtasks", h.ListSubtasks)
+	hl.GET("/tasks/:id/model-selections", h.ListModelSelections)
+	hl.GET("/handoffs", h.ListHandoffs)
 	hl.GET("/events", h.ListEvents)
 	hl.GET("/checkpoints", h.ListCheckpoints)
 	return engine, h
@@ -50,6 +53,9 @@ func TestHarnessLoopRoutes(t *testing.T) {
 		{"create task", http.MethodPost, "/api/v2/harness-loop/tasks"},
 		{"pause", http.MethodPost, "/api/v2/harness-loop/tasks/t1/pause"},
 		{"abort", http.MethodPost, "/api/v2/harness-loop/tasks/t1/abort"},
+		{"subtasks", http.MethodGet, "/api/v2/harness-loop/tasks/t1/subtasks"},
+		{"model selections", http.MethodGet, "/api/v2/harness-loop/tasks/t1/model-selections"},
+		{"handoffs", http.MethodGet, "/api/v2/harness-loop/handoffs"},
 		{"events", http.MethodGet, "/api/v2/harness-loop/events"},
 		{"checkpoints", http.MethodGet, "/api/v2/harness-loop/checkpoints"},
 	}

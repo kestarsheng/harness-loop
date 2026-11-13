@@ -31,6 +31,9 @@ const (
 	HarnessLoopService_RestoreFromCheckpoint_FullMethodName = "/harnessloop.HarnessLoopService/RestoreFromCheckpoint"
 	HarnessLoopService_ListModels_FullMethodName            = "/harnessloop.HarnessLoopService/ListModels"
 	HarnessLoopService_ResolveModel_FullMethodName          = "/harnessloop.HarnessLoopService/ResolveModel"
+	HarnessLoopService_ListSubtasks_FullMethodName          = "/harnessloop.HarnessLoopService/ListSubtasks"
+	HarnessLoopService_ListModelSelections_FullMethodName   = "/harnessloop.HarnessLoopService/ListModelSelections"
+	HarnessLoopService_ListHandoffs_FullMethodName          = "/harnessloop.HarnessLoopService/ListHandoffs"
 	HarnessLoopService_PreflightTool_FullMethodName         = "/harnessloop.HarnessLoopService/PreflightTool"
 )
 
@@ -50,6 +53,9 @@ type HarnessLoopServiceClient interface {
 	RestoreFromCheckpoint(ctx context.Context, in *RestoreRequest, opts ...grpc.CallOption) (*TaskView, error)
 	ListModels(ctx context.Context, in *ListModelsRequest, opts ...grpc.CallOption) (*ListModelsResponse, error)
 	ResolveModel(ctx context.Context, in *ResolveModelRequest, opts ...grpc.CallOption) (*ResolveModelResponse, error)
+	ListSubtasks(ctx context.Context, in *ListSubtasksRequest, opts ...grpc.CallOption) (*ListSubtasksResponse, error)
+	ListModelSelections(ctx context.Context, in *ListModelSelectionsRequest, opts ...grpc.CallOption) (*ListModelSelectionsResponse, error)
+	ListHandoffs(ctx context.Context, in *ListHandoffsRequest, opts ...grpc.CallOption) (*ListHandoffsResponse, error)
 	PreflightTool(ctx context.Context, in *PreflightToolRequest, opts ...grpc.CallOption) (*ToolDecision, error)
 }
 
@@ -192,6 +198,33 @@ func (c *harnessLoopServiceClient) ResolveModel(ctx context.Context, in *Resolve
 	return out, nil
 }
 
+func (c *harnessLoopServiceClient) ListSubtasks(ctx context.Context, in *ListSubtasksRequest, opts ...grpc.CallOption) (*ListSubtasksResponse, error) {
+	out := new(ListSubtasksResponse)
+	err := c.cc.Invoke(ctx, HarnessLoopService_ListSubtasks_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *harnessLoopServiceClient) ListModelSelections(ctx context.Context, in *ListModelSelectionsRequest, opts ...grpc.CallOption) (*ListModelSelectionsResponse, error) {
+	out := new(ListModelSelectionsResponse)
+	err := c.cc.Invoke(ctx, HarnessLoopService_ListModelSelections_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *harnessLoopServiceClient) ListHandoffs(ctx context.Context, in *ListHandoffsRequest, opts ...grpc.CallOption) (*ListHandoffsResponse, error) {
+	out := new(ListHandoffsResponse)
+	err := c.cc.Invoke(ctx, HarnessLoopService_ListHandoffs_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *harnessLoopServiceClient) PreflightTool(ctx context.Context, in *PreflightToolRequest, opts ...grpc.CallOption) (*ToolDecision, error) {
 	out := new(ToolDecision)
 	err := c.cc.Invoke(ctx, HarnessLoopService_PreflightTool_FullMethodName, in, out, opts...)
@@ -217,6 +250,9 @@ type HarnessLoopServiceServer interface {
 	RestoreFromCheckpoint(context.Context, *RestoreRequest) (*TaskView, error)
 	ListModels(context.Context, *ListModelsRequest) (*ListModelsResponse, error)
 	ResolveModel(context.Context, *ResolveModelRequest) (*ResolveModelResponse, error)
+	ListSubtasks(context.Context, *ListSubtasksRequest) (*ListSubtasksResponse, error)
+	ListModelSelections(context.Context, *ListModelSelectionsRequest) (*ListModelSelectionsResponse, error)
+	ListHandoffs(context.Context, *ListHandoffsRequest) (*ListHandoffsResponse, error)
 	PreflightTool(context.Context, *PreflightToolRequest) (*ToolDecision, error)
 	mustEmbedUnimplementedHarnessLoopServiceServer()
 }
@@ -260,6 +296,15 @@ func (UnimplementedHarnessLoopServiceServer) ListModels(context.Context, *ListMo
 }
 func (UnimplementedHarnessLoopServiceServer) ResolveModel(context.Context, *ResolveModelRequest) (*ResolveModelResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ResolveModel not implemented")
+}
+func (UnimplementedHarnessLoopServiceServer) ListSubtasks(context.Context, *ListSubtasksRequest) (*ListSubtasksResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListSubtasks not implemented")
+}
+func (UnimplementedHarnessLoopServiceServer) ListModelSelections(context.Context, *ListModelSelectionsRequest) (*ListModelSelectionsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListModelSelections not implemented")
+}
+func (UnimplementedHarnessLoopServiceServer) ListHandoffs(context.Context, *ListHandoffsRequest) (*ListHandoffsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListHandoffs not implemented")
 }
 func (UnimplementedHarnessLoopServiceServer) PreflightTool(context.Context, *PreflightToolRequest) (*ToolDecision, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method PreflightTool not implemented")
@@ -496,6 +541,60 @@ func _HarnessLoopService_ResolveModel_Handler(srv interface{}, ctx context.Conte
 	return interceptor(ctx, in, info, handler)
 }
 
+func _HarnessLoopService_ListSubtasks_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListSubtasksRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HarnessLoopServiceServer).ListSubtasks(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HarnessLoopService_ListSubtasks_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HarnessLoopServiceServer).ListSubtasks(ctx, req.(*ListSubtasksRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HarnessLoopService_ListModelSelections_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListModelSelectionsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HarnessLoopServiceServer).ListModelSelections(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HarnessLoopService_ListModelSelections_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HarnessLoopServiceServer).ListModelSelections(ctx, req.(*ListModelSelectionsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HarnessLoopService_ListHandoffs_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListHandoffsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HarnessLoopServiceServer).ListHandoffs(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HarnessLoopService_ListHandoffs_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HarnessLoopServiceServer).ListHandoffs(ctx, req.(*ListHandoffsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _HarnessLoopService_PreflightTool_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(PreflightToolRequest)
 	if err := dec(in); err != nil {
@@ -564,6 +663,18 @@ var HarnessLoopService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ResolveModel",
 			Handler:    _HarnessLoopService_ResolveModel_Handler,
+		},
+		{
+			MethodName: "ListSubtasks",
+			Handler:    _HarnessLoopService_ListSubtasks_Handler,
+		},
+		{
+			MethodName: "ListModelSelections",
+			Handler:    _HarnessLoopService_ListModelSelections_Handler,
+		},
+		{
+			MethodName: "ListHandoffs",
+			Handler:    _HarnessLoopService_ListHandoffs_Handler,
 		},
 		{
 			MethodName: "PreflightTool",

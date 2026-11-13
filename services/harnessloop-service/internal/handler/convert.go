@@ -117,3 +117,86 @@ func toModelEntry(v modelregistry.View) *harnesspb.ModelEntry {
 		Tags:             v.Tags,
 	}
 }
+
+func toProtoSubtask(row *repository.SubtaskRow) *harnesspb.SubtaskView {
+	if row == nil {
+		return nil
+	}
+	return &harnesspb.SubtaskView{
+		SubtaskId:          row.SubtaskID,
+		ParentTaskId:       row.ParentTaskID,
+		TenantId:           row.TenantID,
+		ProjectId:          row.ProjectID,
+		DagId:              row.DagID,
+		DagNodeId:          row.DagNodeID,
+		Depth:              int32(row.Depth),
+		IndexInParent:      int32(row.IndexInParent),
+		ParallelSetId:      row.ParallelSetID,
+		Role:               row.Role,
+		Status:             row.Status,
+		DependsOn:          row.DependsOn,
+		InputContract:      row.InputContract,
+		OutputContract:     row.OutputContract,
+		AcceptanceCriteria: row.AcceptanceCriteria,
+		AcceptanceId:       row.AcceptanceID,
+		FailureStrategy:    row.FailureStrategy,
+		AttemptNo:          int32(row.AttemptNo),
+		ArtifactRefs:       row.ArtifactRefs,
+		HandoffId:          row.HandoffID,
+		AllocTokens:        row.AllocTokens,
+		ConsumedTokens:     row.ConsumedTokens,
+		ConsumedCost:       row.ConsumedCost,
+		CreatedAtMs:        row.CreatedAt.UnixMilli(),
+		UpdatedAtMs:        row.UpdatedAt.UnixMilli(),
+	}
+}
+
+func toProtoModelSelection(row *repository.ModelSelectionRow) *harnesspb.ModelSelectionView {
+	if row == nil {
+		return nil
+	}
+	return &harnesspb.ModelSelectionView{
+		SelectionId:     row.SelectionID,
+		TenantId:        row.TenantID,
+		ProjectId:       row.ProjectID,
+		TaskId:          row.TaskID,
+		Stage:           row.Stage,
+		AttemptNo:       int32(row.AttemptNo),
+		ModelId:         row.ModelID,
+		Strategy:        row.Strategy,
+		ResolvedFrom:    row.ResolvedFrom,
+		Reason:          row.Reason,
+		Candidates:      row.Candidates,
+		ContextWindow:   int32(row.ContextWindow),
+		ThresholdTokens: row.ThresholdTokens,
+		InputPrice:      row.InputPrice,
+		OutputPrice:     row.OutputPrice,
+		TokensIn:        row.TokensIn,
+		TokensOut:       row.TokensOut,
+		Cost:            row.Cost,
+		IsFallback:      row.IsFallback,
+		ApprovalId:      row.ApprovalID,
+		Operator:        row.Operator,
+		CreatedAtMs:     row.CreatedAt.UnixMilli(),
+	}
+}
+
+func toProtoHandoff(row *repository.HandoffRow) *harnesspb.HandoffView {
+	if row == nil {
+		return nil
+	}
+	return &harnesspb.HandoffView{
+		HandoffId:    row.HandoffID,
+		ParentTaskId: row.ParentTaskID,
+		SubtaskId:    row.SubtaskID,
+		TenantId:     row.TenantID,
+		ProjectId:    row.ProjectID,
+		FromAgentId:  row.FromAgentID,
+		ToAgentId:    row.ToAgentID,
+		Status:       row.Status,
+		Reason:       row.Reason,
+		InputDigest:  row.InputDigest,
+		CreatedAtMs:  row.CreatedAt.UnixMilli(),
+		UpdatedAtMs:  row.UpdatedAt.UnixMilli(),
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"agent-platform/pkg/pgindex"
 )
@@ -33,6 +34,7 @@ type ModelSelectionRow struct {
 	IsFallback      bool
 	ApprovalID      string
 	Operator        string
+	CreatedAt       time.Time
 }
 
 type ModelSelectionRepo struct {
@@ -68,4 +70,45 @@ func (r *ModelSelectionRepo) Record(ctx context.Context, row ModelSelectionRow) 
 		return fmt.Errorf("model_selection_repo: insert: %w", err)
 	}
 	return nil
+}
+
+// List returns model selections for a task, ordered newest first. Queries are
+// always tenant scoped; projectID and stage are optional filters.
+func (r *ModelSelectionRepo) List(ctx context.Context, tenantID, projectID, taskID, stage string, limit int) ([]ModelSelectionRow, error) {
+	if tenantID == "" || taskID == "" {
+		return nil, fmt.Errorf("model_selection_repo: tenant and task are required")
+	}
+	if limit <= 0 || limit > 1000 {
+		limit = 200
+	}
+	rows, err := r.db.Query(ctx, `
+		SELECT selection_id, tenant_id, project_id, task_id, stage, attempt_no, model_id,
+		       strategy, resolved_from, COALESCE(reason,''), candidates, context_window, threshold_tokens,
+		       input_price::float8, output_price::float8, tokens_in, tokens_out, cost::float8,
+		       is_fallback, COALESCE(approval_id,''), COALESCE(operator,''), created_at
+		FROM hlp_task.model_selections
+		WHERE tenant_id = $1
+		  AND ($2 = '' OR project_id = $2)
+		  AND task_id = $3
+		  AND ($4 = '' OR stage = $4)
+		ORDER BY created_at DESC, selection_id
+		LIMIT $5`, tenantID, projectID, taskID, stage, limit)
+	if err != nil {
+		return nil, fmt.Errorf("model_selection_repo: list: %w", err)
+	}
+	defer rows.Close()
+
+	var out []ModelSelectionRow
+	for rows.Next() {
+		var row ModelSelectionRow
+		if err := rows.Scan(&row.SelectionID, &row.TenantID, &row.ProjectID, &row.TaskID,
+			&row.Stage, &row.AttemptNo, &row.ModelID, &row.Strategy, &row.ResolvedFrom,
+			&row.Reason, &row.Candidates, &row.ContextWindow, &row.ThresholdTokens,
+			&row.InputPrice, &row.OutputPrice, &row.TokensIn, &row.TokensOut, &row.Cost,
+			&row.IsFallback, &row.ApprovalID, &row.Operator, &row.CreatedAt); err != nil {
+			return nil, fmt.Errorf("model_selection_repo: scan: %w", err)
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
 }

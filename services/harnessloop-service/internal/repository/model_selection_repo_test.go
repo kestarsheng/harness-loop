@@ -197,3 +197,81 @@ func TestModelSelectionRepoRejectsUnknownTaskAndDuplicate(t *testing.T) {
 		t.Fatalf("duplicate selection_id must violate the primary key, got %v", err)
 	}
 }
+
+func TestModelSelectionRepoListReturnsRealRowsAndIsolatesTenants(t *testing.T) {
+	db, _, task := setupTask(t)
+	repo := NewModelSelectionRepo(db)
+	ctx := context.Background()
+
+	selA := "sel-list-a-" + task.TaskID
+	selC := "sel-list-c-" + task.TaskID
+	rows := []ModelSelectionRow{
+		{
+			SelectionID: selA, TenantID: task.TenantID, ProjectID: task.ProjectID, TaskID: task.TaskID,
+			Stage: "a", AttemptNo: 1, ModelID: "qwen-plus", Strategy: "cost_first", ResolvedFrom: "strategy",
+			Reason: "cheapest capable", Candidates: []byte(`[{"model_id":"qwen-plus","score":0.8}]`),
+			ContextWindow: 32768, ThresholdTokens: 26214, InputPrice: 0.001, OutputPrice: 0.002,
+			TokensIn: 100, TokensOut: 50, Cost: 0.0002,
+		},
+		{
+			SelectionID: selC, TenantID: task.TenantID, ProjectID: task.ProjectID, TaskID: task.TaskID,
+			Stage: "c", AttemptNo: 2, ModelID: "qwen-max", Strategy: "balanced", ResolvedFrom: "fallback",
+			Reason: "primary unavailable", Candidates: []byte(`[{"model_id":"qwen-max","score":0.9}]`),
+			ContextWindow: 131072, ThresholdTokens: 104857, InputPrice: 0.0024, OutputPrice: 0.0096,
+			TokensIn: 200, TokensOut: 80, Cost: 0.0012, IsFallback: true, ApprovalID: "appr-9", Operator: "ops-1",
+		},
+	}
+	for _, row := range rows {
+		if err := repo.Record(ctx, row); err != nil {
+			t.Fatalf("record %s: %v", row.SelectionID, err)
+		}
+	}
+
+	got, err := repo.List(ctx, task.TenantID, task.ProjectID, task.TaskID, "", 10)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("selections = %d, want 2", len(got))
+	}
+	byID := map[string]ModelSelectionRow{}
+	for _, row := range got {
+		byID[row.SelectionID] = row
+		if row.CreatedAt.IsZero() {
+			t.Fatalf("%s created_at is zero", row.SelectionID)
+		}
+	}
+	if byID[selA].ModelID != "qwen-plus" || byID[selA].TokensIn != 100 {
+		t.Fatalf("unexpected row a: %+v", byID[selA])
+	}
+	if !byID[selC].IsFallback || byID[selC].ApprovalID != "appr-9" || byID[selC].Cost != 0.0012 {
+		t.Fatalf("unexpected row c: %+v", byID[selC])
+	}
+	if string(byID[selC].Candidates) == "" {
+		t.Fatalf("candidates not returned")
+	}
+
+	filtered, err := repo.List(ctx, task.TenantID, task.ProjectID, task.TaskID, "c", 10)
+	if err != nil {
+		t.Fatalf("list stage=c: %v", err)
+	}
+	if len(filtered) != 1 || filtered[0].SelectionID != selC {
+		t.Fatalf("stage filter = %+v", filtered)
+	}
+
+	crossTenant, err := repo.List(ctx, "tenant-b", task.ProjectID, task.TaskID, "", 10)
+	if err != nil {
+		t.Fatalf("cross tenant list: %v", err)
+	}
+	if len(crossTenant) != 0 {
+		t.Fatalf("cross tenant selections = %d, want 0", len(crossTenant))
+	}
+
+	crossProject, err := repo.List(ctx, task.TenantID, "another-project", task.TaskID, "", 10)
+	if err != nil {
+		t.Fatalf("cross project list: %v", err)
+	}
+	if len(crossProject) != 0 {
+		t.Fatalf("cross project selections = %d, want 0", len(crossProject))
+	}
+}

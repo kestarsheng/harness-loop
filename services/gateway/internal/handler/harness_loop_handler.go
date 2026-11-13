@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -448,4 +449,249 @@ func describeTarget(cfg *config.Config) string {
 		return fmt.Sprintf("<%v>", errHarnessLoopNotConfigured)
 	}
 	return target
+}
+
+func queryLimit(c *gin.Context, fallback int) int {
+	if raw := c.Query("limit"); raw != "" {
+		if v, err := strconv.Atoi(raw); err == nil && v > 0 {
+			return v
+		}
+	}
+	return fallback
+}
+
+func (h *HarnessLoopHandler) ListSubtasks(c *gin.Context) {
+	client, err := h.ensureClient()
+	if err != nil {
+		writeRPCError(c, err)
+		return
+	}
+	resp, err := client.ListSubtasks(outboundContext(c), &harnesspb.ListSubtasksRequest{
+		TenantId:  tenantOf(c),
+		ProjectId: c.Query("project_id"),
+		TaskId:    c.Param("id"),
+		Limit:     int32(queryLimit(c, 200)),
+	})
+	if err != nil {
+		writeRPCError(c, err)
+		return
+	}
+	subtasks := resp.Subtasks
+	if subtasks == nil {
+		subtasks = []*harnesspb.SubtaskView{}
+	}
+	c.JSON(http.StatusOK, gin.H{"subtasks": subtasks})
+}
+
+func (h *HarnessLoopHandler) ListModelSelections(c *gin.Context) {
+	client, err := h.ensureClient()
+	if err != nil {
+		writeRPCError(c, err)
+		return
+	}
+	resp, err := client.ListModelSelections(outboundContext(c), &harnesspb.ListModelSelectionsRequest{
+		TenantId:  tenantOf(c),
+		ProjectId: c.Query("project_id"),
+		TaskId:    c.Param("id"),
+		Stage:     c.Query("stage"),
+		Limit:     int32(queryLimit(c, 200)),
+	})
+	if err != nil {
+		writeRPCError(c, err)
+		return
+	}
+	selections := resp.Selections
+	if selections == nil {
+		selections = []*harnesspb.ModelSelectionView{}
+	}
+	c.JSON(http.StatusOK, gin.H{"selections": selections})
+}
+
+func (h *HarnessLoopHandler) ListHandoffs(c *gin.Context) {
+	client, err := h.ensureClient()
+	if err != nil {
+		writeRPCError(c, err)
+		return
+	}
+	resp, err := client.ListHandoffs(outboundContext(c), &harnesspb.ListHandoffsRequest{
+		TenantId:  tenantOf(c),
+		ProjectId: c.Query("project_id"),
+		TaskId:    c.Query("task_id"),
+		Limit:     int32(queryLimit(c, 200)),
+	})
+	if err != nil {
+		writeRPCError(c, err)
+		return
+	}
+	handoffs := resp.Handoffs
+	if handoffs == nil {
+		handoffs = []*harnesspb.HandoffView{}
+	}
+	c.JSON(http.StatusOK, gin.H{"handoffs": handoffs})
+}
+
+// MonitorStream bridges the gRPC WatchEvents stream to SSE. EventSource cannot
+// send custom headers, so the tenant is read from the query string and
+// validated explicitly instead of relying on StrictTenant's X-Tenant-ID.
+func (h *HarnessLoopHandler) MonitorStream(c *gin.Context) {
+	tenantID := strings.TrimSpace(c.Query("tenant"))
+	if tenantID == "" {
+		writeEnvelope(c, http.StatusBadRequest, "E_TENANT_REQUIRED", "tenant query parameter is required", map[string]any{"parameter": "tenant"})
+		return
+	}
+	lastSeq := int64(0)
+	if raw := strings.TrimSpace(c.Query("last_seq")); raw != "" {
+		v, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || v < 0 {
+			writeEnvelope(c, http.StatusBadRequest, "E_INVALID_ARGUMENT", "last_seq must be a non-negative integer", nil)
+			return
+		}
+		lastSeq = v
+	}
+	client, err := h.ensureClient()
+	if err != nil {
+		writeRPCError(c, err)
+		return
+	}
+
+	ctx, cancel := context.WithCancel(c.Request.Context())
+	defer cancel()
+
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Header("X-Accel-Buffering", "no")
+	c.Status(http.StatusOK)
+	c.Writer.Flush()
+
+	// Catch-up phase: replay everything after last_seq before switching to
+	// the live stream. ListEvents uses seq > since, so replays never repeat.
+	since := lastSeq
+	for {
+		resp, listErr := client.ListEvents(ctx, &harnesspb.ListEventsRequest{
+			TenantId: tenantID, SinceSeq: since, Limit: 500,
+		})
+		if listErr != nil {
+			writeSSEMessage(c.Writer, "", "error", gin.H{"code": "E_CATCHUP_FAILED", "message": statusMessage(listErr)})
+			return
+		}
+		for _, e := range resp.Events {
+			if !writeSSEEvent(c.Writer, e) {
+				return
+			}
+			if e.Seq > since {
+				since = e.Seq
+			}
+		}
+		if len(resp.Events) < 500 {
+			break
+		}
+	}
+	if !writeSSEMessage(c.Writer, "", "synced", gin.H{"last_seq": since}) {
+		return
+	}
+
+	stream, streamErr := client.WatchEvents(ctx, &harnesspb.WatchEventsRequest{TenantId: tenantID, SinceSeq: since})
+	if streamErr != nil {
+		writeSSEMessage(c.Writer, "", "error", gin.H{"code": "E_WATCH_FAILED", "message": statusMessage(streamErr)})
+		return
+	}
+	defer func() { _ = stream.CloseSend() }()
+
+	type recvResult struct {
+		event *harnesspb.HarnessEvent
+		err   error
+	}
+	received := make(chan recvResult, 32)
+	go func() {
+		defer close(received)
+		for {
+			event, recvErr := stream.Recv()
+			select {
+			case received <- recvResult{event: event, err: recvErr}:
+			case <-ctx.Done():
+				return
+			}
+			if recvErr != nil {
+				return
+			}
+		}
+	}()
+
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-heartbeat.C:
+			if !writeSSEMessage(c.Writer, "", "heartbeat", gin.H{"ts": time.Now().UTC().Format(time.RFC3339Nano)}) {
+				return
+			}
+		case res, ok := <-received:
+			if !ok {
+				return
+			}
+			if res.err != nil {
+				return
+			}
+			if res.event == nil {
+				continue
+			}
+			if !writeSSEEvent(c.Writer, res.event) {
+				return
+			}
+		}
+	}
+}
+
+func writeSSEEvent(w gin.ResponseWriter, e *harnesspb.HarnessEvent) bool {
+	payload := json.RawMessage(e.Payload)
+	if len(payload) == 0 || !json.Valid(payload) {
+		payload = json.RawMessage(`{}`)
+	}
+	return writeSSEMessage(w, e.EventId, "harness", gin.H{
+		"event_id":       e.EventId,
+		"event_type":     e.EventType,
+		"schema_version": e.SchemaVersion,
+		"task_id":        e.TaskId,
+		"seq":            e.Seq,
+		"timestamp_ms":   e.TimestampMs,
+		"severity":       e.Severity,
+		"tenant_id":      e.TenantId,
+		"project_id":     e.ProjectId,
+		"stage":          e.GetStage(),
+		"attempt":        e.GetAttempt(),
+		"trace_id":       e.TraceId,
+		"span_id":        e.SpanId,
+		"agent_id":       e.AgentId,
+		"parent_task_id": e.ParentTaskId,
+		"subtask_id":     e.SubtaskId,
+		"handoff_id":     e.HandoffId,
+		"dag_id":         e.DagId,
+		"dag_node_id":    e.DagNodeId,
+		"payload":        payload,
+	})
+}
+
+func writeSSEMessage(w gin.ResponseWriter, id, event string, data any) bool {
+	body, err := json.Marshal(data)
+	if err != nil {
+		return false
+	}
+	if id != "" {
+		if _, err := fmt.Fprintf(w, "id: %s\n", id); err != nil {
+			return false
+		}
+	}
+	if event != "" {
+		if _, err := fmt.Fprintf(w, "event: %s\n", event); err != nil {
+			return false
+		}
+	}
+	if _, err := fmt.Fprintf(w, "data: %s\n\n", body); err != nil {
+		return false
+	}
+	w.Flush()
+	return true
 }

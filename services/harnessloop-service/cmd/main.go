@@ -89,6 +89,9 @@ func main() {
 	eventRepo := repository.NewEventRepo(db)
 	checkpointRepo := repository.NewCheckpointRepo(db)
 	acceptanceRepo := repository.NewAcceptanceRepo(db)
+	subtaskRepo := repository.NewSubtaskRepo(db)
+	modelSelectionRepo := repository.NewModelSelectionRepo(db)
+	handoffRepo := repository.NewHandoffRepo(db)
 
 	publisher := event.NewPublisher(eventSink{repo: eventRepo}, event.NewMemoryIdempotency(10000), event.NewMemoryBuffer())
 	defer func() {
@@ -152,7 +155,7 @@ func main() {
 	runtime.HarnessHome = cfg.Memory.HarnessHome
 
 	emitter := orchestrator.NewPublisherEmitter(publisher, orchestrator.EmitContext{TenantID: "platform", ProjectID: "platform"})
-	modelBridge := service.NewModelBridge(flagDefault(flags, config.FlagModelStrategyEnabled), models, "", repository.NewModelSelectionRepo(db), emitter)
+	modelBridge := service.NewModelBridge(flagDefault(flags, config.FlagModelStrategyEnabled), models, "", modelSelectionRepo, emitter)
 	runtime.Models = modelBridge
 	if modelBridge.Enabled() {
 		if hot := modelBridge.StartHotReload(rootCtx, cfg.Models.File, modelregistry.DefaultReloadInterval, "system", service.ModelStageContext{
@@ -221,18 +224,21 @@ func main() {
 	log.Printf("harnessloop: acceptance verifier is program-only in P0 (no model verifier wired yet)")
 
 	h := handler.New(handler.Deps{
-		Config:       cfg,
-		Tasks:        taskRepo,
-		Attempts:     attemptRepo,
-		Events:       eventRepo,
-		Checkpoints:  checkpointRepo,
-		Acceptances:  acceptanceRepo,
-		Runtime:      runtime,
-		Policy:       policyEngine,
-		PolicyBridge: policyBridge,
-		Models:       models,
-		Publisher:    publisher,
-		Flags:        flags,
+		Config:          cfg,
+		Tasks:           taskRepo,
+		Attempts:        attemptRepo,
+		Events:          eventRepo,
+		Checkpoints:     checkpointRepo,
+		Acceptances:     acceptanceRepo,
+		Subtasks:        subtaskRepo,
+		ModelSelections: modelSelectionRepo,
+		Handoffs:        handoffRepo,
+		Runtime:         runtime,
+		Policy:          policyEngine,
+		PolicyBridge:    policyBridge,
+		Models:          models,
+		Publisher:       publisher,
+		Flags:           flags,
 	})
 
 	lis, err := net.Listen("tcp", cfg.ListenAddress())
