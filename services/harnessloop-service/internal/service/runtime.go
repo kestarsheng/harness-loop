@@ -16,7 +16,9 @@ import (
 	"agent-platform/pkg/harnessloop/compaction"
 	"agent-platform/pkg/harnessloop/event"
 	"agent-platform/pkg/harnessloop/fsm"
+	"agent-platform/pkg/harnessloop/orchestrator"
 	"agent-platform/pkg/harnessloop/retry"
+	"agent-platform/pkg/llm"
 	"agent-platform/services/harnessloop-service/internal/repository"
 )
 
@@ -116,6 +118,10 @@ type Runtime struct {
 	Policy      retry.Policy
 	Now         func() time.Time
 
+	// StageVerifier selects the independent program/model/mixed acceptance
+	// channel. A nil value keeps the historical Acceptor/program-only path.
+	StageVerifier acceptance.StageVerifier
+
 	Injector    *MemoryInjector
 	HarnessHome string
 
@@ -141,6 +147,7 @@ func NewRuntime(tasks TaskStore, attempts AttemptStore, stages StageExecutor) *R
 		Stages:            stages,
 		Policy:            retry.DefaultPolicy(),
 		Now:               time.Now,
+		StageVerifier:     newStageVerifierFromEnv(),
 		aborts:            make(map[abortKey]AbortResult),
 		aborted:           make(map[string]bool),
 		terminalPublished: make(map[string]bool),
@@ -317,9 +324,9 @@ func (r *Runtime) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 		if err := r.Attempts.Finish(ctx, attempt.AttemptID, r.now()); err != nil {
 			return nil, fmt.Errorf("runtime: finish attempt: %w", err)
 		}
-		r.runOrchestration(ctx, in, task.WorkspaceRoot, stage, attempt, stageRes)
+		aggregation := r.runOrchestration(ctx, in, task.WorkspaceRoot, stage, attempt, stageRes)
 
-		verdict := r.evaluate(ctx, in, stage, attempt, stageRes)
+		verdict := r.evaluate(ctx, in, task, aggregation, stage, attempt, stageRes)
 		attempt.AcceptanceID = verdict.AcceptanceID
 		if verdict.AcceptanceID != "" {
 			_ = r.Attempts.AttachAcceptance(ctx, attempt.AttemptID, verdict.AcceptanceID)
@@ -454,9 +461,9 @@ func (r *Runtime) finalize(ctx context.Context, in RunInput, res *RunResult, rea
 // runOrchestration bridges b/c/d stage completion into the orchestration layer.
 // It is best-effort: a plan that cannot be parsed or a missing executor never
 // aborts the parent stage, preserving the pre-flag behaviour.
-func (r *Runtime) runOrchestration(ctx context.Context, in RunInput, workspaceRoot string, stage fsm.Stage, attempt fsm.Attempt, res *StageRunResult) {
+func (r *Runtime) runOrchestration(ctx context.Context, in RunInput, workspaceRoot string, stage fsm.Stage, attempt fsm.Attempt, res *StageRunResult) *orchestrator.AggregationReport {
 	if r.Orchestrator == nil || !r.Orchestrator.Enabled() || res == nil {
-		return
+		return nil
 	}
 	ec := OrchestratorStageContext{
 		TenantID: in.TenantID, ProjectID: in.ProjectID, TaskID: in.TaskID,
@@ -478,11 +485,18 @@ func (r *Runtime) runOrchestration(ctx context.Context, in RunInput, workspaceRo
 	case fsm.StageExecute:
 		_, _ = r.Orchestrator.DispatchCStage(runCtx, ec)
 	case fsm.StageVerify:
-		_, _ = r.Orchestrator.AggregateDStage(runCtx, ec)
+		report, _ := r.Orchestrator.AggregateDStage(runCtx, ec)
+		return report
 	}
+	return nil
 }
 
-func (r *Runtime) evaluate(ctx context.Context, in RunInput, stage fsm.Stage, attempt fsm.Attempt, out *StageRunResult) acceptance.Verdict {
+func (r *Runtime) evaluate(ctx context.Context, in RunInput, task *repository.TaskRun, aggregation *orchestrator.AggregationReport, stage fsm.Stage, attempt fsm.Attempt, out *StageRunResult) acceptance.Verdict {
+	criteria, channel := acceptanceCriteriaForTask(task, stage)
+	if len(criteria) > 0 && channel != acceptance.VerifiedByProgram {
+		return r.evaluateStageVerifier(ctx, in, task, aggregation, stage, attempt, out, criteria, channel)
+	}
+
 	if r.Acceptor != nil {
 		v, err := r.Acceptor.Evaluate(ctx, AcceptanceInput{
 			TaskID: in.TaskID, Stage: string(stage), AttemptID: attempt.AttemptID,
@@ -501,6 +515,148 @@ func (r *Runtime) evaluate(ctx context.Context, in RunInput, stage fsm.Stage, at
 		PromptVersion: acceptance.PromptVersion,
 		InputDigest:   in.PolicyHash,
 	}
+}
+
+// acceptanceCriteriaForTask reads the stage criteria declared in the task
+// policy snapshot. Criteria without a model/mixed declaration keep the legacy
+// program-only path, so existing tasks observe zero behaviour change.
+func acceptanceCriteriaForTask(task *repository.TaskRun, stage fsm.Stage) ([]acceptance.Criterion, string) {
+	if task == nil || len(task.PolicySnapshot) == 0 {
+		return nil, acceptance.VerifiedByProgram
+	}
+	criteria, err := acceptance.ParseStageCriteria(task.PolicySnapshot, string(stage))
+	if err != nil || len(criteria) == 0 {
+		return nil, acceptance.VerifiedByProgram
+	}
+	if err := acceptance.ValidateCriterionChannels(criteria); err != nil {
+		return criteria, "invalid"
+	}
+	return criteria, acceptance.ResolveChannel(criteria)
+}
+
+func (r *Runtime) evaluateStageVerifier(ctx context.Context, in RunInput, task *repository.TaskRun, aggregation *orchestrator.AggregationReport, stage fsm.Stage, attempt fsm.Attempt, out *StageRunResult, criteria []acceptance.Criterion, channel string) acceptance.Verdict {
+	accID := fmt.Sprintf("acc-%s-%s-%d", in.TaskID, stage, attempt.AttemptNo)
+	verifiedBy := channel
+	if verifiedBy == "invalid" || verifiedBy == "" {
+		verifiedBy = acceptance.VerifiedByProgram
+	}
+	fail := func(code, reason string) acceptance.Verdict {
+		return stageVerifierFailure(accID, in.PolicyHash, verifiedBy, code, reason)
+	}
+
+	if channel == "invalid" {
+		return fail("invalid_channel", "acceptance criteria declare an invalid verification channel")
+	}
+	if r.StageVerifier == nil {
+		return fail(acceptance.ReasonVerifierNotConfigured, "no stage verifier is configured for channel "+channel)
+	}
+
+	goal, goalHash, workspace := in.Goal, in.GoalHash, ""
+	var budgetRemaining int64
+	if task != nil {
+		if goal == "" {
+			goal = task.Goal
+		}
+		if goalHash == "" {
+			goalHash = task.GoalHash
+		}
+		workspace = task.WorkspaceRoot
+		budgetRemaining = task.BudgetTokens - task.ConsumedTokens
+	}
+
+	spec := acceptance.Spec{
+		AcceptanceID: accID,
+		TaskID:       in.TaskID,
+		TenantID:     in.TenantID,
+		ProjectID:    in.ProjectID,
+		Stage:        string(stage),
+		AttemptID:    attempt.AttemptID,
+		Goal:         goal,
+		GoalHash:     goalHash,
+		Criteria:     criteria,
+		Artifacts:    stageArtifacts(out),
+		Aggregation:  stageAggregation(aggregation),
+		Constraints: acceptance.Constraints{
+			WorkspaceRoot:         workspace,
+			ToolWhitelist:         append([]string(nil), acceptance.AcceptanceTools...),
+			BudgetRemainingTokens: budgetRemaining,
+		},
+	}
+	input, err := acceptance.Assemble(spec)
+	if err != nil {
+		return fail(acceptance.ReasonContextIncomplete, err.Error())
+	}
+
+	v, err := r.StageVerifier.Verify(ctx, acceptance.StageVerifyRequest{
+		Input:    input,
+		Criteria: input.Criteria,
+		Channel:  channel,
+		WorkDir:  workspace,
+		Timeout:  in.StageTimeout,
+	})
+	if err != nil {
+		return fail(acceptance.ReasonVerifierNotConfigured, "stage verifier error: "+err.Error())
+	}
+	if err := v.Validate(); err != nil {
+		return fail(acceptance.ReasonContextIncomplete, "invalid verdict: "+err.Error())
+	}
+	return v
+}
+
+func stageVerifierFailure(acceptanceID, digest, verifiedBy, code, reason string) acceptance.Verdict {
+	if digest == "" {
+		digest = "policy"
+	}
+	detail := code + ": " + reason
+	return acceptance.Verdict{
+		AcceptanceID:   acceptanceID,
+		Verdict:        acceptance.VerdictFail,
+		Reason:         detail,
+		Evidence:       []acceptance.Evidence{{Kind: "verdict", Ref: "acceptance", Excerpt: detail}},
+		FailedCriteria: []acceptance.FailedCriterion{{CriterionID: "acceptance", Category: "unknown"}},
+		VerifiedBy:     verifiedBy,
+		PromptVersion:  acceptance.PromptVersion,
+		InputDigest:    digest,
+	}
+}
+
+func stageArtifacts(out *StageRunResult) []acceptance.Artifact {
+	if out == nil || len(out.FinishArgs.Artifacts) == 0 {
+		return nil
+	}
+	arts := make([]acceptance.Artifact, 0, len(out.FinishArgs.Artifacts))
+	for _, a := range out.FinishArgs.Artifacts {
+		arts = append(arts, acceptance.Artifact{Path: a.Path, Hash: a.Hash, Size: a.Size})
+	}
+	return arts
+}
+
+func stageAggregation(rep *orchestrator.AggregationReport) *acceptance.AggregationReport {
+	if rep == nil {
+		return nil
+	}
+	out := &acceptance.AggregationReport{
+		ReportID:       rep.DagID,
+		AcceptedCount:  rep.Summary.Accepted,
+		FailedCount:    rep.Summary.Failed + rep.Summary.Rejected,
+		CancelledCount: rep.Summary.Cancelled,
+	}
+	if out.ReportID == "" {
+		out.ReportID = rep.TaskID
+	}
+	for _, c := range rep.Conflicts {
+		entry := c.Kind
+		if c.Path != "" {
+			entry += ":" + c.Path
+		}
+		out.Conflicts = append(out.Conflicts, entry)
+	}
+	for _, item := range rep.Items {
+		for _, a := range item.Artifacts {
+			out.Artifacts = append(out.Artifacts, acceptance.Artifact{Path: a.Path, Hash: a.Hash})
+		}
+	}
+	return out
 }
 
 func (r *Runtime) saveCheckpoint(ctx context.Context, in RunInput, task *repository.TaskRun, attempt fsm.Attempt, kind string, res *RunResult) {
@@ -752,4 +908,54 @@ func defaultRollbackTarget(stage fsm.Stage) string {
 		return "c"
 	}
 	return "a"
+}
+
+type llmJudge struct {
+	client llm.Client
+}
+
+func (j llmJudge) Judge(ctx context.Context, req acceptance.JudgeRequest) (acceptance.JudgeResponse, error) {
+	resp, err := j.client.Chat(ctx, &llm.ChatRequest{
+		Messages: []llm.Message{
+			{Role: "system", Content: req.SystemPrompt},
+			{Role: "user", Content: req.Prompt},
+		},
+		Model:       req.Model,
+		MaxTokens:   req.MaxTokens,
+		Temperature: req.Temperature,
+	})
+	if err != nil {
+		return acceptance.JudgeResponse{}, err
+	}
+	tokensOut := resp.TotalTokens - resp.PromptTokens
+	if tokensOut < 0 {
+		tokensOut = 0
+	}
+	return acceptance.JudgeResponse{
+		Content:   resp.Content,
+		TokensIn:  resp.PromptTokens,
+		TokensOut: tokensOut,
+	}, nil
+}
+
+// newStageVerifierFromEnv wires the LLM judge when the same environment
+// variables used by the compaction summarizer are present. With no base URL the
+// model channel stays unavailable and fails closed; undeclared criteria keep
+// using the historical program path.
+func newStageVerifierFromEnv() acceptance.StageVerifier {
+	baseURL := strings.TrimSpace(os.Getenv("HARNESSLOOP_LLM_BASE_URL"))
+	model := strings.TrimSpace(os.Getenv("HARNESSLOOP_LLM_MODEL"))
+	if baseURL == "" {
+		return acceptance.NewChannelStageVerifier(nil, model)
+	}
+	client, err := llm.NewClient(llm.Config{
+		Provider: "openai",
+		APIKey:   os.Getenv("HARNESSLOOP_LLM_API_KEY"),
+		BaseURL:  baseURL,
+		Model:    model,
+	})
+	if err != nil {
+		return acceptance.NewChannelStageVerifier(nil, model)
+	}
+	return acceptance.NewChannelStageVerifier(llmJudge{client: client}, model)
 }

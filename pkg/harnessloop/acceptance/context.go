@@ -122,9 +122,13 @@ func unverifiedCriteria(criteria []Criterion, checks []CheckResult) []string {
 	}
 	var out []string
 	for _, c := range criteria {
-		if c.Required && !checked[c.ID] {
-			out = append(out, c.ID)
+		if !c.Required || checked[c.ID] {
+			continue
 		}
+		if DeclaredChannel(c) == VerifiedByModel {
+			continue
+		}
+		out = append(out, c.ID)
 	}
 	return out
 }
