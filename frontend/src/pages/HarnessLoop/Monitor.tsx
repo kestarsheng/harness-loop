@@ -84,6 +84,7 @@ export default function Monitor() {
   const [eventStates, setEventStates] = useState<Record<string, TaskRuntimeState>>({});
   const [now, setNow] = useState(() => Date.now());
   const [streamStatus, setStreamStatus] = useState<StreamStatus>('closed');
+  const [streamError, setStreamError] = useState<string | null>(null);
   const [operating, setOperating] = useState(false);
 
   const selectedTaskId = useMonitorStore((state) => state.selectedTaskId);
@@ -127,13 +128,25 @@ export default function Monitor() {
     setEventStates((previous) => reduceMonitorState(previous, events));
   }, []);
 
+  const handleStreamStatus = useCallback((status: StreamStatus) => {
+    setStreamStatus(status);
+    if (status === 'open') {
+      setStreamError(null);
+    }
+  }, []);
+
+  const handleStreamError = useCallback((message: string) => {
+    setStreamError(message);
+  }, []);
+
   useEventStream({
     tenantId:
       (typeof localStorage !== 'undefined' && localStorage.getItem('tenantId')) || 'default',
     enabled: true,
     getLastSeq,
     onEvents: handleEvents,
-    onStatus: setStreamStatus,
+    onStatus: handleStreamStatus,
+    onError: handleStreamError,
   });
 
   const visibleStates = useMemo(() => {
@@ -243,6 +256,18 @@ export default function Monitor() {
           showIcon
           style={{ marginBottom: 12 }}
           message="实时通道不可用，已退化为 5s 轮询；断线补齐以数据库快照为准。"
+        />
+      )}
+
+      {streamError && (
+        <Alert
+          type="error"
+          showIcon
+          closable
+          style={{ marginBottom: 12 }}
+          message="实时通道错误"
+          description={streamError}
+          onClose={() => setStreamError(null)}
         />
       )}
 
@@ -393,7 +418,7 @@ export default function Monitor() {
               }
             }}
           >
-            子任务 / DAG 详情（mock 未联调）
+            子任务 / DAG 详情
           </Button>
         </div>
       </div>
