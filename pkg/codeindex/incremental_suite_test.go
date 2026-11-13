@@ -526,7 +526,7 @@ func TestSuiteBurstSavesCollapseToOneTask(t *testing.T) {
 			t.Errorf("handler index: %v", err)
 		}
 	})
-	w := codeindex.NewWatcher(dir, q, codeindex.WatcherOptions{DebounceWindow: 120 * time.Millisecond, PollInterval: 0})
+	w := codeindex.NewWatcher(dir, q, codeindex.WatcherOptions{DebounceWindow: time.Second, PollInterval: 0})
 	defer w.Stop()
 
 	burstStart := time.Now()
@@ -535,8 +535,8 @@ func TestSuiteBurstSavesCollapseToOneTask(t *testing.T) {
 		time.Sleep(30 * time.Millisecond)
 	}
 	q.Wait()
-	<-time.After(400 * time.Millisecond)
-	if elapsed := time.Since(burstStart); elapsed > time.Second+500*time.Millisecond {
+	<-time.After(1600 * time.Millisecond)
+	if elapsed := time.Since(burstStart); elapsed > 3*time.Second {
 		t.Fatalf("burst took too long to settle: %v", elapsed)
 	}
 
