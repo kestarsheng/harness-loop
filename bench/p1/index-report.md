@@ -33,7 +33,7 @@
 | 3 | 删除清理边 | `TestSuiteDeleteCleansEdges` | 删除后 chunks=0、edges=0（含 `target_file` 反向边）、`indexed_files` 行消失 | PASS |
 | 4 | 注入失败回滚 + 旧索引可检索 | `TestSuiteInjectedWriteFailureRollsBackKeepsOldIndex` | 在事务内注入 3 维向量触发 `vector(1024)` 维度错误；返回 `insert chunk` 错误，状态仍 `indexed`，旧 chunk_id 原样保留，`Search("Alpha")` 仍命中该文件 | PASS |
 | 5 | 并发 10 次最终唯一 | `TestSuiteConcurrent10IndexFinalUnique` | 10 goroutine 同文件 `force=true`：10 次全成功；最终 3 条 chunk、每个 symbol 仅 1 行、`indexed_files` 仅 1 行 | PASS |
-| 6 | 1s 内 5 次保存仅 1 次任务 | `TestSuiteBurstSavesCollapseToOneTask` | 5 次保存（间隔 30ms，总 <1s）→ handler 调用 1 次、`Processed()=1`、最终 3 条 chunk | PASS |
+| 6 | 1s 内 5 次保存仅 1 次任务 | `TestSuiteBurstSavesCollapseToOneTask` | debounce 窗口设为 **1s**；5 次保存间隔 30ms（累计 150ms，<1s）→ handler 调用 1 次、`Processed()=1`、最终 3 条 chunk | PASS |
 | 7 | 全量后增量仅变更文件参与 | `TestSuiteFullThenIncrementalOnlyChangedFile` | 全量 3 文件后只改 `full_b.go`：`ScanMTime` 仅返回 1 个变更；未变更文件 A/C 的 chunk_id 与 `xmin` 均不变；B 被整文件重写 | PASS |
 
 ## 三、补充覆盖（同一套件）
@@ -54,10 +54,12 @@
 
 | 指标 | 实测（多次运行区间） | 阈值 | 结论 |
 |---|---|---|---|
-| 单文件索引 P95（n=20） | **0.499 s**（0.499–1.242 s） | ≤ 2 s | 通过（最差样本仍有 38% 余量） |
-| 100 文件逐文件索引 P95（n=100） | **1.438 s**（1.438–2.064 s） | ≤ 60 s | 通过（余量 ≥96%） |
-| 100 文件 P50 | 0.258 s（0.229–0.258 s） | — | — |
-| 100 文件批次总耗时 | 42.2 s（42.2–49.8 s） | — | 含 100 次事务提交与 HNSW 插入 |
+| 单文件索引 P95（n=20） | **0.499 s**（0.445–1.242 s） | ≤ 2 s | 通过（最差样本仍有 38% 余量） |
+| 100 文件逐文件索引 P95（n=100） | **1.438 s**（1.390–2.064 s） | ≤ 60 s | 通过（余量 ≥96%） |
+| 100 文件 P50 | 0.258 s（0.204–0.258 s） | — | — |
+| 100 文件批次总耗时 | 42.2 s（41.4–49.8 s） | — | 含 100 次事务提交与 HNSW 插入 |
+
+> 区间覆盖 2026-11-13 的三次独立运行（首跑、子代理复跑、验收复跑）。「100 文件 P95 ≤60s」按两种口径同时记录：逐文件延迟 P95（1.390–2.064 s）与整批 100 文件总耗时（41.4–49.8 s），两者均低于 60 s。
 
 - 用例：`TestSuiteIndexLatencyBudget`（`-short` 模式跳过）。
 - 局限（如实标注）：向量为**词袋哈希伪向量**（1024 维 hashing trick），不是语义 embedding；采样偏仓库真实代码但仅 100 文件，**不能代表万级文件仓库**；P95 受本机磁盘与容器 PG 影响，跨机器需重测。
