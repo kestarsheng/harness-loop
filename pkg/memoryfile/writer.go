@@ -33,8 +33,11 @@ type Writer struct {
 
 func NewWriter(store *Store, path string) *Writer {
 	scope := ScopeProject
-	if store != nil && store.Document() != nil {
-		scope = store.Document().Scope
+	if store != nil {
+		if store.Document() != nil {
+			scope = store.Document().Scope
+		}
+		store.setPath(path)
 	}
 	return &Writer{
 		store:   store,
@@ -44,8 +47,16 @@ func NewWriter(store *Store, path string) *Writer {
 	}
 }
 
+// WithSink wires the sink into both the Writer and its Store. This is the
+// single event exit: Get/Insert publish promoted/evicted automatically, and
+// Writer publishes written/promoted/evicted through the same sink. Manual
+// EmitPromotion / EmitEvictions remain available for compatibility but are
+// de-duplicated as described on Store.WithSink.
 func (w *Writer) WithSink(sink EventSink) *Writer {
 	w.sink = sink
+	if w.store != nil {
+		w.store.WithSink(sink)
+	}
 	return w
 }
 
@@ -163,6 +174,14 @@ func (w *Writer) Save() (WriteResult, error) {
 	w.baseVer = doc.OrderVersion
 
 	result := WriteResult{Hash: w.bashash, Bytes: len(raw), Topics: diffTopics(diskDoc, doc)}
+
+	// Publish any evictions still pending from Insert before the write event.
+	// When Store.WithSink is wired, Insert already published them and the
+	// pending queue is empty, so Save cannot double-publish the same key.
+	for _, ev := range w.store.DrainEvictions() {
+		w.emit(newEvictionEvent(w.path, w.scope, ev, time.Now().UTC()))
+	}
+
 	w.emit(ChangeEvent{
 		Type:         EventWritten,
 		File:         w.path,
@@ -242,29 +261,26 @@ func (w *Writer) emit(e ChangeEvent) {
 	w.sink.Emit(e)
 }
 
+// EmitEvictions is kept for callers that still forward DrainEvictions by hand.
+// It is not needed once Store.WithSink is wired: Insert publishes evicted
+// immediately, DrainEvictions returns nothing for those records, and Save only
+// drains records that were never published. The event shape is shared with the
+// automatic path through newEvictionEvent.
 func (w *Writer) EmitEvictions(evictions []Eviction) {
 	for _, ev := range evictions {
-		w.emit(ChangeEvent{
-			Type:      EventEvicted,
-			File:      w.path,
-			Scope:     w.scope,
-			Topics:    []TopicChange{{Key: ev.Key, Action: string(ActionEvicted)}},
-			Source:    "lru",
-			Detail:    ev.Reason,
-			Timestamp: time.Now().UTC(),
-		})
+		w.emit(newEvictionEvent(w.path, w.scope, ev, time.Now().UTC()))
 	}
 }
 
+// EmitPromotion is kept for compatibility. When the store exists it goes
+// through the same promotion exit as Store.Get, so an already-promoted key is
+// not published a second time. The manual event is only emitted for keys the
+// store does not know about.
 func (w *Writer) EmitPromotion(key string, rank int) {
-	w.emit(ChangeEvent{
-		Type:      EventPromoted,
-		File:      w.path,
-		Scope:     w.scope,
-		Topics:    []TopicChange{{Key: key, Action: string(ActionPromoted), OrderRank: rank}},
-		Source:    "read",
-		Timestamp: time.Now().UTC(),
-	})
+	if w.store != nil && w.store.promote(key) {
+		return
+	}
+	w.emit(newPromotionEvent(w.path, w.scope, key, rank, time.Now().UTC()))
 }
 
 func (w *Writer) Path() string { return w.path }
