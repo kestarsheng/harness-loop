@@ -20,6 +20,9 @@ func setupTask(t *testing.T) (*pgindex.DB, *TaskRepo, *TaskRun) {
 	t.Helper()
 	dsn := os.Getenv("HARNESS_TEST_PG_DSN")
 	if dsn == "" {
+		if os.Getenv("HARNESS_REQUIRE_PG") == "1" {
+			t.Fatal("HARNESS_TEST_PG_DSN is required when HARNESS_REQUIRE_PG=1")
+		}
 		t.Skip("HARNESS_TEST_PG_DSN not set")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)

@@ -22,8 +22,17 @@ import (
 
 func setupHandler(t *testing.T) *Handler {
 	t.Helper()
+	h, _ := setupHandlerWithDB(t)
+	return h
+}
+
+func setupHandlerWithDB(t *testing.T) (*Handler, *pgindex.DB) {
+	t.Helper()
 	dsn := os.Getenv("HARNESS_TEST_PG_DSN")
 	if dsn == "" {
+		if os.Getenv("HARNESS_REQUIRE_PG") == "1" {
+			t.Fatal("HARNESS_TEST_PG_DSN is required when HARNESS_REQUIRE_PG=1")
+		}
 		t.Skip("HARNESS_TEST_PG_DSN not set")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -44,15 +53,18 @@ func setupHandler(t *testing.T) *Handler {
 	cfg.Harness.Enabled = true
 
 	return New(Deps{
-		Config:      cfg,
-		Tasks:       repository.NewTaskRepo(db),
-		Attempts:    repository.NewAttemptRepo(db),
-		Events:      repository.NewEventRepo(db),
-		Checkpoints: repository.NewCheckpointRepo(db),
-		Acceptances: repository.NewAcceptanceRepo(db),
-		Policy:      policy.NewEngine(),
-		Models:      modelregistry.DefaultRegistry(),
-	})
+		Config:          cfg,
+		Tasks:           repository.NewTaskRepo(db),
+		Attempts:        repository.NewAttemptRepo(db),
+		Events:          repository.NewEventRepo(db),
+		Checkpoints:     repository.NewCheckpointRepo(db),
+		Acceptances:     repository.NewAcceptanceRepo(db),
+		Subtasks:        repository.NewSubtaskRepo(db),
+		ModelSelections: repository.NewModelSelectionRepo(db),
+		Handoffs:        repository.NewHandoffRepo(db),
+		Policy:          policy.NewEngine(),
+		Models:          modelregistry.DefaultRegistry(),
+	}), db
 }
 
 func TestCreateTaskAndGet(t *testing.T) {

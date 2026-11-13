@@ -34,6 +34,9 @@ type Handler struct {
 	events       *repository.EventRepo
 	checkpoints  *repository.CheckpointRepo
 	acceptances  *repository.AcceptanceRepo
+	subtasks     *repository.SubtaskRepo
+	selections   *repository.ModelSelectionRepo
+	handoffs     *repository.HandoffRepo
 	runtime      *service.Runtime
 	policy       *policy.Engine
 	policyBridge *service.PolicyBridge
@@ -46,18 +49,21 @@ type Handler struct {
 }
 
 type Deps struct {
-	Config       config.Config
-	Tasks        *repository.TaskRepo
-	Attempts     *repository.AttemptRepo
-	Events       *repository.EventRepo
-	Checkpoints  *repository.CheckpointRepo
-	Acceptances  *repository.AcceptanceRepo
-	Runtime      *service.Runtime
-	Policy       *policy.Engine
-	PolicyBridge *service.PolicyBridge
-	Models       *modelregistry.Registry
-	Publisher    *event.Publisher
-	Flags        *config.FlagSet
+	Config          config.Config
+	Tasks           *repository.TaskRepo
+	Attempts        *repository.AttemptRepo
+	Events          *repository.EventRepo
+	Checkpoints     *repository.CheckpointRepo
+	Acceptances     *repository.AcceptanceRepo
+	Subtasks        *repository.SubtaskRepo
+	ModelSelections *repository.ModelSelectionRepo
+	Handoffs        *repository.HandoffRepo
+	Runtime         *service.Runtime
+	Policy          *policy.Engine
+	PolicyBridge    *service.PolicyBridge
+	Models          *modelregistry.Registry
+	Publisher       *event.Publisher
+	Flags           *config.FlagSet
 }
 
 func New(d Deps) *Handler {
@@ -68,6 +74,9 @@ func New(d Deps) *Handler {
 		events:       d.Events,
 		checkpoints:  d.Checkpoints,
 		acceptances:  d.Acceptances,
+		subtasks:     d.Subtasks,
+		selections:   d.ModelSelections,
+		handoffs:     d.Handoffs,
 		runtime:      d.Runtime,
 		policy:       d.Policy,
 		policyBridge: d.PolicyBridge,
@@ -425,6 +434,57 @@ func (h *Handler) ResolveModel(ctx context.Context, req *harnesspb.ResolveModelR
 		Strategy:   res.Strategy,
 		Candidates: []*harnesspb.ModelEntry{toModelEntry(m.View())},
 	}, nil
+}
+
+func (h *Handler) ListSubtasks(ctx context.Context, req *harnesspb.ListSubtasksRequest) (*harnesspb.ListSubtasksResponse, error) {
+	if req.GetTaskId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "task_id is required")
+	}
+	if h.subtasks == nil {
+		return nil, status.Error(codes.FailedPrecondition, "E_SUBTASK_STORE_UNAVAILABLE")
+	}
+	rows, err := h.subtasks.List(ctx, tenantFrom(ctx, req.GetTenantId()), req.GetProjectId(), req.GetTaskId(), int(req.GetLimit()))
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	resp := &harnesspb.ListSubtasksResponse{Subtasks: make([]*harnesspb.SubtaskView, 0, len(rows))}
+	for _, row := range rows {
+		resp.Subtasks = append(resp.Subtasks, toProtoSubtask(row))
+	}
+	return resp, nil
+}
+
+func (h *Handler) ListModelSelections(ctx context.Context, req *harnesspb.ListModelSelectionsRequest) (*harnesspb.ListModelSelectionsResponse, error) {
+	if req.GetTaskId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "task_id is required")
+	}
+	if h.selections == nil {
+		return nil, status.Error(codes.FailedPrecondition, "E_MODEL_SELECTION_STORE_UNAVAILABLE")
+	}
+	rows, err := h.selections.List(ctx, tenantFrom(ctx, req.GetTenantId()), req.GetProjectId(), req.GetTaskId(), req.GetStage(), int(req.GetLimit()))
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	resp := &harnesspb.ListModelSelectionsResponse{Selections: make([]*harnesspb.ModelSelectionView, 0, len(rows))}
+	for i := range rows {
+		resp.Selections = append(resp.Selections, toProtoModelSelection(&rows[i]))
+	}
+	return resp, nil
+}
+
+func (h *Handler) ListHandoffs(ctx context.Context, req *harnesspb.ListHandoffsRequest) (*harnesspb.ListHandoffsResponse, error) {
+	if h.handoffs == nil {
+		return nil, status.Error(codes.FailedPrecondition, "E_HANDOFF_STORE_UNAVAILABLE")
+	}
+	rows, err := h.handoffs.List(ctx, tenantFrom(ctx, req.GetTenantId()), req.GetProjectId(), req.GetTaskId(), int(req.GetLimit()))
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	resp := &harnesspb.ListHandoffsResponse{Handoffs: make([]*harnesspb.HandoffView, 0, len(rows))}
+	for _, row := range rows {
+		resp.Handoffs = append(resp.Handoffs, toProtoHandoff(row))
+	}
+	return resp, nil
 }
 
 func (h *Handler) PreflightTool(ctx context.Context, req *harnesspb.PreflightToolRequest) (*harnesspb.ToolDecision, error) {

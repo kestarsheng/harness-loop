@@ -317,6 +317,10 @@ func Setup(engine *gin.Engine, cfg *config.Config) {
 	api.POST("/harness/optimizer/run", harnessHandler.RunPromptOptimization)
 	api.POST("/harness/optimizer/adopt", harnessHandler.AdoptPromptVersion)
 
+	// Harness loop monitor SSE. EventSource cannot set X-Tenant-ID, so this route
+	// stays outside StrictTenant and reads the tenant from the query string.
+	api.GET("/harness-loop/monitor/stream", harnessLoopHandler.MonitorStream)
+
 	// Harness loop routes (strict tenant: X-Tenant-ID required)
 	harnessLoop := api.Group("/harness-loop")
 	harnessLoop.Use(middleware.StrictTenant())
@@ -327,6 +331,9 @@ func Setup(engine *gin.Engine, cfg *config.Config) {
 	harnessLoop.POST("/tasks/:id/resume", harnessLoopHandler.ResumeTask)
 	harnessLoop.POST("/tasks/:id/abort", harnessLoopHandler.AbortTask)
 	harnessLoop.GET("/tasks/:id/report", harnessLoopHandler.GetReport)
+	harnessLoop.GET("/tasks/:id/subtasks", harnessLoopHandler.ListSubtasks)
+	harnessLoop.GET("/tasks/:id/model-selections", harnessLoopHandler.ListModelSelections)
+	harnessLoop.GET("/handoffs", harnessLoopHandler.ListHandoffs)
 	harnessLoop.GET("/events", harnessLoopHandler.ListEvents)
 	harnessLoop.GET("/checkpoints", harnessLoopHandler.ListCheckpoints)
 	harnessLoop.POST("/checkpoints/restore", harnessLoopHandler.RestoreCheckpoint)

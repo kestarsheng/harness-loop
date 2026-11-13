@@ -24,6 +24,10 @@ service HarnessLoopService {
   rpc ListModels(ListModelsRequest) returns (ListModelsResponse);
   rpc ResolveModel(ResolveModelRequest) returns (ResolveModelResponse);
 
+  rpc ListSubtasks(ListSubtasksRequest) returns (ListSubtasksResponse);
+  rpc ListModelSelections(ListModelSelectionsRequest) returns (ListModelSelectionsResponse);
+  rpc ListHandoffs(ListHandoffsRequest) returns (ListHandoffsResponse);
+
   rpc PreflightTool(PreflightToolRequest) returns (ToolDecision);
 }
 
@@ -256,4 +260,107 @@ message ToolDecision {
   bool requires_approval = 5;
   string approval_id = 6;
   string detail = 7;
+}
+// SubtaskView mirrors hlp_task.subtasks. JSON columns are returned as raw
+// bytes so callers keep the exact persisted document.
+message SubtaskView {
+  string subtask_id = 1;
+  string parent_task_id = 2;
+  string tenant_id = 3;
+  string project_id = 4;
+  string dag_id = 5;
+  string dag_node_id = 6;
+  int32 depth = 7;
+  int32 index_in_parent = 8;
+  string parallel_set_id = 9;
+  string role = 10;
+  string status = 11;
+  repeated string depends_on = 12;
+  bytes input_contract = 13;
+  bytes output_contract = 14;
+  bytes acceptance_criteria = 15;
+  string acceptance_id = 16;
+  string failure_strategy = 17;
+  int32 attempt_no = 18;
+  bytes artifact_refs = 19;
+  string handoff_id = 20;
+  int64 alloc_tokens = 21;
+  int64 consumed_tokens = 22;
+  double consumed_cost = 23;
+  int64 created_at_ms = 24;
+  int64 updated_at_ms = 25;
+}
+
+message ListSubtasksRequest {
+  string tenant_id = 1;
+  string project_id = 2;
+  string task_id = 3;
+  int32 limit = 4;
+}
+
+message ListSubtasksResponse {
+  repeated SubtaskView subtasks = 1;
+}
+
+message ModelSelectionView {
+  string selection_id = 1;
+  string tenant_id = 2;
+  string project_id = 3;
+  string task_id = 4;
+  string stage = 5;
+  int32 attempt_no = 6;
+  string model_id = 7;
+  string strategy = 8;
+  string resolved_from = 9;
+  string reason = 10;
+  bytes candidates = 11;
+  int32 context_window = 12;
+  int64 threshold_tokens = 13;
+  double input_price = 14;
+  double output_price = 15;
+  int64 tokens_in = 16;
+  int64 tokens_out = 17;
+  double cost = 18;
+  bool is_fallback = 19;
+  string approval_id = 20;
+  string operator = 21;
+  int64 created_at_ms = 22;
+}
+
+message ListModelSelectionsRequest {
+  string tenant_id = 1;
+  string project_id = 2;
+  string task_id = 3;
+  string stage = 4;
+  int32 limit = 5;
+}
+
+message ListModelSelectionsResponse {
+  repeated ModelSelectionView selections = 1;
+}
+
+message HandoffView {
+  string handoff_id = 1;
+  string parent_task_id = 2;
+  string subtask_id = 3;
+  string tenant_id = 4;
+  string project_id = 5;
+  string from_agent_id = 6;
+  string to_agent_id = 7;
+  string status = 8;
+  string reason = 9;
+  string input_digest = 10;
+  int64 created_at_ms = 11;
+  int64 updated_at_ms = 12;
+}
+
+message ListHandoffsRequest {
+  string tenant_id = 1;
+  string project_id = 2;
+  string task_id = 3;
+  int32 limit = 4;
+}
+
+message ListHandoffsResponse {
+  repeated HandoffView handoffs = 1;
 }
