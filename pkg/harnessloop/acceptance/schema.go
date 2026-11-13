@@ -21,10 +21,11 @@ type Message struct {
 }
 
 type Criterion struct {
-	ID       string `json:"criterion_id"`
-	Type     string `json:"type"`
-	Expr     string `json:"expr"`
-	Required bool   `json:"required"`
+	ID         string `json:"criterion_id"`
+	Type       string `json:"type"`
+	Expr       string `json:"expr"`
+	Required   bool   `json:"required"`
+	VerifiedBy string `json:"verified_by,omitempty"`
 }
 
 type Artifact struct {
