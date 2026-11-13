@@ -732,16 +732,23 @@ func TestPolicySuiteApprovalHoldAndApprove(t *testing.T) {
 	if err != nil || st != agentapproval.StatusPending {
 		t.Fatalf("status = %s err=%v, want pending", st, err)
 	}
-	// 顺序驱动：先提交决策，再调用 Await。避免与实现中
-	// pkg/agent/approval 的 GetRequest/applyDecision 无锁读写产生数据竞争。
+	// 真实并发：Await 在挂起轮询，外部同时提交决策。修复前会与
+	// pkg/agent/approval 的 applyDecision 写 Status 形成数据竞争。
+	done := make(chan policy.ApprovalOutcome, 1)
+	go func() { done <- gate.Await(context.Background(), ticket) }()
+	psWaitPending(t, manager, ticket.ID)
 	if err := manager.SubmitDecision(context.Background(), &agentapproval.ApprovalDecision{
 		RequestID: ticket.ID, Decision: agentapproval.StatusApproved, UserID: "reviewer",
 	}); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
-	out := gate.Await(context.Background(), ticket)
-	if !out.Allowed {
-		t.Fatalf("approved call must proceed: %+v", out)
+	select {
+	case out := <-done:
+		if !out.Allowed {
+			t.Fatalf("approved call must proceed: %+v", out)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("approval await timeout")
 	}
 }
 
@@ -760,12 +767,15 @@ func TestPolicySuiteApprovalRejectedNoRetry(t *testing.T) {
 	if err != nil || st != agentapproval.StatusPending {
 		t.Fatalf("status = %s err=%v, want pending", st, err)
 	}
+	done := make(chan policy.ApprovalOutcome, 1)
+	go func() { done <- gate.Await(context.Background(), ticket) }()
+	psWaitPending(t, manager, ticket.ID)
 	if err := manager.SubmitDecision(context.Background(), &agentapproval.ApprovalDecision{
 		RequestID: ticket.ID, Decision: agentapproval.StatusRejected, UserID: "reviewer", Reason: "no",
 	}); err != nil {
 		t.Fatalf("reject: %v", err)
 	}
-	out := gate.Await(context.Background(), ticket)
+	out := <-done
 	if out.Allowed || out.Code != policy.CodeApprovalRejected {
 		t.Fatalf("rejected call = %+v", out)
 	}
@@ -887,9 +897,80 @@ func psP95(samples []time.Duration) time.Duration {
 	return samples[idx]
 }
 
+func psWaitPending(t *testing.T, manager *agentapproval.ApprovalFlowManager, id string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		req, err := manager.GetRequest(id)
+		if err == nil && req.Status == agentapproval.StatusPending {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("approval %s never became pending", id)
+}
 
-// 9.11 审批性能口径：审批决策提交 → Await 返回放行的耗时。
-// 顺序驱动以避开 pkg/agent/approval 既有的无锁读写竞态（见报告边界）。
+// 并发专项：Await 挂起 + 外部 approve/reject 并发执行 60 轮，且持续并发读取
+// gate.Status（走 manager.GetRequest）。修复前会触发 applyDecision 写 Status
+// 与 GetRequest 返回共享指针的 -race 报告。
+func TestPolicySuiteApprovalConcurrentDecision(t *testing.T) {
+	psSuitePG(t)
+	manager := agentapproval.NewApprovalFlowManager()
+	gate := policy.NewApprovalGate(policy.DefaultApprovalConfig(), manager)
+	gate.SetPollInterval(time.Millisecond)
+	for round := 0; round < 60; round++ {
+		req := psRequest("deploy_app", "c", policy.ToolArgs{}, t.TempDir())
+		req.TaskID = fmt.Sprintf("ps-suite-concurrent-%d", round)
+		ticket, err := gate.Begin(context.Background(), req, []string{policy.TagExec})
+		if err != nil {
+			t.Fatalf("round %d begin: %v", round, err)
+		}
+		stop := make(chan struct{})
+		var readers sync.WaitGroup
+		for i := 0; i < 2; i++ {
+			readers.Add(1)
+			go func() {
+				defer readers.Done()
+				for {
+					select {
+					case <-stop:
+						return
+					default:
+						_, _ = gate.Status(context.Background(), ticket.ID)
+					}
+				}
+			}()
+		}
+		done := make(chan policy.ApprovalOutcome, 1)
+		go func() { done <- gate.Await(context.Background(), ticket) }()
+		psWaitPending(t, manager, ticket.ID)
+		decision := agentapproval.StatusApproved
+		if round%2 == 1 {
+			decision = agentapproval.StatusRejected
+		}
+		if err := manager.SubmitDecision(context.Background(), &agentapproval.ApprovalDecision{
+			RequestID: ticket.ID, Decision: decision, UserID: "reviewer", Reason: "probe",
+		}); err != nil {
+			t.Fatalf("round %d submit: %v", round, err)
+		}
+		select {
+		case out := <-done:
+			if decision == agentapproval.StatusApproved && !out.Allowed {
+				t.Fatalf("round %d approved call not allowed: %+v", round, out)
+			}
+			if decision == agentapproval.StatusRejected && (out.Allowed || out.Code != policy.CodeApprovalRejected) {
+				t.Fatalf("round %d rejected call = %+v", round, out)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatalf("round %d wait timeout", round)
+		}
+		close(stop)
+		readers.Wait()
+	}
+}
+
+
+// 9.11 审批性能口径：Await 挂起 → 外部提交决策 → Await 返回放行的耗时。
 func TestPolicySuiteApprovalLatency(t *testing.T) {
 	psSuitePG(t)
 	manager := agentapproval.NewApprovalFlowManager()
@@ -904,15 +985,22 @@ func TestPolicySuiteApprovalLatency(t *testing.T) {
 			t.Fatalf("round %d begin: %v", i, err)
 		}
 		start := time.Now()
+		done := make(chan policy.ApprovalOutcome, 1)
+		go func() { done <- gate.Await(context.Background(), ticket) }()
+		psWaitPending(t, manager, ticket.ID)
 		if err := manager.SubmitDecision(context.Background(), &agentapproval.ApprovalDecision{
 			RequestID: ticket.ID, Decision: agentapproval.StatusApproved, UserID: "reviewer",
 		}); err != nil {
 			t.Fatalf("round %d approve: %v", i, err)
 		}
-		out := gate.Await(context.Background(), ticket)
-		samples = append(samples, time.Since(start))
-		if !out.Allowed {
-			t.Fatalf("round %d not allowed: %+v", i, out)
+		select {
+		case out := <-done:
+			samples = append(samples, time.Since(start))
+			if !out.Allowed {
+				t.Fatalf("round %d not allowed: %+v", i, out)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("round %d approval timeout", i)
 		}
 	}
 	p95 := psP95(samples)
