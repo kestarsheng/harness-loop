@@ -879,7 +879,7 @@
 
 > P1 合计：实施 31 个 + 测试 5 个 = **36 个任务**。
 
-## 3.3 P2：多语言索引、rerank 增强、调度优化、运维完善（14 个任务）
+## 3.3 P2：多语言索引、rerank 增强、调度优化、运维完善与 CLI 主线（20 个任务）
 
 ### T-P2-01 TypeScript / Python 解析
 
@@ -1049,7 +1049,79 @@
 | 验收标准 | 逃逸用例 100% 拒绝且零副作用；`go test -fuzz=FuzzPathEscape -fuzztime=60s` 无放行样本；公平性报告含配额占用曲线；双平台 CI 通过。 |
 | 复杂度 | L |
 
-> P2 合计：实施 10 个 + 测试 4 个 = **14 个任务**。
+### T-P2-11 CLI `loop` 入口与全局看板 URL
+
+| 字段 | 内容 |
+|---|---|
+| 目标 | 新增 `harness loop` 交互入口：进入类 Claude Code 的 TUI，并常驻显示**全局固定**的看板 URL（本地地址、不带域名、不区分项目）；同一机器任意终端执行同一命令，得到同一个 URL。 |
+| 关联需求 | REQ-107~113、REQ-097~099；design 7.1 / 7.2 / 4.12.6 |
+| 依赖 | T-P1-27、T-P1-28、T-P2-03 |
+| 涉及文件 | [N] `internal/cli/cmd/loop.go`、[M] `internal/cli/cmd/root.go`、[M] `internal/cli/cmd/run.go`、[M] `internal/cli/tui/app.go`、[M] `internal/cli/tui/model.go`、[M] `internal/cli/config` |
+| 实施要点 | 1) `harness loop` 为默认交互入口，`run` 保留脚本化；2) 默认值：`--server` 默认 `127.0.0.1:50013`（可被配置/flag 覆盖），`--tenant` 默认 `default`（可用 `HARNESS_TENANT`/配置覆盖），保证多终端与大屏同租户；3) URL 固定为 `${web_base_url}/harness-loop/monitor`，`web_base_url` 默认 `http://localhost:5174`，**只允许本地地址，不拼接域名**；4) TUI 顶部常驻 URL，`o` 键调系统 opener，终端支持时输出 OSC 8 超链接；5) 无 `--goal` 时进入输入框，有则直接提交并进入监控；6) 每次 `loop` 新建一个任务，退出时保留 URL 与任务号。 |
+| 验收标准 | 真实终端执行 `harness loop` 可起动 TUI 并显示固定 URL；另开终端执行同一命令，URL 完全相同；`o` 能打开浏览器且落到 `/harness-loop/monitor`；`go test ./internal/cli/...` 全绿；显式 `--server`/`--tenant` 优先于默认值。 |
+| 复杂度 | M |
+
+### T-P2-12 终端会话标签与多终端识别
+
+| 字段 | 内容 |
+|---|---|
+| 目标 | 每个终端生成 `session_id` 与可读 `terminal_label`（默认 `hostname:cwd`），随任务提交并暴露在任务视图，使同一看板上的多个 agent 可区分。 |
+| 关联需求 | REQ-107~113；design 7.2 / 5.1 |
+| 依赖 | T-P2-11、T-P0-02 |
+| 涉及文件 | [M] `proto/harnessloop/harnessloop.proto`（`TaskCommand`/`TaskView` 增 `session_id`、`terminal_label`）、[M] `pkg/pb/harnessloop/**`、[M] `services/harnessloop-service/internal/repository/task_repo.go`、[N] `pkg/pgindex/ddl/012_task_session.sql`、[M] `services/harnessloop-service/internal/handler/grpc_handler.go` |
+| 实施要点 | 1) 字段可为空，兼容存量任务；2) 迁移用 `012_task_session.sql`，`ADD COLUMN IF NOT EXISTS` + 索引；3) `session_id` 每次 `loop` 新建，`terminal_label` 可配置；4) 列表接口原样返回，不做额外聚合。 |
+| 验收标准 | 两个终端并发提交后 `ListTasks` 返回两条带不同 `session_id`/`terminal_label`；空值任务仍可列出；`TestMigrateIsIdempotent` PASS；`go test ./services/harnessloop-service/...` 全绿。 |
+| 复杂度 | M |
+
+### T-P2-13 全局多 Agent 看板
+
+| 字段 | 内容 |
+|---|---|
+| 目标 | 大屏在**不按项目过滤**的前提下展示同租户全部活跃 agent，卡片显示终端标签、阶段、健康度与最近事件；保留最近 20 个终态任务灰显。 |
+| 关联需求 | REQ-107~113、REQ-139；design 7.1 / 7.2 |
+| 依赖 | T-P2-12、T-P1-29 |
+| 涉及文件 | [M] `frontend/src/pages/HarnessLoop/Monitor.tsx`、[M] `frontend/src/pages/HarnessLoop/types.ts`、[M] `frontend/src/pages/HarnessLoop/api/harnessLoop.ts`、[M] `frontend/src/pages/HarnessLoop/components/AgentCard.tsx`、[M] `frontend/src/pages/HarnessLoop/components/AgentCardGrid.tsx`、[M] `frontend/src/pages/HarnessLoop/components/SummaryBar.tsx` |
+| 实施要点 | 1) `listTasks` 保持不传 `project_id`，只按 tenant；2) 卡片标题优先显示 `terminal_label`，其次 goal 截断；3) 运行中 + 最近 20 个终态；4) SSE 继续按 tenant 订阅、按 task_id 归约；5) 绝不引入项目维度筛选。 |
+| 验收标准 | 两个终端同时跑时大屏出现两张卡片并实时更新；关闭一个终端后卡片转终态灰显；URL 不带 project 参数仍显示全部；`npm test`、`npm run build`、eslint 通过。 |
+| 复杂度 | M |
+
+### T-P2-14 TUI 监控面板补齐（PDF 第 1 项）
+
+| 字段 | 内容 |
+|---|---|
+| 目标 | 在 TUI 内补齐 PDF 第 1 项要求的 Agent 生命周期、健康度、终端输出、产物与异常定位。 |
+| 关联需求 | REQ-107~113；design 7.1 / 7.2 / 9.9 |
+| 依赖 | T-P2-11、T-P1-19、T-P1-23、T-P1-28 |
+| 涉及文件 | [N] `internal/cli/tui/views/subagents.go`、[N] `internal/cli/tui/views/models.go`、[N] `internal/cli/tui/views/health.go`、[M] `internal/cli/tui/model.go`、[M] `internal/cli/tui/app.go` |
+| 实施要点 | 1) 子任务树 / DAG 进度；2) handoff 链路；3) 模型选择与回退；4) 健康度与异常抽屉（`security.violation`/`tool.denied`/`approval.*`）；5) 产物与检查点；6) 全部复用后端已有查询，不新增聚合层。 |
+| 验收标准 | 真实任务下各面板显示真实数据；73 类事件均可读；`go test ./internal/cli/...` 全绿；真实终端目视通过。 |
+| 复杂度 | L |
+
+### T-P2-15 CLI 知识检索入口（PDF 第 5 项）
+
+| 字段 | 内容 |
+|---|---|
+| 目标 | 提供 `harness kb search/upload/show`，检索结果带来源引用，并可在 TUI 侧栏查看。 |
+| 关联需求 | REQ-085~095；design 4.7 / 9.6 |
+| 依赖 | T-P1-16、T-P2-11 |
+| 涉及文件 | [N] `internal/cli/cmd/kb.go`、[M] `internal/cli/cmd/root.go`、[N] `internal/cli/tui/views/kb.go` |
+| 实施要点 | 1) 复用 knowledge-service 现有 RPC；2) 输出标题、片段、来源路径与分数；3) 上传走四态状态机，展示解析进度；4) 不新增后端接口。 |
+| 验收标准 | `kb search` 返回带来源引用的结果；`kb upload` 后状态可查；`go test ./internal/cli/...` 全绿。 |
+| 复杂度 | M |
+
+### T-P2-T5 CLI 多终端与端到端联动测试
+
+| 字段 | 内容 |
+|---|---|
+| 目标 | 验证「两个终端 → 同一 URL → 同一看板两个 agent」的完整链路，并补齐 CLI 回归。 |
+| 关联需求 | REQ-097~113、REQ-139 |
+| 依赖 | T-P2-11 ~ T-P2-15 |
+| 涉及文件 | [N] `internal/cli/tui/multi_terminal_test.go`、[N] `bench/p2/cli-multi-terminal.md` |
+| 实施要点 | 1) 两终端并发 `loop`，断言 URL 相同、tenant 相同；2) 断言 `ListTasks` 返回两条且带不同标签；3) SSE 实时更新与断线重连；4) TUI 目视记录（截图/终端录制）。 |
+| 验收标准 | 两终端链路全部通过；报告留档；真实终端目视无异常。 |
+| 复杂度 | M |
+
+> P2 合计：实施 15 个 + 测试 5 个 = **20 个任务**。
 
 ---
 
