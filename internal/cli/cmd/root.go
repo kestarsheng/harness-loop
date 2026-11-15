@@ -18,18 +18,25 @@ import (
 	"google.golang.org/grpc/status"
 
 	"agent-platform/internal/cli/output"
+	"agent-platform/internal/cli/tui"
 	harnesspb "agent-platform/pkg/pb/harnessloop"
 
 	"gopkg.in/yaml.v3"
 )
 
 type Options struct {
-	Server  string
-	Tenant  string
-	Config  string
-	JSON    bool
-	NoColor bool
+	Server     string
+	Tenant     string
+	Config     string
+	WebBaseURL string
+	JSON       bool
+	NoColor    bool
 }
+
+const (
+	DefaultServerAddr = "127.0.0.1:50013"
+	DefaultTenant     = "default"
+)
 
 var opts Options
 
@@ -40,8 +47,9 @@ type ExitError struct {
 func (e *ExitError) Error() string { return fmt.Sprintf("exit code %d", e.Code) }
 
 type fileConfig struct {
-	Server string `yaml:"server"`
-	Tenant string `yaml:"tenant"`
+	Server     string `yaml:"server"`
+	Tenant     string `yaml:"tenant"`
+	WebBaseURL string `yaml:"web_base_url"`
 }
 
 func NewRootCmd() *cobra.Command {
@@ -52,13 +60,14 @@ func NewRootCmd() *cobra.Command {
 		SilenceErrors: true,
 	}
 	pf := root.PersistentFlags()
-	pf.StringVar(&opts.Server, "server", "", "harnessloop-service gRPC address (default 127.0.0.1:50008)")
-	pf.StringVar(&opts.Tenant, "tenant", "", "tenant id (required)")
+	pf.StringVar(&opts.Server, "server", "", "harnessloop-service gRPC address (default 127.0.0.1:50013)")
+	pf.StringVar(&opts.Tenant, "tenant", "", "tenant id (default default)")
 	pf.StringVar(&opts.Config, "config", "", "config file (default ~/.harness/config.yaml)")
+	pf.StringVar(&opts.WebBaseURL, "web-base-url", "", "local web base URL for the fixed monitor board (default http://localhost:5174)")
 	pf.BoolVar(&opts.JSON, "json", false, "emit JSON envelope")
 	pf.BoolVar(&opts.NoColor, "no-color", false, "disable colored output")
 
-	root.AddCommand(newRunCmd(), newStatusCmd(), newAbortCmd(), newResumeCmd(), newLogsCmd(), newVersionCmd())
+	root.AddCommand(newLoopCmd(), newRunCmd(), newStatusCmd(), newAbortCmd(), newResumeCmd(), newLogsCmd(), newVersionCmd())
 	return root
 }
 
@@ -110,29 +119,39 @@ func resolveServer(cfg fileConfig) string {
 	if cfg.Server != "" {
 		return cfg.Server
 	}
-	return "127.0.0.1:50008"
+	return DefaultServerAddr
 }
 
-func resolveTenant(cfg fileConfig) (string, error) {
+func resolveTenant(cfg fileConfig) string {
 	if opts.Tenant != "" {
-		return opts.Tenant, nil
+		return opts.Tenant
 	}
 	if env := os.Getenv("HARNESS_TENANT"); env != "" {
-		return env, nil
+		return env
 	}
 	if cfg.Tenant != "" {
-		return cfg.Tenant, nil
+		return cfg.Tenant
 	}
-	return "", errors.New("tenant is required: pass --tenant or set HARNESS_TENANT")
+	return DefaultTenant
+}
+
+func resolveWebBaseURL(cfg fileConfig) string {
+	if opts.WebBaseURL != "" {
+		return opts.WebBaseURL
+	}
+	if env := os.Getenv("HARNESS_WEB_BASE_URL"); env != "" {
+		return env
+	}
+	if cfg.WebBaseURL != "" {
+		return cfg.WebBaseURL
+	}
+	return tui.DefaultWebBaseURL
 }
 
 func newClient(cmd *cobra.Command) (harnesspb.HarnessLoopServiceClient, *grpc.ClientConn, string, error) {
 	cfg := loadFileConfig(opts.Config)
 	server := resolveServer(cfg)
-	tenant, err := resolveTenant(cfg)
-	if err != nil {
-		return nil, nil, "", err
-	}
+	tenant := resolveTenant(cfg)
 	ctx, cancel := context.WithTimeout(cmd.Context(), 3*time.Second)
 	defer cancel()
 	conn, err := grpc.DialContext(ctx, server, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
