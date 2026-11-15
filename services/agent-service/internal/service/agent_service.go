@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -78,12 +79,18 @@ func NewAgentService(registry *agent.Registry, llmClient llm.Client, mcpClient m
 	}
 
 	// Create execution engine with metrics-wrapped LLM client
+	engineCfg := agent.DefaultEngineConfig()
+	// Off by default: the streaming path currently finishes stages via the
+	// text protocol and never executes streamed tool calls. Enabling this
+	// aggregates streamed tool_call deltas and lets the existing loop take the
+	// tool branch (requires a gateway that emits tool_call deltas).
+	engineCfg.StreamToolCalls = os.Getenv("AGENT_STREAM_TOOL_CALLS") == "true"
 	s.engine = agent.NewEngine(
 		registry,
 		&llmAdapter{client: metricsLLM},
 		&stageFinishExecutor{inner: &toolAdapter{mcpClient: mcpClient}},
 		store,
-		agent.DefaultEngineConfig(),
+		engineCfg,
 	)
 
 	// Wire memory client into the engine (graceful: nil means agent runs without memory).

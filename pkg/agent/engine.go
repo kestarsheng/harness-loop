@@ -20,6 +20,12 @@ type EngineConfig struct {
 
 	// MaxHistoryLength is the maximum message history length
 	MaxHistoryLength int
+
+	// StreamToolCalls enables aggregating tool_call deltas from the streaming
+	// LLM response and returning them in LLMResponse.ToolCalls. Default false
+	// keeps the legacy behaviour: streamed tool calls are dropped and only text
+	// is returned, so the existing stage_finish text protocol is unaffected.
+	StreamToolCalls bool
 }
 
 // DefaultEngineConfig returns default engine configuration

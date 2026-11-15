@@ -4,7 +4,10 @@ import (
 	"agent-platform/pkg/agent/approval"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 )
 
@@ -503,6 +506,10 @@ func (e *Engine) callLLMStreaming(ctx context.Context, req *LLMRequest, callback
 	// Collect the full response while forwarding tokens
 	var fullContent string
 	var totalTokens int
+	var toolAcc *streamToolCallAccumulator
+	if e.config.StreamToolCalls {
+		toolAcc = newStreamToolCallAccumulator()
+	}
 
 	for chunk := range ch {
 		if chunk.Error != nil {
@@ -521,21 +528,127 @@ func (e *Engine) callLLMStreaming(ctx context.Context, req *LLMRequest, callback
 				Step:      step,
 			})
 		}
+		if toolAcc != nil && chunk.ToolCall != nil {
+			toolAcc.add(chunk.ToolCall, chunk.ToolCallIndex)
+		}
 	}
 
-	// For streaming mode, we return the content without tool calls.
-	// Tool calls are handled by the non-streaming Chat() path for now,
-	// since the LLM streaming client doesn't reliably aggregate streaming tool_call arguments.
-	// This is a known limitation — the first streaming iteration gives users
-	// instant token feedback for text responses; tool_call paths still benefit
-	// from the think/tool_start/tool_result events.
+	var toolCalls []ToolCall
+	if toolAcc != nil {
+		toolCalls, err = toolAcc.result()
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	totalTokens = len(fullContent) / 4 // rough estimate; real counting needs usage data from the last chunk
 
 	return &LLMResponse{
 		Content:     fullContent,
-		ToolCalls:   nil, // tool calls handled via non-streaming fallback
+		ToolCalls:   toolCalls,
 		TotalTokens: totalTokens,
 		Cost:        0, // cost tracking happens at the service layer
 		StopReason:  "stop",
 	}, nil
+}
+
+// ErrStreamToolCallIncomplete indicates that streamed tool_call deltas could
+// not be assembled into a complete, parseable tool call. The engine returns it
+// instead of handing a truncated JSON payload to the tool executor.
+var ErrStreamToolCallIncomplete = errors.New("stream tool call incomplete")
+
+// streamedToolCall accumulates the deltas of one tool call.
+type streamedToolCall struct {
+	id        string
+	name      string
+	arguments strings.Builder
+}
+
+// streamToolCallAccumulator merges OpenAI-style tool_call deltas. Deltas are
+// keyed by ToolCallIndex; id and function.name are taken from the first
+// non-empty delta and argument fragments are concatenated in arrival order.
+// Arrival order of indices does not matter because the final result is sorted
+// by index. A delta with a missing index (zero value) is appended to index 0,
+// except when it carries a different non-empty id, which starts a new call.
+type streamToolCallAccumulator struct {
+	byIndex  map[int]*streamedToolCall
+	order    []int
+	maxIndex int
+}
+
+func newStreamToolCallAccumulator() *streamToolCallAccumulator {
+	return &streamToolCallAccumulator{byIndex: make(map[int]*streamedToolCall)}
+}
+
+func (a *streamToolCallAccumulator) add(delta *ToolCall, index int) {
+	if delta == nil {
+		return
+	}
+	idx := a.resolveIndex(delta, index)
+	state, ok := a.byIndex[idx]
+	if !ok {
+		state = &streamedToolCall{}
+		a.byIndex[idx] = state
+		a.order = append(a.order, idx)
+		if idx > a.maxIndex {
+			a.maxIndex = idx
+		}
+	}
+	if state.id == "" {
+		state.id = delta.ID
+	}
+	if state.name == "" {
+		state.name = delta.Name
+	}
+	state.arguments.WriteString(string(delta.Arguments))
+}
+
+// resolveIndex maps a zero index to the call it belongs to. Gateways that omit
+// the index field send zero for every delta, which is indistinguishable from a
+// real index 0. A different non-empty id means a new parallel call.
+func (a *streamToolCallAccumulator) resolveIndex(delta *ToolCall, index int) int {
+	if index > 0 {
+		return index
+	}
+	if delta.ID != "" {
+		if state, ok := a.byIndex[0]; ok && state.id != "" && state.id != delta.ID {
+			return a.maxIndex + 1
+		}
+	}
+	return 0
+}
+
+// result validates and returns the aggregated calls ordered by index. It fails
+// loudly rather than returning a partially assembled JSON payload.
+func (a *streamToolCallAccumulator) result() ([]ToolCall, error) {
+	if len(a.order) == 0 {
+		return nil, nil
+	}
+	indices := append([]int(nil), a.order...)
+	sort.Ints(indices)
+	calls := make([]ToolCall, 0, len(indices))
+	for _, idx := range indices {
+		state := a.byIndex[idx]
+		args := strings.TrimSpace(state.arguments.String())
+		if args == "" {
+			args = "{}"
+		}
+		if !json.Valid([]byte(args)) {
+			return nil, fmt.Errorf("%w: index %d arguments are not valid JSON", ErrStreamToolCallIncomplete, idx)
+		}
+		if state.name == "" {
+			return nil, fmt.Errorf("%w: index %d has arguments but no function name", ErrStreamToolCallIncomplete, idx)
+		}
+		id := state.id
+		if id == "" {
+			id = fmt.Sprintf("call_stream_%d", idx)
+		}
+		calls = append(calls, ToolCall{
+			ID:        id,
+			Name:      state.name,
+			Arguments: json.RawMessage(args),
+			Status:    "pending",
+		})
+	}
+	return calls, nil
 }
