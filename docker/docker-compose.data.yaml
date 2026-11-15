@@ -1,0 +1,50 @@
+# 数据服务：PostgreSQL(pgvector) + MongoDB
+#
+# 只管理常驻数据容器，业务服务（gateway / agent-service / harnessloop-service 等）
+# 仍按原方式在本机启动。容器名与端口刻意保持与历史手工容器一致，避免 DSN 失效：
+#   - hlp-pg-test : 55432 -> 5432
+#   - hlp-mongo   : 27017 -> 27017
+#
+# 数据卷为具名卷，且声明 external —— compose down 不会删除它们。
+# 运维铁律：
+#   1. 禁止执行 `docker volume prune`
+#   2. 重建容器必须复用 pgdata / mongodata / mongoconfig
+#   3. 迁移或备份前先 `docker compose -f docker/docker-compose.data.yaml stop`
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: hlp-pg-test
+    ports:
+      - "55432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/00-init.sql:ro
+    environment:
+      - POSTGRES_USER=agent
+      - POSTGRES_PASSWORD=agent_dev_password
+      - POSTGRES_DB=agent_platform
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agent -d agent_platform"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  mongo:
+    image: mongo:6
+    container_name: hlp-mongo
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodata:/data/db
+      - mongoconfig:/data/configdb
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+    external: true
+  mongodata:
+    external: true
+  mongoconfig:
+    external: true
