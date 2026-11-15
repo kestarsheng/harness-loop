@@ -163,3 +163,84 @@ func TestTUIModel(t *testing.T) {
 		t.Fatalf("terminal command returned %T", terminalCmd())
 	}
 }
+func TestTUIModelWebURLAndOpenKey(t *testing.T) {
+	url := URLFor(DefaultWebBaseURL)
+	opened := ""
+	m := NewModel(TaskState{TaskID: "t1", Status: "running", CurrentStage: "a"}, nil, Options{
+		NoColor: true,
+		WebURL:  url,
+		OpenURL: func(u string) error {
+			opened = u
+			return nil
+		},
+	})
+	next, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = next.(*Model)
+
+	if view := m.View(); !strings.Contains(view, url) {
+		t.Fatalf("top bar must always show the fixed monitor URL:\n%s", view)
+	}
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'o'}})
+	m = next.(*Model)
+	if cmd == nil {
+		t.Fatal("o must invoke the system opener")
+	}
+	next, _ = m.Update(cmd())
+	m = next.(*Model)
+	if opened != url {
+		t.Fatalf("opened %q, want %q", opened, url)
+	}
+	if !strings.Contains(m.View(), "opened "+url) {
+		t.Fatalf("open confirmation missing:\n%s", m.View())
+	}
+	if m.terminal {
+		t.Fatal("opening the browser must not terminate the TUI")
+	}
+
+	failing := NewModel(TaskState{TaskID: "t2", Status: "running", CurrentStage: "a"}, nil, Options{
+		NoColor: true,
+		WebURL:  url,
+		OpenURL: func(string) error { return errors.New("no browser available") },
+	})
+	next, _ = failing.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	failing = next.(*Model)
+	next, cmd = failing.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'o'}})
+	failing = next.(*Model)
+	if cmd == nil {
+		t.Fatal("o must still attempt to open when the opener fails")
+	}
+	next, _ = failing.Update(cmd())
+	failing = next.(*Model)
+	if !strings.Contains(failing.View(), "opening monitor failed") {
+		t.Fatalf("open failure must be echoed in the TUI:\n%s", failing.View())
+	}
+	if failing.terminal {
+		t.Fatal("opener failure must not crash or quit the TUI")
+	}
+}
+
+func TestTUIModelHyperlinkRendering(t *testing.T) {
+	url := URLFor(DefaultWebBaseURL)
+	m := NewModel(TaskState{TaskID: "t1", Status: "running", CurrentStage: "a"}, nil, Options{
+		NoColor:   true,
+		WebURL:    url,
+		Hyperlink: true,
+	})
+	next, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = next.(*Model)
+	if !strings.Contains(m.View(), OSC8Link(url, url)) {
+		t.Fatalf("hyperlink-capable terminals must get an OSC 8 link:\n%q", m.View())
+	}
+	plain := NewModel(TaskState{TaskID: "t1", Status: "running", CurrentStage: "a"}, nil, Options{
+		NoColor: true,
+		WebURL:  url,
+	})
+	next, _ = plain.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	plain = next.(*Model)
+	if view := plain.View(); strings.Contains(view, "\x1b]8;;") {
+		t.Fatalf("plain terminals must not receive OSC 8 escapes:\n%q", view)
+	} else if !strings.Contains(view, url) {
+		t.Fatalf("plain terminals must still show the URL:\n%s", view)
+	}
+}

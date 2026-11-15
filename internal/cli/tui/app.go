@@ -12,7 +12,10 @@ import (
 )
 
 type RunOptions struct {
-	NoColor bool
+	NoColor   bool
+	WebURL    string
+	Hyperlink bool
+	OpenURL   func(string) error
 }
 
 type RunResult struct {
@@ -28,7 +31,12 @@ func Run(ctx context.Context, client harnesspb.HarnessLoopServiceClient, tenant 
 		return RunResult{}, fmt.Errorf("tui: task view is required")
 	}
 	src := &grpcSource{client: client, tenant: tenant, taskID: task.GetTaskId(), ctx: ctx}
-	model := NewModel(taskStateFromProto(task), src, Options{NoColor: opts.NoColor}).WithContext(ctx)
+	model := NewModel(taskStateFromProto(task), src, Options{
+		NoColor:   opts.NoColor,
+		WebURL:    opts.WebURL,
+		Hyperlink: opts.Hyperlink,
+		OpenURL:   opts.OpenURL,
+	}).WithContext(ctx)
 	program := tea.NewProgram(
 		model,
 		tea.WithContext(ctx),

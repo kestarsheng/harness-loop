@@ -9,6 +9,7 @@ func RenderHelp(theme Theme) string {
 		" a    abort the running task (idempotent)",
 		" l    toggle the full event log",
 		" m    memory view",
+		" o    open the shared monitor board in the system browser",
 		" ?    this help",
 		" esc  return to the main view",
 		"",
@@ -41,7 +42,7 @@ func RenderFooter(mode string, width int, theme Theme) string {
 	case "help", "memory":
 		text = " Esc back   q quit"
 	default:
-		text = " q quit   a abort   l logs   m memory   ? help"
+		text = " q quit   a abort   l logs   m memory   o open   ? help"
 	}
 	return theme.paint(fit(text, width), theme.Muted)
 }

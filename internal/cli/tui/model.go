@@ -96,6 +96,13 @@ type Source interface {
 type Options struct {
 	NoColor bool
 	Now     func() time.Time
+
+	// WebURL is the fixed monitoring board URL shown at the top of the TUI.
+	// When empty the URL bar is omitted (legacy run behaviour).
+	WebURL    string
+	Hyperlink bool
+	// OpenURL opens a URL with the system browser. Defaults to DefaultOpenURL.
+	OpenURL func(string) error
 }
 
 type Model struct {
@@ -126,6 +133,11 @@ type Model struct {
 	theme    Theme
 	now      func() time.Time
 	terminal bool
+
+	webURL    string
+	hyperlink bool
+	openURL   func(string) error
+	opening   bool
 
 	connected        bool
 	reconnecting     bool
@@ -165,6 +177,11 @@ type abortMsg struct {
 	Err error
 }
 
+type openURLMsg struct {
+	URL string
+	Err error
+}
+
 type flushMsg struct{}
 
 type pollMsg struct{}
@@ -183,6 +200,10 @@ func NewModel(state TaskState, src Source, opts Options) *Model {
 	if state.StageStartedAt.IsZero() {
 		state.StageStartedAt = now()
 	}
+	open := opts.OpenURL
+	if open == nil {
+		open = DefaultOpenURL
+	}
 	m := &Model{
 		state:           state,
 		verdicts:        map[string]string{},
@@ -195,6 +216,9 @@ func NewModel(state TaskState, src Source, opts Options) *Model {
 		now:             now,
 		connected:       true,
 		reconnectDelay:  reconnectMin,
+		webURL:          opts.WebURL,
+		hyperlink:       opts.Hyperlink,
+		openURL:         open,
 	}
 	return m
 }
@@ -298,6 +322,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.errText = "abort failed: " + msg.Err.Error()
 		}
 		return m, nil
+
+	case openURLMsg:
+		m.opening = false
+		if msg.Err != nil {
+			m.errText = "opening monitor failed: " + msg.Err.Error()
+		} else {
+			m.errText = "opened " + msg.URL + " in the system browser"
+		}
+		return m, nil
 	}
 	return m, nil
 }
@@ -351,6 +384,16 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.mode = ViewMemory
 		}
 		return m, nil
+	case "o":
+		if m.opening {
+			return m, nil
+		}
+		cmd := m.openURLCmd()
+		if cmd == nil {
+			return m, nil
+		}
+		m.opening = true
+		return m, cmd
 	case "?":
 		if m.mode == ViewHelp {
 			m.mode = ViewMain
@@ -371,7 +414,11 @@ func (m *Model) View() string {
 	if width <= 0 {
 		width = 100
 	}
-	parts := []string{views.RenderHeader(m.stageData())}
+	parts := make([]string, 0, 6)
+	if bar := views.RenderURLBar(RenderHyperlink(m.webURL, m.hyperlink), m.theme); bar != "" {
+		parts = append(parts, bar)
+	}
+	parts = append(parts, views.RenderHeader(m.stageData()))
 	switch m.mode {
 	case ViewLogs:
 		parts = append(parts, views.RenderLogs(m.events, width, m.height-4, m.theme))
@@ -381,7 +428,11 @@ func (m *Model) View() string {
 		parts = append(parts, views.RenderMemory(m.theme))
 	default:
 		parts = append(parts, views.RenderStage(m.stageData()))
-		budget := m.height - 7
+		fixed := 7
+		if m.webURL != "" {
+			fixed++
+		}
+		budget := m.height - fixed
 		if budget < 6 {
 			budget = 12
 		}
@@ -721,6 +772,21 @@ func (m *Model) abortCmd() tea.Cmd {
 		callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
 		return abortMsg{Err: src.Abort(callCtx)}
+	}
+}
+
+func (m *Model) openURLCmd() tea.Cmd {
+	url := m.webURL
+	if strings.TrimSpace(url) == "" {
+		m.errText = "no monitor URL configured"
+		return nil
+	}
+	open := m.openURL
+	return func() tea.Msg {
+		if open == nil {
+			return openURLMsg{URL: url, Err: fmt.Errorf("no opener configured")}
+		}
+		return openURLMsg{URL: url, Err: open(url)}
 	}
 }
 
