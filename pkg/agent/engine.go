@@ -804,6 +804,10 @@ func (e *Engine) executeLoop(ctx context.Context, execCtx *ExecutionContext, sta
 			return e.buildResult(execCtx, llmResp.Content), nil
 		}
 
+		// Record the assistant turn before its tool results so the history keeps
+		// valid tool_call/tool_result pairing across resume and compaction.
+		execCtx.AddAssistantToolCallMessage(llmResp.Content, llmResp.ToolCalls)
+
 		// Process tool calls — separate handoff from regular tools
 		var handoffCalls []ToolCall
 		var regularCalls []ToolCall
@@ -1510,6 +1514,10 @@ func (e *Engine) resumeLoop(ctx context.Context, execCtx *ExecutionContext, star
 			return e.buildResult(execCtx, llmResp.Content), nil
 		}
 
+		// Record the assistant turn before its tool results so the history keeps
+		// valid tool_call/tool_result pairing across resume and compaction.
+		execCtx.AddAssistantToolCallMessage(llmResp.Content, llmResp.ToolCalls)
+
 		// Process tool calls — separate handoff from regular tools
 		var handoffCalls []ToolCall
 		var regularCalls []ToolCall
@@ -1660,11 +1668,23 @@ func messagesToCheckpoint(msgs []Message) []checkpoint.Message {
 	}
 	result := make([]checkpoint.Message, len(msgs))
 	for i, m := range msgs {
+		var calls []checkpoint.MessageToolCall
+		if len(m.ToolCalls) > 0 {
+			calls = make([]checkpoint.MessageToolCall, 0, len(m.ToolCalls))
+			for _, c := range m.ToolCalls {
+				calls = append(calls, checkpoint.MessageToolCall{
+					ID:        c.ID,
+					Name:      c.Name,
+					Arguments: c.Arguments,
+				})
+			}
+		}
 		result[i] = checkpoint.Message{
-			Role:    m.Role,
-			Content: m.Content,
-			Name:    m.Name,
-			ToolID:  m.ToolID,
+			Role:      m.Role,
+			Content:   m.Content,
+			Name:      m.Name,
+			ToolID:    m.ToolID,
+			ToolCalls: calls,
 		}
 	}
 	return result
@@ -1677,11 +1697,23 @@ func checkpointMessagesToAgent(msgs []checkpoint.Message) []Message {
 	}
 	result := make([]Message, len(msgs))
 	for i, m := range msgs {
+		var calls []MessageToolCall
+		if len(m.ToolCalls) > 0 {
+			calls = make([]MessageToolCall, 0, len(m.ToolCalls))
+			for _, c := range m.ToolCalls {
+				calls = append(calls, MessageToolCall{
+					ID:        c.ID,
+					Name:      c.Name,
+					Arguments: c.Arguments,
+				})
+			}
+		}
 		result[i] = Message{
-			Role:    m.Role,
-			Content: m.Content,
-			Name:    m.Name,
-			ToolID:  m.ToolID,
+			Role:      m.Role,
+			Content:   m.Content,
+			Name:      m.Name,
+			ToolID:    m.ToolID,
+			ToolCalls: calls,
 		}
 	}
 	return result

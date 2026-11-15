@@ -64,6 +64,9 @@ func main() {
 		BaseURL:   cfg.LLM.BaseURL,
 		Model:     cfg.LLM.Model,
 		MaxTokens: cfg.LLM.MaxTokens,
+		// Off by default: the legacy request body omits tool_calls/tool_call_id
+		// because some OpenAI-compatible gateways reject those fields.
+		EmitToolCallMessages: os.Getenv("AGENT_LLM_EMIT_TOOL_CALL_MESSAGES") == "true",
 	})
 	if err != nil {
 		log.Fatalf("Failed to create LLM client: %v", err)

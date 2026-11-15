@@ -7,10 +7,19 @@ import (
 
 // Message represents a conversation message
 type Message struct {
-	Role    string `json:"role"`              // system, user, assistant, tool
-	Content string `json:"content"`           // Message content
-	Name    string `json:"name,omitempty"`    // For tool messages
-	ToolID  string `json:"tool_id,omitempty"` // Tool call ID if applicable
+	Role      string            `json:"role"`                 // system, user, assistant, tool
+	Content   string            `json:"content"`              // Message content
+	Name      string            `json:"name,omitempty"`       // For tool messages
+	ToolID    string            `json:"tool_id,omitempty"`    // Tool call ID if applicable
+	ToolCalls []MessageToolCall `json:"tool_calls,omitempty"` // Tool calls requested by an assistant turn
+}
+
+// MessageToolCall records one tool invocation emitted by the assistant.
+// The ID pairs an assistant call with the matching tool result message.
+type MessageToolCall struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Arguments string `json:"arguments,omitempty"`
 }
 
 // ToolCall represents a tool call request
@@ -184,6 +193,30 @@ func (c *ExecutionContext) AddToolMessage(toolName, toolID, content string) {
 		Content: content,
 		Name:    toolName,
 		ToolID:  toolID,
+	})
+}
+
+// AddAssistantToolCallMessage records the assistant turn that requested tool
+// calls. Without this turn the tool result messages that follow have no
+// matching call, which breaks tool_call/tool_result pairing on checkpoint
+// resume and when the history is compacted.
+func (c *ExecutionContext) AddAssistantToolCallMessage(content string, calls []ToolCall) {
+	if len(calls) == 0 {
+		c.AddMessage("assistant", content)
+		return
+	}
+	refs := make([]MessageToolCall, 0, len(calls))
+	for _, call := range calls {
+		refs = append(refs, MessageToolCall{
+			ID:        call.ID,
+			Name:      call.Name,
+			Arguments: string(call.Arguments),
+		})
+	}
+	c.Messages = append(c.Messages, Message{
+		Role:      "assistant",
+		Content:   content,
+		ToolCalls: refs,
 	})
 }
 

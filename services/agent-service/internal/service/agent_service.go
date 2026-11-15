@@ -808,15 +808,30 @@ type llmAdapter struct {
 	client llm.Client
 }
 
+// toLLMMessages preserves tool call structure across the adapter boundary so
+// assistant tool_calls and their tool_call_id results stay paired.
+func (a *llmAdapter) toLLMMessages(in []agent.Message) []llm.Message {
+	out := make([]llm.Message, 0, len(in))
+	for _, m := range in {
+		msg := llm.Message{Role: m.Role, Content: m.Content}
+		if m.Role == "tool" {
+			msg.ToolCallID = m.ToolID
+		}
+		for _, c := range m.ToolCalls {
+			msg.ToolCalls = append(msg.ToolCalls, llm.ToolCall{
+				ID:       c.ID,
+				Type:     "function",
+				Function: llm.ToolCallFunction{Name: c.Name, Arguments: c.Arguments},
+			})
+		}
+		out = append(out, msg)
+	}
+	return out
+}
+
 func (a *llmAdapter) Chat(ctx context.Context, req *agent.LLMRequest) (*agent.LLMResponse, error) {
 	// Convert messages
-	messages := make([]llm.Message, 0, len(req.Messages))
-	for _, m := range req.Messages {
-		messages = append(messages, llm.Message{
-			Role:    m.Role,
-			Content: m.Content,
-		})
-	}
+	messages := a.toLLMMessages(req.Messages)
 
 	// Convert tools
 	tools := make([]llm.ToolDefinition, 0, len(req.Tools))
@@ -870,13 +885,7 @@ func (a *llmAdapter) Chat(ctx context.Context, req *agent.LLMRequest) (*agent.LL
 // ChatStream implements agent.LLMStreamingClient — streams tokens from the LLM
 func (a *llmAdapter) ChatStream(ctx context.Context, req *agent.LLMRequest) (<-chan agent.LLMStreamChunk, error) {
 	// Convert messages
-	messages := make([]llm.Message, 0, len(req.Messages))
-	for _, m := range req.Messages {
-		messages = append(messages, llm.Message{
-			Role:    m.Role,
-			Content: m.Content,
-		})
-	}
+	messages := a.toLLMMessages(req.Messages)
 
 	// Convert tools
 	tools := make([]llm.ToolDefinition, 0, len(req.Tools))
