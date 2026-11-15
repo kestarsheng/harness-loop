@@ -239,6 +239,10 @@ func (e *Engine) executeLoopStream(ctx context.Context, execCtx *ExecutionContex
 			return e.buildResult(execCtx, llmResp.Content), nil
 		}
 
+		// Record the assistant turn before its tool results so the history
+		// keeps valid tool_call/tool_result pairing.
+		execCtx.AddAssistantToolCallMessage(llmResp.Content, llmResp.ToolCalls)
+
 		// Process tool calls
 		for _, tc := range llmResp.ToolCalls {
 			// Check if it's a handoff

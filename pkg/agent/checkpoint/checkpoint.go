@@ -18,10 +18,18 @@ import (
 // Message represents a conversation message snapshot within a checkpoint.
 // This mirrors agent.Message to avoid a circular import.
 type Message struct {
-	Role    string `json:"role" bson:"role"`
-	Content string `json:"content" bson:"content"`
-	Name    string `json:"name,omitempty" bson:"name,omitempty"`
-	ToolID  string `json:"tool_id,omitempty" bson:"tool_id,omitempty"`
+	Role      string            `json:"role" bson:"role"`
+	Content   string            `json:"content" bson:"content"`
+	Name      string            `json:"name,omitempty" bson:"name,omitempty"`
+	ToolID    string            `json:"tool_id,omitempty" bson:"tool_id,omitempty"`
+	ToolCalls []MessageToolCall `json:"tool_calls,omitempty" bson:"tool_calls,omitempty"`
+}
+
+// MessageToolCall mirrors agent.MessageToolCall for checkpoint persistence.
+type MessageToolCall struct {
+	ID        string `json:"id" bson:"id"`
+	Name      string `json:"name" bson:"name"`
+	Arguments string `json:"arguments,omitempty" bson:"arguments,omitempty"`
 }
 
 // AgentExecutionRecord records a single agent execution step within a checkpoint.

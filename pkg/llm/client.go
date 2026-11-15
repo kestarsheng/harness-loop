@@ -21,6 +21,11 @@ type Config struct {
 	Model          string
 	EmbeddingModel string
 	MaxTokens      int
+	// EmitToolCallMessages sends standard OpenAI tool_calls (assistant) and
+	// tool_call_id (tool) fields. Default false keeps the legacy request body
+	// byte-for-byte unchanged, because not every OpenAI-compatible gateway
+	// accepts these fields.
+	EmitToolCallMessages bool
 }
 
 // Client is the LLM client interface
@@ -33,8 +38,10 @@ type Client interface {
 
 // Message represents a chat message
 type Message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role       string     `json:"role"`
+	Content    string     `json:"content"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
 }
 
 // ToolDefinition represents a tool definition
@@ -243,9 +250,10 @@ type openAIChatRequest struct {
 }
 
 type openAIMessage struct {
-	Role      string           `json:"role"`
-	Content   string           `json:"content,omitempty"`
-	ToolCalls []openAIToolCall `json:"tool_calls,omitempty"`
+	Role       string           `json:"role"`
+	Content    string           `json:"content,omitempty"`
+	ToolCallID string           `json:"tool_call_id,omitempty"`
+	ToolCalls  []openAIToolCall `json:"tool_calls,omitempty"`
 }
 
 type openAITool struct {
@@ -260,7 +268,7 @@ type openAIToolFunc struct {
 }
 
 type openAIToolCall struct {
-	Index    int                `json:"index"`
+	Index    int                `json:"index,omitempty"`
 	ID       string             `json:"id"`
 	Type     string             `json:"type"`
 	Function openAIToolCallFunc `json:"function"`
@@ -289,6 +297,37 @@ type openAIChatResponse struct {
 	} `json:"usage"`
 }
 
+// toOpenAIMessage maps an internal message to the wire format. Tool call
+// fields are emitted only when Config.EmitToolCallMessages is enabled, so the
+// default request body stays identical to the legacy behaviour for gateways
+// that reject tool_calls/tool_call_id.
+func (c *OpenAIClient) toOpenAIMessage(m Message) openAIMessage {
+	out := openAIMessage{Role: m.Role, Content: m.Content}
+	if !c.config.EmitToolCallMessages {
+		return out
+	}
+	out.ToolCallID = m.ToolCallID
+	if len(m.ToolCalls) == 0 {
+		return out
+	}
+	out.ToolCalls = make([]openAIToolCall, 0, len(m.ToolCalls))
+	for _, tc := range m.ToolCalls {
+		callType := tc.Type
+		if callType == "" {
+			callType = "function"
+		}
+		out.ToolCalls = append(out.ToolCalls, openAIToolCall{
+			ID:   tc.ID,
+			Type: callType,
+			Function: openAIToolCallFunc{
+				Name:      tc.Function.Name,
+				Arguments: tc.Function.Arguments,
+			},
+		})
+	}
+	return out
+}
+
 // Chat sends a chat request
 func (c *OpenAIClient) Chat(ctx context.Context, req *ChatRequest) (*ChatResponse, error) {
 	messages := make([]openAIMessage, 0, len(req.Messages)+1)
@@ -303,10 +342,7 @@ func (c *OpenAIClient) Chat(ctx context.Context, req *ChatRequest) (*ChatRespons
 
 	// Add messages
 	for _, m := range req.Messages {
-		messages = append(messages, openAIMessage{
-			Role:    m.Role,
-			Content: m.Content,
-		})
+		messages = append(messages, c.toOpenAIMessage(m))
 	}
 
 	// Build request — prefer per-request model override
@@ -421,10 +457,7 @@ func (c *OpenAIClient) ChatStream(ctx context.Context, req *ChatRequest) (<-chan
 
 		// Add messages
 		for _, m := range req.Messages {
-			messages = append(messages, openAIMessage{
-				Role:    m.Role,
-				Content: m.Content,
-			})
+			messages = append(messages, c.toOpenAIMessage(m))
 		}
 
 		// Build streaming request — prefer per-request model override
