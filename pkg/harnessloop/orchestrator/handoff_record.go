@@ -28,6 +28,8 @@ type HandoffRecord struct {
 	FromRole     string        `json:"from_role"`
 	ToAgentID    string        `json:"to_agent_id"`
 	ToRole       string        `json:"to_role"`
+	FromStage    string        `json:"from_stage,omitempty"`
+	ToStage      string        `json:"to_stage,omitempty"`
 	Status       HandoffStatus `json:"status"`
 	InputDigest  string        `json:"input_digest"`
 	Reason       string        `json:"reason,omitempty"`
@@ -141,6 +143,7 @@ func (s *HandoffService) Create(ctx context.Context, h *HandoffContract, req Han
 				"subtask_id":     h.SubtaskID,
 			},
 		}
+		envelope = BuildCrossStageEnvelope(envelope, req.Stage, req.ToStage)
 		if err := s.transport.SendHandoff(ctx, envelope); err != nil {
 			return nil, nil, err
 		}
@@ -156,6 +159,8 @@ func (s *HandoffService) Create(ctx context.Context, h *HandoffContract, req Han
 		FromRole:     h.From.Role,
 		ToAgentID:    h.To.AgentID,
 		ToRole:       h.To.Role,
+		FromStage:    req.Stage,
+		ToStage:      req.ToStage,
 		Status:       HandoffCreated,
 		InputDigest:  receiverCtx.InputDigest,
 		CreatedAt:    now,
@@ -174,6 +179,11 @@ func (s *HandoffService) Create(ctx context.Context, h *HandoffContract, req Han
 		Payload: map[string]any{
 			"from_agent_id":  h.From.AgentID,
 			"to_agent_id":    h.To.AgentID,
+			"from_role":      h.From.Role,
+			"to_role":        h.To.Role,
+			"from_stage":     req.Stage,
+			"to_stage":       req.ToStage,
+			"cross_stage":    req.ToStage != "" && req.ToStage != req.Stage,
 			"artifact_count": len(h.Artifacts),
 			"input_digest":   receiverCtx.InputDigest,
 		},

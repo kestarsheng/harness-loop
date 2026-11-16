@@ -77,6 +77,7 @@ type AggregatedArtifact struct {
 
 type AggregationItem struct {
 	SubtaskID      string               `json:"subtask_id"`
+	DagID          string               `json:"dag_id,omitempty"`
 	DagNodeID      string               `json:"dag_node_id"`
 	Status         subtask.Status       `json:"status"`
 	Artifacts      []AggregatedArtifact `json:"artifacts,omitempty"`
@@ -104,8 +105,13 @@ type AggregationSummary struct {
 // AggregationReport is AggregationReport/v1 and is a required d-stage
 // acceptance input (REQ-133).
 type AggregationReport struct {
-	TaskID      string             `json:"task_id"`
-	DagID       string             `json:"dag_id"`
+	TaskID string `json:"task_id"`
+	DagID  string `json:"dag_id"`
+	// DagIDs lists every DAG version the report covers. A replanned parent has
+	// a superseded version plus the active one; d-stage aggregation must be able
+	// to roll up both (T-P2-10 point 4).
+	DagIDs      []string           `json:"dag_ids,omitempty"`
+	DagVersions int                `json:"dag_versions,omitempty"`
 	Items       []AggregationItem  `json:"items"`
 	Conflicts   []Conflict         `json:"conflicts"`
 	Summary     AggregationSummary `json:"summary"`
@@ -116,9 +122,12 @@ type AggregationReport struct {
 type AggregationRequest struct {
 	ParentTaskID string
 	DagID        string
-	TenantID     string
-	ProjectID    string
-	Subtasks     []*subtask.Subtask
+	// DagIDs enables multi-version aggregation. Empty keeps the single-DAG
+	// behaviour: only DagID, and only when it is set, is enforced.
+	DagIDs    []string
+	TenantID  string
+	ProjectID string
+	Subtasks  []*subtask.Subtask
 }
 
 // Aggregator collects every subtask verdict and verifies accepted artifacts.
@@ -152,10 +161,16 @@ func (a *Aggregator) Aggregate(ctx context.Context, req AggregationRequest) (*Ag
 		TaskID:      req.ParentTaskID,
 		DagID:       req.DagID,
 		Items:       make([]AggregationItem, 0, len(req.Subtasks)),
+		DagIDs:      append([]string(nil), req.DagIDs...),
 		CompletedAt: time.Now().UTC(),
 		Complete:    true,
 	}
+	allowedDags := dagVersionSet(req)
+	if len(req.DagIDs) > 0 {
+		report.DagVersions = len(allowedDags)
+	}
 	var securityViolation bool
+	var dagMismatch bool
 	for _, st := range req.Subtasks {
 		if st == nil {
 			continue
@@ -165,8 +180,18 @@ func (a *Aggregator) Aggregate(ctx context.Context, req AggregationRequest) (*Ag
 			report.Complete = false
 			continue
 		}
+		if len(allowedDags) > 0 && st.DagID != "" {
+			if _, ok := allowedDags[st.DagID]; !ok {
+				// A subtask from an unknown DAG version must never slip into the
+				// d-stage report (T-P2-10 point 4).
+				dagMismatch = true
+				report.Complete = false
+				continue
+			}
+		}
 		item := AggregationItem{
 			SubtaskID:      st.SubtaskID,
+			DagID:          st.DagID,
 			DagNodeID:      st.DagNodeID,
 			Status:         st.Status,
 			ConsumedTokens: st.ConsumedTokens,
@@ -234,6 +259,10 @@ func (a *Aggregator) Aggregate(ctx context.Context, req AggregationRequest) (*Ag
 		return report, newError(CodeSubtaskNotAccepted,
 			"aggregation only accepts accepted subtasks; reject/fail/cancel rows are listed without artifacts")
 	}
+	if dagMismatch {
+		return report, newError(CodeAggregationDagMismatch,
+			"aggregation received a subtask from a DAG version outside %v", report.DagIDs)
+	}
 
 	a.detectConflicts(ctx, req, report)
 	if len(report.Conflicts) > 0 {
@@ -266,6 +295,8 @@ func (a *Aggregator) Aggregate(ctx context.Context, req AggregationRequest) (*Ag
 		ParentTaskID: req.ParentTaskID,
 		DagID:        req.DagID,
 		Payload: map[string]any{
+			"dag_ids":        report.DagIDs,
+			"dag_versions":   report.DagVersions,
 			"total":          report.Summary.Total,
 			"accepted":       report.Summary.Accepted,
 			"rejected":       report.Summary.Rejected,
@@ -355,6 +386,22 @@ func (a *Aggregator) detectConflicts(ctx context.Context, req AggregationRequest
 			report.Conflicts = append(report.Conflicts, detected...)
 		}
 	}
+}
+
+// dagVersionSet returns the DAG versions this request may aggregate. An empty
+// request scope disables the check (legacy single-DAG callers that never set
+// DagID).
+func dagVersionSet(req AggregationRequest) map[string]struct{} {
+	out := make(map[string]struct{}, len(req.DagIDs)+1)
+	for _, id := range req.DagIDs {
+		if id != "" {
+			out[id] = struct{}{}
+		}
+	}
+	if len(out) == 0 && req.DagID != "" {
+		out[req.DagID] = struct{}{}
+	}
+	return out
 }
 
 func contractType(contract map[string]any) string {

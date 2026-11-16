@@ -93,7 +93,23 @@ func (e *PublisherEmitter) Emit(ctx context.Context, ev Event) error {
 		DagNodeID:     ev.DagNodeID,
 		ParallelSetID: ev.ParallelSetID,
 	}
-	return e.EmitType(ctx, ec, event.EventType(ev.Type), parseSeverity(ev.Severity), ev.Payload)
+	payload := ev.Payload
+	if ev.OldDagID != "" || ev.NewDagID != "" {
+		// 重规划事件必须让消费方直接看到新旧 dag_id（T-P2-10 验收条件）。
+		copied := make(map[string]any, len(ev.Payload)+2)
+		for k, v := range ev.Payload {
+			copied[k] = v
+		}
+		if ev.OldDagID != "" {
+			copied["old_dag_id"] = ev.OldDagID
+		}
+		if ev.NewDagID != "" {
+			copied["new_dag_id"] = ev.NewDagID
+			copied["dag_id"] = ev.NewDagID
+		}
+		payload = copied
+	}
+	return e.EmitType(ctx, ec, event.EventType(ev.Type), parseSeverity(ev.Severity), payload)
 }
 
 // EmitModelEvent forwards a modelregistry event. It is used by the model bridge

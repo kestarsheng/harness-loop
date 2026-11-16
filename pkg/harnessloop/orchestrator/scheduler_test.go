@@ -144,7 +144,13 @@ func TestSchedulerCircuitOpensAfterFourSamples(t *testing.T) {
 		t.Fatalf("expected st-e to stay pending, got %+v", pending)
 	}
 
-	s.ResetCircuit()
+	if _, err := s.ResetCircuit(ctx, CircuitResetRequest{
+		Actor:  "qa-operator",
+		Reason: "test: probe the class after the failure burst",
+		Source: CircuitResetSourceOperator,
+	}); err != nil {
+		t.Fatalf("reset circuit: %v", err)
+	}
 	started, err = s.Dispatch(ctx)
 	if err != nil {
 		t.Fatalf("dispatch after reset: %v", err)
