@@ -8,6 +8,23 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// FairnessSettings is the WFQ block of policy/subtask.yaml (T-P2-09,
+// design 4.13.8). It lives inside QuotaConfig so the existing loader picks it up
+// without a second configuration file.
+type FairnessSettings struct {
+	// Weight is the default per-parent WFQ weight (subtask.fairness.weight).
+	Weight float64 `yaml:"weight"`
+	// ParentShare is the hard cap share of the tenant slot pool. Zero means
+	// "dynamic": 1/N over the parents currently registered with the tenant.
+	ParentShare float64 `yaml:"parent_share"`
+	// TenantTokens is the tenant-wide token ceiling. Zero falls back to the
+	// per-parent budget in ParentBudgetTokens.
+	TenantTokens int64 `yaml:"tenant_tokens"`
+	// MinWeight/MaxWeight bound what a tenant policy may set.
+	MinWeight float64 `yaml:"min_weight"`
+	MaxWeight float64 `yaml:"max_weight"`
+}
+
 // QuotaConfig holds the scheduler limits from DFX-P-11 / U13-A. Defaults are
 // deliberately closed: raising them requires an explicit configuration change.
 type QuotaConfig struct {
@@ -20,9 +37,13 @@ type QuotaConfig struct {
 	ParentBudgetTokens   int64   `yaml:"parent_budget_tokens"`
 	CircuitFailureRatio  float64 `yaml:"circuit_failure_ratio"`
 	CircuitMinSamples    int     `yaml:"circuit_min_samples"`
-	RetryMaxAttempts     int     `yaml:"retry_max_attempts"`
-	TolerateRatioMax     float64 `yaml:"tolerate_ratio_max"`
-	MinSamplesForRatio   int     `yaml:"min_samples_for_ratio"`
+	// CircuitSampleWindow is the rolling window of terminal outcomes used by
+	// the class breaker. Zero keeps every sample (design 4.13.3 default).
+	CircuitSampleWindow int              `yaml:"circuit_sample_window"`
+	RetryMaxAttempts    int              `yaml:"retry_max_attempts"`
+	TolerateRatioMax    float64          `yaml:"tolerate_ratio_max"`
+	MinSamplesForRatio  int              `yaml:"min_samples_for_ratio"`
+	Fairness            FairnessSettings `yaml:"fairness"`
 }
 
 func DefaultQuotaConfig() QuotaConfig {
@@ -36,9 +57,15 @@ func DefaultQuotaConfig() QuotaConfig {
 		ParentBudgetTokens:   1 << 20,
 		CircuitFailureRatio:  0.5,
 		CircuitMinSamples:    4,
+		CircuitSampleWindow:  0,
 		RetryMaxAttempts:     2,
 		TolerateRatioMax:     0.5,
 		MinSamplesForRatio:   5,
+		Fairness: FairnessSettings{
+			Weight:    1.0,
+			MinWeight: 0.5,
+			MaxWeight: 4.0,
+		},
 	}
 }
 
@@ -88,6 +115,14 @@ func (c *QuotaConfig) normalize() {
 	if c.CircuitMinSamples <= 0 {
 		c.CircuitMinSamples = def.CircuitMinSamples
 	}
+	if c.CircuitSampleWindow < 0 {
+		c.CircuitSampleWindow = def.CircuitSampleWindow
+	}
+	if c.CircuitSampleWindow > 0 && c.CircuitSampleWindow < c.CircuitMinSamples {
+		// A window smaller than the minimum sample count could never open the
+		// breaker; refuse the combination instead of silently disabling it.
+		c.CircuitSampleWindow = c.CircuitMinSamples
+	}
 	if c.RetryMaxAttempts <= 0 {
 		c.RetryMaxAttempts = def.RetryMaxAttempts
 	}
@@ -96,6 +131,27 @@ func (c *QuotaConfig) normalize() {
 	}
 	if c.MinSamplesForRatio <= 0 {
 		c.MinSamplesForRatio = def.MinSamplesForRatio
+	}
+	if c.Fairness.Weight <= 0 {
+		c.Fairness.Weight = def.Fairness.Weight
+	}
+	if c.Fairness.MinWeight <= 0 {
+		c.Fairness.MinWeight = def.Fairness.MinWeight
+	}
+	if c.Fairness.MaxWeight <= 0 || c.Fairness.MaxWeight < c.Fairness.MinWeight {
+		c.Fairness.MaxWeight = def.Fairness.MaxWeight
+	}
+	if c.Fairness.Weight < c.Fairness.MinWeight {
+		c.Fairness.Weight = c.Fairness.MinWeight
+	}
+	if c.Fairness.Weight > c.Fairness.MaxWeight {
+		c.Fairness.Weight = c.Fairness.MaxWeight
+	}
+	if c.Fairness.ParentShare < 0 || c.Fairness.ParentShare > 1 {
+		c.Fairness.ParentShare = 0
+	}
+	if c.Fairness.TenantTokens < 0 {
+		c.Fairness.TenantTokens = 0
 	}
 }
 

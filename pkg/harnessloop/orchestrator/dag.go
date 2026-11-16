@@ -375,6 +375,65 @@ func checkSplittable(cfg PlanConfig, node PlanNode) error {
 	return nil
 }
 
+// ExpandedNode is one flattened DAG node with its nesting depth. Depth 1 is a
+// direct child of the parent task, depth 2 is one declared nesting level. Depth
+// 3 never appears here because Plan.Validate rejects it (T-P2-10 point 2).
+type ExpandedNode struct {
+	NodeID       string `json:"node_id"`
+	ParentNodeID string `json:"parent_node_id,omitempty"`
+	Depth        int    `json:"depth"`
+	Role         string `json:"role"`
+	Index        int    `json:"index"`
+}
+
+// Expand flattens the plan for persistence, events and the subtask tree view.
+// The order is stable: a parent node is followed by its children.
+func (p *Plan) Expand() []ExpandedNode {
+	out := make([]ExpandedNode, 0, len(p.Nodes))
+	index := 0
+	for _, node := range p.Nodes {
+		out = append(out, ExpandedNode{NodeID: node.NodeID, Depth: 1, Role: node.Role, Index: index})
+		index++
+		for _, child := range node.Children {
+			out = append(out, ExpandedNode{
+				NodeID:       child.NodeID,
+				ParentNodeID: node.NodeID,
+				Depth:        2,
+				Role:         child.Role,
+				Index:        index,
+			})
+			index++
+		}
+	}
+	return out
+}
+
+// MaxDepthUsed reports the deepest nesting level the plan actually uses.
+func (p *Plan) MaxDepthUsed() int {
+	maxDepth := 0
+	for _, node := range p.Nodes {
+		if maxDepth < 1 {
+			maxDepth = 1
+		}
+		if len(node.Children) > 0 {
+			maxDepth = 2
+		}
+	}
+	return maxDepth
+}
+
+// NestedParents lists the nodes that declare children, in plan order. The
+// scheduler uses it to keep a nested group on the same parallel set.
+func (p *Plan) NestedParents() []string {
+	var out []string
+	for _, node := range p.Nodes {
+		if len(node.Children) > 0 {
+			out = append(out, node.NodeID)
+		}
+	}
+	return out
+}
+
 func flattenNodes(nodes []PlanNode) []PlanNode {
 	out := make([]PlanNode, 0, len(nodes))
 	for _, node := range nodes {

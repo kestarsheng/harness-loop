@@ -148,6 +148,77 @@ func HandoffNamespace(handoffID string) string {
 	return "handoff/" + handoffID + "/"
 }
 
+// crossStageTransitions is the legal cross-stage handoff matrix (design 4.13.4:
+// "由 verifier 接手 coder 的产物" is the canonical c→d case). Anything not
+// listed is refused rather than guessed.
+var crossStageTransitions = map[string]map[string]struct{}{
+	"a": {"b": {}},
+	"b": {"c": {}},
+	"c": {"d": {}},
+}
+
+// CrossStageAllowed reports whether a handoff may move from one stage to another.
+func CrossStageAllowed(fromStage, toStage string) bool {
+	from := strings.ToLower(strings.TrimSpace(fromStage))
+	to := strings.ToLower(strings.TrimSpace(toStage))
+	if from == "" || to == "" {
+		return false
+	}
+	if from == to {
+		return true
+	}
+	targets, ok := crossStageTransitions[from]
+	if !ok {
+		return false
+	}
+	_, ok = targets[to]
+	return ok
+}
+
+// StageAwareHandoff is the cross-stage half of a handoff request. The receiver
+// (to stage) may differ from the sender's stage; the contract's five elements
+// are validated exactly as for a same-stage handoff.
+type StageAwareHandoff struct {
+	FromStage string
+	ToStage   string
+}
+
+// ValidateCrossStageHandoff applies the stage-transition rules. A same-stage
+// handoff is always acceptable; a cross-stage one must be a listed transition
+// and must name both stages explicitly (no implicit "next stage").
+func ValidateCrossStageHandoff(req HandoffRequest) error {
+	from := strings.ToLower(strings.TrimSpace(req.Stage))
+	to := strings.ToLower(strings.TrimSpace(req.ToStage))
+	if to == "" || to == from {
+		return nil
+	}
+	if from == "" {
+		return newError(CodeCrossStageDenied,
+			"a cross-stage handoff to %q must declare the sender stage", req.ToStage)
+	}
+	if !CrossStageAllowed(from, to) {
+		return newError(CodeCrossStageDenied,
+			"handoff %s→%s is not a declared cross-stage transition", from, to)
+	}
+	return nil
+}
+
+// BuildCrossStageEnvelope extends the a2a metadata with the stage pair so the
+// receiver can resolve stage-level permissions without reading the sender's
+// history (REQ-132).
+func BuildCrossStageEnvelope(base HandoffEnvelope, fromStage, toStage string) HandoffEnvelope {
+	if base.Metadata == nil {
+		base.Metadata = map[string]string{}
+	}
+	if fromStage != "" {
+		base.Metadata["from_stage"] = fromStage
+	}
+	if toStage != "" {
+		base.Metadata["to_stage"] = toStage
+	}
+	return base
+}
+
 // ValidateMemoryAccess rejects reads of another handoff's namespace.
 func ValidateMemoryAccess(ctx context.Context, h *HandoffContract, namespace string, emitter Emitter) error {
 	own := HandoffNamespace(h.HandoffID)

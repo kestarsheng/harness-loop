@@ -136,3 +136,37 @@ func TestPublisherEmitterTenantIsolation(t *testing.T) {
 		t.Fatalf("seq must be per task, got %d,%d", events[0].Seq, events[1].Seq)
 	}
 }
+
+// TestPublisherEmitterReplanCarriesBothDagIDs 验证重规划事件经真实 Publisher 后，
+// payload 里同时存在 old_dag_id 与 new_dag_id（T-P2-10 验收条件 5）。
+func TestPublisherEmitterReplanCarriesBothDagIDs(t *testing.T) {
+	emitter, sink := newEmitterForTest()
+	err := emitter.Emit(context.Background(), Event{
+		Type:         EventSubtaskPlanCreated,
+		ParentTaskID: "task-1",
+		DagID:        "dag-2",
+		OldDagID:     "dag-1",
+		NewDagID:     "dag-2",
+		Payload:      map[string]any{"replanned": true, "revision": 2},
+	})
+	if err != nil {
+		t.Fatalf("emit: %v", err)
+	}
+	got := sink.snapshot()
+	if len(got) != 1 {
+		t.Fatalf("events = %d", len(got))
+	}
+	if got[0].DagID != "dag-2" {
+		t.Fatalf("event dag_id must be the active dag, got %s", got[0].DagID)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(got[0].Payload, &payload); err != nil {
+		t.Fatalf("payload: %v", err)
+	}
+	if payload["old_dag_id"] != "dag-1" || payload["new_dag_id"] != "dag-2" || payload["dag_id"] != "dag-2" {
+		t.Fatalf("replan payload must carry both dag ids: %+v", payload)
+	}
+	if payload["replanned"] != true {
+		t.Fatalf("replan payload must be marked: %+v", payload)
+	}
+}

@@ -11,11 +11,15 @@ import (
 
 // HandoffRequest carries the parent identity a handoff must match. The
 // validator never trusts tenant/project fields on the contract itself.
+//
+// Stage is the sender's stage; ToStage is set for a cross-stage handoff (c→d)
+// and empty for a same-stage one (T-P2-10 point 3).
 type HandoffRequest struct {
 	ParentTaskID string
 	TenantID     string
 	ProjectID    string
 	Stage        string
+	ToStage      string
 }
 
 // HandoffValidator enforces HandoffContract/v1 (REQ-131/132/137) and reuses the
@@ -86,6 +90,11 @@ func (v *HandoffValidator) Validate(ctx context.Context, h *HandoffContract, req
 			"handoff tenant/project (%s/%s) does not match parent (%s/%s)",
 			h.TenantID, h.ProjectID, req.TenantID, req.ProjectID)
 	}
+	// Cross-stage handoff (c→d) is a separate permission question: the receiver
+	// must be legal *in the target stage*, not in the sender's stage.
+	if err := ValidateCrossStageHandoff(req); err != nil {
+		return err
+	}
 	return v.validatePermissions(ctx, h, req)
 }
 
@@ -103,6 +112,11 @@ func validateFiveElements(summary ContextSummary) error {
 	if _, err := compaction.ParseSummary(string(payload)); err != nil {
 		return newError(CodeHandoffIncomplete, "context_summary is incomplete: %v", err)
 	}
+	// 复用 compaction 的五要素校验，但交接比压缩更严：背景同样必须非空，
+	// 因为接收方没有发送方的历史可参考（REQ-132 的"禁止隐式共享"）。
+	if strings.TrimSpace(summary.Background) == "" {
+		return newError(CodeHandoffIncomplete, "context_summary.background is required for a handoff")
+	}
 	return nil
 }
 
@@ -113,6 +127,11 @@ func (v *HandoffValidator) validatePermissions(ctx context.Context, h *HandoffCo
 	stage := req.Stage
 	if stage == "" {
 		stage = "c"
+	}
+	if req.ToStage != "" {
+		// The receiver executes in the target stage; resolve its role and tools
+		// there (c→d: coder 的产物交给 verifier，verifier 在 d 阶段的白名单）。
+		stage = req.ToStage
 	}
 	binding, err := v.roles.Resolve(ctx, h.To.AgentID, stage)
 	if err != nil {

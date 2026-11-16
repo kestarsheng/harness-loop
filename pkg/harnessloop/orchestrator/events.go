@@ -46,8 +46,12 @@ type Event struct {
 	DagID         string
 	DagNodeID     string
 	ParallelSetID string
-	Payload       map[string]any
-	Timestamp     time.Time
+	// OldDagID/NewDagID are set on replanning and supersede events so the
+	// dashboard can draw "旧 DAG → 新 DAG" without a join (T-P2-10 point 5).
+	OldDagID string
+	NewDagID string
+	Payload  map[string]any
+	Timestamp time.Time
 }
 
 // Emitter is the outbound port for orchestration events. Implementations may

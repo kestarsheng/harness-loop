@@ -28,6 +28,16 @@ const (
 	CodeSubtaskNotRunning      = "E_SUBTASK_NOT_RUNNING"
 	CodePropagationIncomplete  = "E_PROPAGATION_INCOMPLETE"
 	CodeSchedulerLimitExceeded = "E_SCHEDULER_LIMIT_EXCEEDED"
+
+	// T-P2-09：熔断只能人工复位，复位必须留下审计（操作人 + 原因 + 来源）。
+	CodeCircuitResetDenied = "E_CIRCUIT_RESET_DENIED"
+
+	// T-P2-10：重规划与跨阶段 handoff。
+	CodeDAGNotFound            = "E_DAG_NOT_FOUND"
+	CodeDAGNotActive           = "E_DAG_NOT_ACTIVE"
+	CodeReplanSameDag          = "E_REPLAN_SAME_DAG"
+	CodeCrossStageDenied       = "E_CROSS_STAGE_DENIED"
+	CodeAggregationDagMismatch = "E_AGGREGATION_DAG_MISMATCH"
 )
 
 func newError(code, format string, args ...any) error {
