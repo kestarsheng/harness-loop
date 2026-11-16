@@ -31,6 +31,11 @@ const (
 	ViewLogs
 	ViewMemory
 	ViewHelp
+	ViewSubtasks
+	ViewModels
+	ViewHealth
+	ViewArtifacts
+	ViewKB
 )
 
 type Evidence struct {
@@ -91,6 +96,10 @@ type Source interface {
 	Abort(ctx context.Context) error
 	ListEvents(ctx context.Context, sinceSeq int64) ([]Event, int64, error)
 	Watch(ctx context.Context, sinceSeq int64) (<-chan WatchEvent, error)
+	Subtasks(ctx context.Context) ([]Subtask, error)
+	ModelSelections(ctx context.Context) ([]ModelSelection, error)
+	Handoffs(ctx context.Context) ([]Handoff, error)
+	Checkpoints(ctx context.Context) ([]Checkpoint, error)
 }
 
 type Options struct {
@@ -103,6 +112,13 @@ type Options struct {
 	Hyperlink bool
 	// OpenURL opens a URL with the system browser. Defaults to DefaultOpenURL.
 	OpenURL func(string) error
+	// KB is the optional knowledge-service source used by the TUI sidebar.
+	KB     KBSource
+	KBTopK int
+	// InitialView and InitialQuery open a panel on boot for automated terminal
+	// evidence runs (HARNESS_TUI_VIEW / HARNESS_TUI_KB_QUERY).
+	InitialView  string
+	InitialQuery string
 }
 
 type Model struct {
@@ -146,6 +162,34 @@ type Model struct {
 
 	aborting bool
 	errText  string
+
+	subagents views.SubagentData
+	models    views.ModelData
+	kb        views.KBData
+	kbSrc     KBSource
+	kbTopK    int
+
+	healthEvents      int
+	healthErrors      int
+	healthWarnings    int
+	healthLastEvent   time.Time
+	incidents         []views.Incident
+	pendingApprovals  map[string]bool
+	modelFallbacks    int
+	modelSwitches     int
+	modelRecovered    int
+	modelUnavailable  int
+	modelRejected     int
+	subtaskFailed     int
+	circuitOpen       int
+	checkpointDrift   int
+	memoryDegraded    int
+	compactionDegrade int
+	stateRebuilds     int
+	securityDenied    int
+	toolDenied        int
+
+	pollTick int
 }
 
 type taskMsg struct {
@@ -205,20 +249,32 @@ func NewModel(state TaskState, src Source, opts Options) *Model {
 		open = DefaultOpenURL
 	}
 	m := &Model{
-		state:           state,
-		verdicts:        map[string]string{},
-		verifiedBy:      map[string]string{},
-		retryByCategory: map[string]int{},
-		width:           100,
-		height:          30,
-		src:             src,
-		theme:           NewTheme(opts.NoColor),
-		now:             now,
-		connected:       true,
-		reconnectDelay:  reconnectMin,
-		webURL:          opts.WebURL,
-		hyperlink:       opts.Hyperlink,
-		openURL:         open,
+		state:            state,
+		verdicts:         map[string]string{},
+		verifiedBy:       map[string]string{},
+		retryByCategory:  map[string]int{},
+		width:            100,
+		height:           30,
+		src:              src,
+		theme:            NewTheme(opts.NoColor),
+		now:              now,
+		connected:        true,
+		reconnectDelay:   reconnectMin,
+		webURL:           opts.WebURL,
+		hyperlink:        opts.Hyperlink,
+		openURL:          open,
+		kbSrc:            opts.KB,
+		kbTopK:           opts.KBTopK,
+		pendingApprovals: map[string]bool{},
+	}
+	if m.kbTopK <= 0 {
+		m.kbTopK = 8
+	}
+	if mode, ok := parseViewMode(opts.InitialView); ok {
+		m.mode = mode
+	}
+	if strings.TrimSpace(opts.InitialQuery) != "" {
+		m.kb.Query = strings.TrimSpace(opts.InitialQuery)
 	}
 	return m
 }
@@ -235,6 +291,14 @@ func (m *Model) Init() tea.Cmd {
 	}
 	if m.src != nil {
 		cmds = append(cmds, m.catchUpCmd())
+	}
+	if cmd := m.refreshPanelCmd(m.mode); cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+	if m.mode == ViewKB && m.kb.Query != "" {
+		if cmd := m.kbSearchCmd(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 	}
 	return tea.Batch(cmds...)
 }
@@ -260,10 +324,25 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.terminal {
 			return m, nil
 		}
-		return m, tea.Batch(
+		m.pollTick++
+		cmds := []tea.Cmd{
 			m.fetchTaskCmd(),
 			tea.Tick(pollInterval, func(time.Time) tea.Msg { return pollMsg{} }),
-		)
+		}
+		if m.pollTick%5 == 0 {
+			if cmd := m.refreshPanelCmd(m.mode); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		}
+		return m, tea.Batch(cmds...)
+
+	case panelMsg:
+		m.applyPanelMsg(msg)
+		return m, nil
+
+	case kbSearchMsg:
+		m.applyKBSearchMsg(msg)
+		return m, nil
 
 	case taskMsg:
 		if msg.Err != nil {
@@ -355,7 +434,42 @@ func (m *Model) mergeTask(next TaskState) {
 }
 
 func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
+	key := msg.String()
+	if m.mode == ViewKB {
+		switch key {
+		case "ctrl+c":
+			return m, tea.Quit
+		case "esc":
+			m.mode = ViewMain
+			return m, nil
+		case "enter":
+			return m, m.kbSearchCmd()
+		case "backspace", "ctrl+h":
+			runes := []rune(m.kb.Query)
+			if len(runes) > 0 {
+				m.kb.Query = string(runes[:len(runes)-1])
+			}
+			return m, nil
+		}
+		if msg.Type == tea.KeyRunes {
+			runes := []rune(m.kb.Query)
+			for _, r := range msg.Runes {
+				if len(runes) < 200 {
+					runes = append(runes, r)
+				}
+			}
+			m.kb.Query = string(runes)
+			return m, nil
+		}
+		if msg.Type == tea.KeySpace {
+			if len([]rune(m.kb.Query)) < 200 {
+				m.kb.Query += " "
+			}
+			return m, nil
+		}
+		return m, nil
+	}
+	switch key {
 	case "ctrl+c", "q":
 		return m, tea.Quit
 	case "a":
@@ -369,19 +483,21 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.aborting = true
 		return m, cmd
 	case "l":
-		if m.mode == ViewLogs {
-			m.mode = ViewMain
-		} else {
-			m.prevMode = m.mode
-			m.mode = ViewLogs
-		}
-		return m, nil
+		return m.toggleView(ViewLogs, nil)
 	case "m":
-		if m.mode == ViewMemory {
-			m.mode = ViewMain
-		} else {
+		return m.toggleView(ViewMemory, nil)
+	case "s":
+		return m.toggleView(ViewSubtasks, m.refreshPanelCmd(ViewSubtasks))
+	case "x":
+		return m.toggleView(ViewModels, m.refreshPanelCmd(ViewModels))
+	case "h", "!":
+		return m.toggleView(ViewHealth, nil)
+	case "c":
+		return m.toggleView(ViewArtifacts, m.refreshPanelCmd(ViewArtifacts))
+	case "k":
+		if m.mode != ViewKB {
 			m.prevMode = m.mode
-			m.mode = ViewMemory
+			m.mode = ViewKB
 		}
 		return m, nil
 	case "o":
@@ -395,18 +511,22 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.opening = true
 		return m, cmd
 	case "?":
-		if m.mode == ViewHelp {
-			m.mode = ViewMain
-		} else {
-			m.prevMode = m.mode
-			m.mode = ViewHelp
-		}
-		return m, nil
+		return m.toggleView(ViewHelp, nil)
 	case "esc":
 		m.mode = ViewMain
 		return m, nil
 	}
 	return m, nil
+}
+
+func (m *Model) toggleView(target ViewMode, load tea.Cmd) (tea.Model, tea.Cmd) {
+	if m.mode == target {
+		m.mode = ViewMain
+		return m, nil
+	}
+	m.prevMode = m.mode
+	m.mode = target
+	return m, load
 }
 
 func (m *Model) View() string {
@@ -426,6 +546,21 @@ func (m *Model) View() string {
 		parts = append(parts, views.RenderHelp(m.theme))
 	case ViewMemory:
 		parts = append(parts, views.RenderMemory(m.theme))
+	case ViewSubtasks:
+		height := m.height - 5
+		if height < 8 {
+			height = 16
+		}
+		parts = append(parts, views.RenderSubtasks(m.subagents, width, height/2, m.theme))
+		parts = append(parts, views.RenderHandoffs(m.subagents, width, height-height/2, m.theme))
+	case ViewModels:
+		parts = append(parts, views.RenderModels(m.models, width, maxLinesFor(m.height-5, 12), m.theme))
+	case ViewHealth:
+		parts = append(parts, views.RenderHealth(m.healthData(), width, maxLinesFor(m.height-5, 12), m.theme))
+	case ViewArtifacts:
+		parts = append(parts, views.RenderArtifacts(m.subagents, width, maxLinesFor(m.height-5, 12), m.theme))
+	case ViewKB:
+		parts = append(parts, views.RenderKB(m.kbData(), width, maxLinesFor(m.height-5, 12), m.theme))
 	default:
 		parts = append(parts, views.RenderStage(m.stageData()))
 		fixed := 7
@@ -451,6 +586,36 @@ func (m *Model) View() string {
 	return strings.Join(parts, "\n")
 }
 
+func parseViewMode(name string) (ViewMode, bool) {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "logs":
+		return ViewLogs, true
+	case "memory":
+		return ViewMemory, true
+	case "subtasks", "subagents", "dag":
+		return ViewSubtasks, true
+	case "models":
+		return ViewModels, true
+	case "health", "incidents":
+		return ViewHealth, true
+	case "artifacts", "checkpoints":
+		return ViewArtifacts, true
+	case "kb", "knowledge":
+		return ViewKB, true
+	}
+	return ViewMain, false
+}
+
+func maxLinesFor(height, fallback int) int {
+	if height <= 0 {
+		return fallback
+	}
+	if height < 3 {
+		return 3
+	}
+	return height
+}
+
 func (m *Model) modeName() string {
 	switch m.mode {
 	case ViewLogs:
@@ -459,6 +624,16 @@ func (m *Model) modeName() string {
 		return "help"
 	case ViewMemory:
 		return "memory"
+	case ViewSubtasks:
+		return "subtasks"
+	case ViewModels:
+		return "models"
+	case ViewHealth:
+		return "health"
+	case ViewArtifacts:
+		return "artifacts"
+	case ViewKB:
+		return "knowledge"
 	default:
 		return "main"
 	}
@@ -538,6 +713,10 @@ func (m *Model) applyEvent(ev Event) {
 	if attempt == 0 {
 		attempt = payloadInt(payload, "attempt_no")
 	}
+	if ev.Stage == "" {
+		ev.Stage = stage
+	}
+	m.recordEventHealth(ev, typ, payload)
 
 	line := views.EventLine{
 		Seq:      ev.Seq,
@@ -655,11 +834,15 @@ func (m *Model) applyEvent(ev Event) {
 
 	case "checkpoint.drift", "checkpoint.corrupted", "compaction.degraded", "memory.index_degraded":
 		line.Error = true
-		line.Summary = typ
+		line.Summary = eventHint(typ)
 	}
 
+	line.Summary = strings.TrimSpace(line.Summary)
 	if line.Summary == "" {
-		line.Summary = defaultSummary(payload)
+		line.Summary = strings.TrimSpace(defaultSummary(payload))
+	}
+	if line.Summary == "" {
+		line.Summary = eventHint(typ)
 	}
 	m.appendEventLine(line)
 	if ev.Seq > m.lastSeq {
@@ -904,9 +1087,9 @@ func transitionSummary(payload map[string]any, typ string) string {
 	case from != "" && to != "":
 		return from + "→" + to
 	case to != "":
-		return typ + " " + to
+		return eventHint(typ) + " " + to
 	default:
-		return typ
+		return eventHint(typ)
 	}
 }
 

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -12,10 +13,14 @@ import (
 )
 
 type RunOptions struct {
-	NoColor   bool
-	WebURL    string
-	Hyperlink bool
-	OpenURL   func(string) error
+	NoColor      bool
+	WebURL       string
+	Hyperlink    bool
+	OpenURL      func(string) error
+	KB           KBSource
+	KBTopK       int
+	InitialView  string
+	InitialQuery string
 }
 
 type RunResult struct {
@@ -32,10 +37,14 @@ func Run(ctx context.Context, client harnesspb.HarnessLoopServiceClient, tenant 
 	}
 	src := &grpcSource{client: client, tenant: tenant, taskID: task.GetTaskId(), ctx: ctx}
 	model := NewModel(taskStateFromProto(task), src, Options{
-		NoColor:   opts.NoColor,
-		WebURL:    opts.WebURL,
-		Hyperlink: opts.Hyperlink,
-		OpenURL:   opts.OpenURL,
+		NoColor:      opts.NoColor,
+		WebURL:       opts.WebURL,
+		Hyperlink:    opts.Hyperlink,
+		OpenURL:      opts.OpenURL,
+		KB:           opts.KB,
+		KBTopK:       opts.KBTopK,
+		InitialView:  opts.InitialView,
+		InitialQuery: opts.InitialQuery,
 	}).WithContext(ctx)
 	program := tea.NewProgram(
 		model,
@@ -139,6 +148,162 @@ func (s *grpcSource) Watch(ctx context.Context, sinceSeq int64) (<-chan WatchEve
 		}
 	}()
 	return ch, nil
+}
+
+func (s *grpcSource) Subtasks(ctx context.Context) ([]Subtask, error) {
+	resp, err := s.client.ListSubtasks(s.callContext(ctx), &harnesspb.ListSubtasksRequest{
+		TenantId: s.tenant, TaskId: s.taskID, Limit: 200,
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Subtask, 0, len(resp.GetSubtasks()))
+	for _, item := range resp.GetSubtasks() {
+		out = append(out, Subtask{
+			ID:          item.GetSubtaskId(),
+			ParentID:    item.GetParentTaskId(),
+			DAGID:       item.GetDagId(),
+			NodeID:      item.GetDagNodeId(),
+			ParallelSet: item.GetParallelSetId(),
+			Role:        item.GetRole(),
+			Status:      item.GetStatus(),
+			Depth:       int(item.GetDepth()),
+			Index:       int(item.GetIndexInParent()),
+			Attempt:     int(item.GetAttemptNo()),
+			DependsOn:   item.GetDependsOn(),
+			HandoffID:   item.GetHandoffId(),
+			AllocTokens: item.GetAllocTokens(),
+			Tokens:      item.GetConsumedTokens(),
+			Cost:        item.GetConsumedCost(),
+			Artifacts:   parseArtifactRefs(item.GetArtifactRefs()),
+			CreatedAt:   time.UnixMilli(item.GetCreatedAtMs()),
+			UpdatedAt:   time.UnixMilli(item.GetUpdatedAtMs()),
+		})
+	}
+	return out, nil
+}
+
+func (s *grpcSource) ModelSelections(ctx context.Context) ([]ModelSelection, error) {
+	resp, err := s.client.ListModelSelections(s.callContext(ctx), &harnesspb.ListModelSelectionsRequest{
+		TenantId: s.tenant, TaskId: s.taskID, Limit: 200,
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]ModelSelection, 0, len(resp.GetSelections()))
+	for _, item := range resp.GetSelections() {
+		out = append(out, ModelSelection{
+			Stage:         item.GetStage(),
+			Attempt:       int(item.GetAttemptNo()),
+			ModelID:       item.GetModelId(),
+			Strategy:      item.GetStrategy(),
+			ResolvedFrom:  item.GetResolvedFrom(),
+			Reason:        item.GetReason(),
+			Operator:      item.GetOperator(),
+			ApprovalID:    item.GetApprovalId(),
+			Fallback:      item.GetIsFallback(),
+			ContextWindow: int(item.GetContextWindow()),
+			TokensIn:      item.GetTokensIn(),
+			TokensOut:     item.GetTokensOut(),
+			Cost:          item.GetCost(),
+			CreatedAt:     time.UnixMilli(item.GetCreatedAtMs()),
+		})
+	}
+	return out, nil
+}
+
+func (s *grpcSource) Handoffs(ctx context.Context) ([]Handoff, error) {
+	resp, err := s.client.ListHandoffs(s.callContext(ctx), &harnesspb.ListHandoffsRequest{
+		TenantId: s.tenant, TaskId: s.taskID, Limit: 200,
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Handoff, 0, len(resp.GetHandoffs()))
+	for _, item := range resp.GetHandoffs() {
+		out = append(out, Handoff{
+			ID:        item.GetHandoffId(),
+			ParentID:  item.GetParentTaskId(),
+			SubtaskID: item.GetSubtaskId(),
+			From:      item.GetFromAgentId(),
+			To:        item.GetToAgentId(),
+			Status:    item.GetStatus(),
+			Reason:    item.GetReason(),
+			UpdatedAt: time.UnixMilli(item.GetUpdatedAtMs()),
+		})
+	}
+	return out, nil
+}
+
+func (s *grpcSource) Checkpoints(ctx context.Context) ([]Checkpoint, error) {
+	resp, err := s.client.ListCheckpoints(s.callContext(ctx), &harnesspb.ListCheckpointsRequest{
+		TenantId: s.tenant, TaskId: s.taskID, Limit: 200,
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Checkpoint, 0, len(resp.GetCheckpoints()))
+	for _, item := range resp.GetCheckpoints() {
+		out = append(out, Checkpoint{
+			ID:        item.GetCheckpointId(),
+			Kind:      item.GetKind(),
+			Stage:     item.GetStage(),
+			Attempt:   int(item.GetAttempt()),
+			Watermark: item.GetEventSeqWatermark(),
+			Payload:   item.GetPayloadRef(),
+			CreatedAt: time.UnixMilli(item.GetCreatedAtMs()),
+		})
+	}
+	return out, nil
+}
+
+func parseArtifactRefs(raw []byte) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	var list []string
+	if err := json.Unmarshal(raw, &list); err == nil {
+		return list
+	}
+	var objects []map[string]any
+	if err := json.Unmarshal(raw, &objects); err == nil {
+		out := make([]string, 0, len(objects))
+		for _, record := range objects {
+			if ref := artifactRef(record); ref != "" {
+				out = append(out, ref)
+			}
+		}
+		return out
+	}
+	var wrapper map[string]any
+	if err := json.Unmarshal(raw, &wrapper); err == nil {
+		if items, ok := wrapper["artifacts"].([]any); ok {
+			out := make([]string, 0, len(items))
+			for _, item := range items {
+				if record, ok := item.(map[string]any); ok {
+					if ref := artifactRef(record); ref != "" {
+						out = append(out, ref)
+					}
+				} else if ref, ok := item.(string); ok {
+					out = append(out, ref)
+				}
+			}
+			return out
+		}
+		if ref := artifactRef(wrapper); ref != "" {
+			return []string{ref}
+		}
+	}
+	return nil
+}
+
+func artifactRef(record map[string]any) string {
+	for _, key := range []string{"ref", "path", "uri", "url", "id", "name"} {
+		if value, ok := record[key].(string); ok && value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func eventFromProto(item *harnesspb.HarnessEvent) Event {
