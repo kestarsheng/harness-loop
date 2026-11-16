@@ -92,6 +92,38 @@ beforeEach(() => {
 });
 
 describe('harnessLoopApi 真实 GET', () => {
+  it('listTasks 只按 tenant 查询，默认不发送 project_id', async () => {
+    getMock.mockResolvedValue({ tasks: [] });
+
+    await harnessLoopApi.listTasks({ limit: 200 });
+
+    expect(getMock).toHaveBeenCalledWith('/api/v2/harness-loop/tasks', {
+      params: { limit: 200 },
+      paramsSerializer: { indexes: null },
+    });
+    const params = getMock.mock.calls[0][1].params as Record<string, unknown>;
+    expect('project_id' in params).toBe(false);
+    expect('status' in params).toBe(false);
+  });
+
+  it('listTasks 仅在显式传入时携带 project_id / status', async () => {
+    getMock.mockResolvedValue({ tasks: [] });
+
+    await harnessLoopApi.listTasks({
+      project_id: 'proj-a',
+      status: ['running', 'retrying'],
+    });
+
+    expect(getMock).toHaveBeenCalledWith('/api/v2/harness-loop/tasks', {
+      params: {
+        limit: 50,
+        project_id: 'proj-a',
+        status: ['running', 'retrying'],
+      },
+      paramsSerializer: { indexes: null },
+    });
+  });
+
   it('listSubtasks 按后端路径与 query 参数请求，并保留 snake_case 字段', async () => {
     getMock.mockResolvedValue({ subtasks: [subtask] });
 

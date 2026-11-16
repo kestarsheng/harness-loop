@@ -26,6 +26,7 @@ import type { HarnessEvent, HarnessTaskView, TaskRuntimeState } from './types';
 import {
   hydrateTaskState,
   reduceMonitorState,
+  selectBoardTasks,
   statusLabel,
 } from './types';
 
@@ -58,13 +59,24 @@ function mergeTaskViews(
       next = { ...next, [view.task_id]: hydrated };
       continue;
     }
+    // 终端身份、goal 等静态字段即使快照时间不新也要补齐，
+    // 否则 SSE 先到的任务会一直拿 task_id 当标题。
+    const identity = {
+      tenantId: current.tenantId || hydrated.tenantId,
+      projectId: current.projectId || hydrated.projectId,
+      sessionId: current.sessionId || hydrated.sessionId,
+      terminalLabel: current.terminalLabel || hydrated.terminalLabel,
+      goal: current.goal || hydrated.goal,
+    };
     if (hydrated.updatedAtMs <= current.updatedAtMs) {
+      next = { ...next, [view.task_id]: { ...current, ...identity } };
       continue;
     }
     next = {
       ...next,
       [view.task_id]: {
         ...current,
+        ...identity,
         status: hydrated.status,
         stage: hydrated.stage ?? current.stage,
         attemptNoByStage: hydrated.attemptNoByStage,
@@ -95,11 +107,14 @@ export default function Monitor() {
   const openAnomaly = useMonitorStore((state) => state.openAnomaly);
   const closeAnomaly = useMonitorStore((state) => state.closeAnomaly);
   const setStatusFilter = useMonitorStore((state) => state.setStatusFilter);
+  const tenantId =
+    (typeof localStorage !== 'undefined' && localStorage.getItem('tenantId')) || 'default';
 
   const { data, isLoading, isError, refetch } = useQuery({
-    queryKey: ['hlp', 'tasks'],
+    // 只按 tenant 订阅与查询；不引入 project 维度。
+    queryKey: ['hlp', 'tasks', tenantId],
     queryFn: async () => {
-      const response = await harnessLoopApi.listTasks({ limit: 50 });
+      const response = await harnessLoopApi.listTasks({ limit: 200 });
       return (response?.tasks ?? []) as HarnessTaskView[];
     },
     refetchInterval: streamStatus === 'degraded' ? 5000 : 10000,
@@ -140,8 +155,7 @@ export default function Monitor() {
   }, []);
 
   useEventStream({
-    tenantId:
-      (typeof localStorage !== 'undefined' && localStorage.getItem('tenantId')) || 'default',
+    tenantId,
     enabled: true,
     getLastSeq,
     onEvents: handleEvents,
@@ -155,14 +169,8 @@ export default function Monitor() {
       statusFilter === 'all'
         ? list
         : list.filter((state) => state.status === statusFilter);
-    return filtered.sort((left, right) => {
-      const leftActive = left.status === 'running' || left.status === 'retrying' ? 1 : 0;
-      const rightActive = right.status === 'running' || right.status === 'retrying' ? 1 : 0;
-      if (leftActive !== rightActive) {
-        return rightActive - leftActive;
-      }
-      return right.updatedAtMs - left.updatedAtMs;
-    });
+    // 活跃任务全量 + 最近 20 个终态；终态卡片在 AgentCard 内灰显。
+    return selectBoardTasks(filtered);
   }, [states, statusFilter]);
 
   const selectedState = selectedTaskId ? states[selectedTaskId] : undefined;
@@ -308,7 +316,7 @@ export default function Monitor() {
               marginBottom: 8,
             }}
           >
-            任务卡片（{visibleStates.length}）· 虚拟滚动
+            任务卡片（{visibleStates.length}）· 活跃全量 + 最近 20 终态 · 虚拟滚动
           </div>
           <AgentCardGrid
             states={visibleStates}

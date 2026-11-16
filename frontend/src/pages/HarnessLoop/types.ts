@@ -132,6 +132,9 @@ export interface HarnessTaskView {
   project_id?: string;
   workspace_root?: string;
   goal?: string;
+  // T-P2-12 终端身份；存量任务可能为空。
+  session_id?: string;
+  terminal_label?: string;
   goal_hash?: string;
   current_stage?: string;
   status?: string;
@@ -183,6 +186,8 @@ export interface TaskRuntimeState {
   tenantId: string;
   projectId: string;
   agentId: string;
+  sessionId: string;
+  terminalLabel: string;
   goal: string;
   stage: StageCode | null;
   status: TaskStatus;
@@ -321,6 +326,8 @@ export function createTaskState(taskId: string, partial?: Partial<TaskRuntimeSta
     tenantId: '',
     projectId: '',
     agentId: '',
+    sessionId: '',
+    terminalLabel: '',
     goal: '',
     stage: null,
     status: 'pending',
@@ -466,6 +473,14 @@ export function reduceTaskState(
     tenantId: event.tenant_id || base.tenantId,
     projectId: event.project_id || base.projectId,
     agentId: event.agent_id || base.agentId,
+    sessionId:
+      typeof payload.session_id === 'string' && payload.session_id !== ''
+        ? payload.session_id
+        : base.sessionId,
+    terminalLabel:
+      typeof payload.terminal_label === 'string' && payload.terminal_label !== ''
+        ? payload.terminal_label
+        : base.terminalLabel,
     eventCount: base.eventCount + 1,
     eventsInWindow: base.eventsInWindow + 1,
     updatedAtMs: Math.max(base.updatedAtMs, timestampMs),
@@ -838,6 +853,8 @@ export function hydrateTaskState(view: HarnessTaskView): TaskRuntimeState {
   return createTaskState(view.task_id, {
     tenantId: view.tenant_id ?? '',
     projectId: view.project_id ?? '',
+    sessionId: view.session_id ?? '',
+    terminalLabel: view.terminal_label ?? '',
     goal: view.goal ?? '',
     stage,
     status,
@@ -862,6 +879,52 @@ export function hydrateTaskState(view: HarnessTaskView): TaskRuntimeState {
         : {}),
     } as Record<StageCode, StageRuntime>,
   });
+}
+
+export const TERMINAL_CARD_LIMIT = 20;
+export const CARD_TITLE_MAX_CHARS = 40;
+
+/**
+ * 卡片标题：优先终端标签，其次 goal 截断，最后回退到 task_id。
+ * 存量任务没有 terminal_label，仍能靠 goal 区分。
+ */
+export function taskDisplayTitle(
+  state: Pick<TaskRuntimeState, 'taskId' | 'goal' | 'terminalLabel'>,
+  maxChars: number = CARD_TITLE_MAX_CHARS,
+): string {
+  const preferred = (state.terminalLabel || state.goal || '').trim();
+  if (preferred === '') {
+    return state.taskId ? state.taskId.slice(0, 12) : '未命名任务';
+  }
+  const chars = Array.from(preferred);
+  if (chars.length <= maxChars) {
+    return preferred;
+  }
+  return `${chars.slice(0, maxChars).join('')}…`;
+}
+
+/**
+ * 大屏只展示活跃任务 + 最近 N 个终态任务，终态按更新时间倒序截断。
+ * 排序保持活跃在前，便于同一屏内优先看到仍在推进的 agent。
+ */
+export function selectBoardTasks(
+  tasks: TaskRuntimeState[],
+  terminalLimit: number = TERMINAL_CARD_LIMIT,
+): TaskRuntimeState[] {
+  const active: TaskRuntimeState[] = [];
+  const terminal: TaskRuntimeState[] = [];
+  for (const task of tasks) {
+    if (isTerminalStatus(task.status)) {
+      terminal.push(task);
+    } else {
+      active.push(task);
+    }
+  }
+  const byUpdatedDesc = (left: TaskRuntimeState, right: TaskRuntimeState) =>
+    right.updatedAtMs - left.updatedAtMs;
+  active.sort(byUpdatedDesc);
+  terminal.sort(byUpdatedDesc);
+  return [...active, ...terminal.slice(0, Math.max(0, terminalLimit))];
 }
 
 export function statusLabel(status: TaskStatus): string {
