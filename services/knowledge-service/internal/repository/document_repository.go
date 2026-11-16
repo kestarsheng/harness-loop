@@ -128,6 +128,9 @@ func (r *DocumentRepository) SaveDocument(ctx context.Context, filename, content
 
 // GetDocument gets a document by ID
 func (r *DocumentRepository) GetDocument(ctx context.Context, id, tenantID string) (*Document, error) {
+	if r.mongo == nil {
+		return nil, fmt.Errorf("repository: mongodb is not configured")
+	}
 	doc, err := r.mongo.GetDocument(ctx, id)
 	if err != nil {
 		return nil, err
@@ -417,6 +420,95 @@ type SaveDocumentMeta struct {
 	PageCount     int
 	SplitStrategy string
 	Overlap       int
+}
+
+// SavePendingDocument 只落文档本体与元数据（status=pending），
+// 分块与向量由异步 worker 在 Index 阶段补齐。
+func (r *DocumentRepository) SavePendingDocument(ctx context.Context, meta SaveDocumentMeta, content string) (string, error) {
+	if r.mongo == nil {
+		return "", fmt.Errorf("repository: mongodb is not configured")
+	}
+	docID := uuid.New().String()
+	doc := &mongodb.Document{
+		ID:        docID,
+		Title:     meta.Filename,
+		Content:   content,
+		CreatedAt: time.Now(),
+	}
+	if err := r.mongo.InsertDocument(ctx, doc); err != nil {
+		return "", fmt.Errorf("save document: %w", err)
+	}
+	status := meta.Status
+	if !ValidStatus(status) {
+		status = StatusPending
+	}
+	metadata := map[string]interface{}{
+		"status":         status,
+		"kb_id":          meta.KBID,
+		"split_strategy": meta.SplitStrategy,
+		"overlap":        meta.Overlap,
+		"page_count":     meta.PageCount,
+		"retry_count":    0,
+	}
+	if len(meta.Tags) > 0 {
+		metadata["tags"] = meta.Tags
+	}
+	if err := r.mongo.UpdateDocumentMetadata(ctx, docID, metadata); err != nil {
+		return "", err
+	}
+	return docID, nil
+}
+
+// SaveChunks 给已存在的文档写入分块与向量，并增量维护 BM25 索引。
+func (r *DocumentRepository) SaveChunks(ctx context.Context, docID, tenantID string, chunks []string, embeddings [][]float64) error {
+	if len(chunks) == 0 {
+		return nil
+	}
+	if r.mongo == nil || r.qdrant == nil {
+		return fmt.Errorf("repository: mongodb and qdrant are required to save chunks")
+	}
+	mongoChunks := make([]mongodb.Chunk, 0, len(chunks))
+	qdrantPoints := make([]qdrant.Point, 0, len(chunks))
+	for i, chunk := range chunks {
+		chunkID := uuid.New().String()
+		mongoChunks = append(mongoChunks, mongodb.Chunk{
+			ID:         chunkID,
+			DocID:      docID,
+			Content:    chunk,
+			ChunkIndex: i,
+			CreatedAt:  time.Now(),
+		})
+		var vector []float64
+		if i < len(embeddings) {
+			vector = embeddings[i]
+		}
+		qdrantPoints = append(qdrantPoints, qdrant.Point{
+			ID:     chunkID,
+			Vector: vector,
+			Payload: map[string]interface{}{
+				"doc_id":      docID,
+				"content":     chunk,
+				"chunk_index": i,
+				"tenant_id":   tenantID,
+			},
+		})
+	}
+	if err := r.mongo.InsertChunks(ctx, mongoChunks); err != nil {
+		return fmt.Errorf("save chunks: %w", err)
+	}
+	if err := r.qdrant.Upsert(ctx, qdrantPoints); err != nil {
+		return fmt.Errorf("save vectors: %w", err)
+	}
+
+	r.bm25Mu.Lock()
+	if r.bm25Init {
+		for _, chunk := range mongoChunks {
+			r.bm25.AddDocument(chunk.ID, chunk.Content)
+			r.chunkMeta[chunk.ID] = chunkInfo{docID: docID}
+		}
+	}
+	r.bm25Mu.Unlock()
+	return nil
 }
 
 // UpdateDocumentStatus updates the indexing state machine fields.

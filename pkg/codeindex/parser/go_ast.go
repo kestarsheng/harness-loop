@@ -14,6 +14,8 @@ type GoASTParser struct{}
 
 func (p *GoASTParser) ID() string { return "go_ast" }
 
+func (p *GoASTParser) Capability() Capability { return CapabilityFull }
+
 func (p *GoASTParser) Supports(lang string) bool { return lang == "go" }
 
 func (p *GoASTParser) Parse(path string, src []byte) (codeindex.ParseResult, error) {

@@ -11,6 +11,7 @@ import (
 	commonpb "agent-platform/pkg/pb/common"
 	pb "agent-platform/pkg/pb/knowledge"
 	"agent-platform/services/knowledge-service/internal/chunker"
+	"agent-platform/services/knowledge-service/internal/indexing"
 	"agent-platform/services/knowledge-service/internal/parser"
 	"agent-platform/services/knowledge-service/internal/repository"
 	"agent-platform/services/knowledge-service/internal/rerank"
@@ -24,31 +25,42 @@ type KnowledgeService struct {
 	cfg       *config.Config
 	chunker   *chunker.TokenChunker
 	reranker  rerank.Reranker
+
+	// rerank 相关：候选截断 20、返回 5（design 4.10.4），并记录耗时与降级率。
+	rerankMetrics    *rerank.Metrics
+	rerankCandidates int
+	rerankTopM       int
+
+	// indexer 非空时上传走异步索引（pending -> processing -> ready/failed）。
+	indexer *indexing.Worker
 }
+
+const (
+	defaultRerankCandidates = 20
+	defaultRerankTopM       = 5
+)
 
 // NewKnowledgeService creates a new knowledge service
 func NewKnowledgeService(llmClient llm.Client, docRepo *repository.DocumentRepository, cfg *config.Config) *KnowledgeService {
 	return &KnowledgeService{
-		llmClient: llmClient,
-		docRepo:   docRepo,
-		cfg:       cfg,
-		chunker:   chunker.NewTokenChunker(512, 50),
+		llmClient:        llmClient,
+		docRepo:          docRepo,
+		cfg:              cfg,
+		chunker:          chunker.NewTokenChunker(512, 50),
+		rerankMetrics:    rerank.NewMetrics(),
+		rerankCandidates: defaultRerankCandidates,
+		rerankTopM:       defaultRerankTopM,
 	}
 }
 
-// Upload handles file upload
+// Upload handles file upload.
+// worker 存在时走异步：立即返回 pending，解析/切分/向量化由后台完成；
+// 未装配 worker（灰度或单机）时退回同步路径，保持旧行为。
 func (s *KnowledgeService) Upload(ctx context.Context, req *pb.UploadRequest) (*pb.UploadResponse, error) {
 	if err := repository.ValidateUpload(req.Filename, req.Content, 0); err != nil {
 		return nil, err
 	}
 
-	// Parse file content
-	content, err := parser.Parse(req.Filename, req.Content)
-	if err != nil {
-		return nil, fmt.Errorf("parse file: %w", err)
-	}
-
-	// Chunk content
 	chunkSize := int(req.ChunkSize)
 	if chunkSize == 0 {
 		chunkSize = 512
@@ -58,25 +70,51 @@ func (s *KnowledgeService) Upload(ctx context.Context, req *pb.UploadRequest) (*
 		chunkOverlap = 50
 	}
 
+	if s.indexer != nil {
+		docID, err := s.docRepo.SavePendingDocument(ctx, repository.SaveDocumentMeta{
+			TenantID:      req.TenantId,
+			KBID:          req.GetKbId(),
+			Filename:      req.Filename,
+			Status:        repository.StatusPending,
+			SplitStrategy: req.ChunkStrategy,
+			Overlap:       chunkOverlap,
+		}, string(req.Content))
+		if err != nil {
+			return nil, fmt.Errorf("save document: %w", err)
+		}
+		job := indexing.Job{
+			DocumentID:   docID,
+			TenantID:     req.TenantId,
+			KBID:         req.GetKbId(),
+			Filename:     req.Filename,
+			Content:      req.Content,
+			ChunkSize:    chunkSize,
+			ChunkOverlap: chunkOverlap,
+		}
+		if err := s.indexer.Enqueue(ctx, job); err != nil {
+			_ = s.docRepo.UpdateDocumentStatus(ctx, docID, repository.StatusFailed, err.Error(), 0)
+			return nil, fmt.Errorf("enqueue index job: %w", err)
+		}
+		return &pb.UploadResponse{
+			DocumentId: docID,
+			Filename:   req.Filename,
+			Status:     repository.StatusPending,
+		}, nil
+	}
+
+	// 同步模式：解析 → 切分 → 向量 → 落库，一步到 ready。
+	content, err := parser.Parse(req.Filename, req.Content)
+	if err != nil {
+		return nil, fmt.Errorf("parse file: %w", err)
+	}
 	s.chunker = chunker.NewTokenChunker(chunkSize, chunkOverlap)
 	chunks := s.chunker.Chunk(content)
 
-	// Generate embeddings
-	var embeddings [][]float64
-	for i := 0; i < len(chunks); i += 20 {
-		end := i + 20
-		if end > len(chunks) {
-			end = len(chunks)
-		}
-		batch := chunks[i:end]
-		batchEmbeddings, err := s.llmClient.EmbedBatch(ctx, batch)
-		if err != nil {
-			return nil, fmt.Errorf("generate embeddings: %w", err)
-		}
-		embeddings = append(embeddings, batchEmbeddings...)
+	embeddings, err := s.embedChunks(ctx, chunks)
+	if err != nil {
+		return nil, err
 	}
 
-	// Save document and chunks
 	docID, err := s.docRepo.SaveDocumentWithMeta(ctx, repository.SaveDocumentMeta{
 		TenantID:      req.TenantId,
 		KBID:          req.GetKbId(),
@@ -88,13 +126,60 @@ func (s *KnowledgeService) Upload(ctx context.Context, req *pb.UploadRequest) (*
 	if err != nil {
 		return nil, fmt.Errorf("save document: %w", err)
 	}
+	if err := s.docRepo.UpdateDocumentStatus(ctx, docID, repository.StatusReady, "", 0); err != nil {
+		return nil, fmt.Errorf("mark document ready: %w", err)
+	}
 
 	return &pb.UploadResponse{
 		DocumentId: docID,
 		Filename:   req.Filename,
 		ChunkCount: int32(len(chunks)),
-		Status:     "ready",
+		Status:     repository.StatusReady,
 	}, nil
+}
+
+// SetIndexWorker 装配异步索引 worker；传 nil 表示退回同步上传。
+func (s *KnowledgeService) SetIndexWorker(worker *indexing.Worker) { s.indexer = worker }
+
+// Indexer 让 KnowledgeService 直接充当 indexing.Indexer。
+func (s *KnowledgeService) Index(ctx context.Context, job indexing.Job) error {
+	if s.docRepo == nil {
+		return fmt.Errorf("index: document repository is not configured")
+	}
+	content, err := parser.Parse(job.Filename, job.Content)
+	if err != nil {
+		return fmt.Errorf("parse file: %w", err)
+	}
+	chunkSize := job.ChunkSize
+	if chunkSize <= 0 {
+		chunkSize = 512
+	}
+	overlap := job.ChunkOverlap
+	if overlap <= 0 {
+		overlap = 50
+	}
+	chunks := chunker.NewTokenChunker(chunkSize, overlap).Chunk(content)
+	embeddings, err := s.embedChunks(ctx, chunks)
+	if err != nil {
+		return err
+	}
+	return s.docRepo.SaveChunks(ctx, job.DocumentID, job.TenantID, chunks, embeddings)
+}
+
+func (s *KnowledgeService) embedChunks(ctx context.Context, chunks []string) ([][]float64, error) {
+	var embeddings [][]float64
+	for i := 0; i < len(chunks); i += 20 {
+		end := i + 20
+		if end > len(chunks) {
+			end = len(chunks)
+		}
+		batchEmbeddings, err := s.llmClient.EmbedBatch(ctx, chunks[i:end])
+		if err != nil {
+			return nil, fmt.Errorf("generate embeddings: %w", err)
+		}
+		embeddings = append(embeddings, batchEmbeddings...)
+	}
+	return embeddings, nil
 }
 
 // GetDocument gets a document
@@ -219,6 +304,12 @@ func (s *KnowledgeService) Search(ctx context.Context, req *pb.SearchRequest) (*
 		}
 	}
 
+	// 统一收口：先剔除不可检索文档（failed/pending/processing），
+	// 再做 cross-encoder 重排（失败降级并标 rerank=degraded），最后补来源引用。
+	results = s.filterSearchable(ctx, results, req.TenantId, req.GetKbId())
+	results = s.rerankResults(ctx, req.Query, results, topK)
+	results = s.attachSources(ctx, results, req.TenantId)
+
 	return &pb.SearchResponse{
 		Results:   results,
 		Total:     int64(len(results)),
@@ -317,7 +408,22 @@ func min(a, b int) int {
 	return b
 }
 
+// filterSearchable 丢弃非 ready 或 kb 不匹配的命中。
 func (s *KnowledgeService) filterSearchable(ctx context.Context, results []*pb.SearchResult, tenantID, kbID string) []*pb.SearchResult {
+	if s.docRepo == nil {
+		return results
+	}
+	return filterSearchableResults(ctx, s.docRepo, results, tenantID, kbID)
+}
+
+// documentGetter 抽出状态查询，便于用假实现验证「failed 不进检索」。
+type documentGetter interface {
+	GetDocument(ctx context.Context, id, tenantID string) (*repository.Document, error)
+}
+
+// filterSearchableResults 丢弃非 ready 或 kb 不匹配的命中。
+// 状态查询失败时保留结果（fail-open）：宁可多给一条，也不因文档库抖动清空检索。
+func filterSearchableResults(ctx context.Context, getter documentGetter, results []*pb.SearchResult, tenantID, kbID string) []*pb.SearchResult {
 	if len(results) == 0 {
 		return results
 	}
@@ -326,12 +432,18 @@ func (s *KnowledgeService) filterSearchable(ctx context.Context, results []*pb.S
 	for _, r := range results {
 		doc, ok := cache[r.DocumentId]
 		if !ok {
-			loaded, err := s.docRepo.GetDocument(ctx, r.DocumentId, tenantID)
+			loaded, err := getter.GetDocument(ctx, r.DocumentId, tenantID)
 			if err != nil || loaded == nil {
+				cache[r.DocumentId] = nil
+				out = append(out, r)
 				continue
 			}
 			cache[r.DocumentId] = loaded
 			doc = loaded
+		}
+		if doc == nil {
+			out = append(out, r)
+			continue
 		}
 		if !repository.Searchable(doc.Status) {
 			continue
@@ -348,20 +460,50 @@ func (s *KnowledgeService) SetReranker(r rerank.Reranker) {
 	s.reranker = r
 }
 
+// SetRerankLimits 调整 top N -> top M（默认 20 -> 5）。
+func (s *KnowledgeService) SetRerankLimits(candidates, topM int) {
+	if candidates > 0 {
+		s.rerankCandidates = candidates
+	}
+	if topM > 0 {
+		s.rerankTopM = topM
+	}
+}
+
+// RerankStats 暴露 rerank 调用量/降级率/耗时，供指标采集。
+func (s *KnowledgeService) RerankStats() rerank.MetricsSnapshot { return s.rerankMetrics.Snapshot() }
+
+// rerankResults 对融合结果做 top 20 -> top 5 重排。
+// 任何失败（超时、5xx、协议不符）都降级为融合顺序，并在 metadata 标 rerank=degraded。
 func (s *KnowledgeService) rerankResults(ctx context.Context, query string, results []*pb.SearchResult, topK int) []*pb.SearchResult {
-	if len(results) <= 5 {
+	if len(results) == 0 {
 		return results
 	}
-	limit := topK
-	if limit <= 0 || limit > len(results) {
-		limit = len(results)
+	candidatesLimit := s.rerankCandidates
+	if candidatesLimit <= 0 {
+		candidatesLimit = defaultRerankCandidates
 	}
-	if s.reranker == nil {
-		return results[:limit]
+	if candidatesLimit > len(results) {
+		candidatesLimit = len(results)
+	}
+	limit := s.rerankTopM
+	if limit <= 0 {
+		limit = defaultRerankTopM
+	}
+	if topK > 0 && topK < limit {
+		limit = topK
+	}
+	if limit > candidatesLimit {
+		limit = candidatesLimit
 	}
 
-	candidates := make([]rerank.Candidate, 0, len(results))
-	for _, r := range results {
+	candidatesIn := results[:candidatesLimit]
+	if s.reranker == nil {
+		return candidatesIn[:limit]
+	}
+
+	candidates := make([]rerank.Candidate, 0, len(candidatesIn))
+	for _, r := range candidatesIn {
 		candidates = append(candidates, rerank.Candidate{
 			ChunkID:    r.ChunkId,
 			DocumentID: r.DocumentId,
@@ -369,34 +511,43 @@ func (s *KnowledgeService) rerankResults(ctx context.Context, query string, resu
 			Score:      r.Score,
 		})
 	}
+	started := time.Now()
 	reranked, err := s.reranker.Rerank(ctx, query, candidates, limit)
+	s.rerankMetrics.Record(time.Since(started).Milliseconds(), err != nil)
 	if err != nil {
-		for _, r := range results {
-			if r.Metadata == nil {
-				r.Metadata = map[string]string{}
-			}
-			r.Metadata["rerank"] = "degraded"
+		for _, r := range candidatesIn {
+			markRerank(r, "degraded", 0)
 		}
-		return results[:limit]
+		return candidatesIn[:limit]
 	}
+
 	out := make([]*pb.SearchResult, 0, len(reranked))
 	for _, c := range reranked {
-		for _, r := range results {
+		for _, r := range candidatesIn {
 			if r.ChunkId == c.ChunkID {
-				if r.Metadata == nil {
-					r.Metadata = map[string]string{}
-				}
-				r.Metadata["rerank_score"] = fmt.Sprintf("%.2f", c.RerankScore)
-				r.Metadata["rerank"] = "applied"
+				markRerank(r, "applied", c.RerankScore)
 				out = append(out, r)
 				break
 			}
 		}
 	}
 	if len(out) == 0 {
-		return results[:limit]
+		for _, r := range candidatesIn {
+			markRerank(r, "degraded", 0)
+		}
+		return candidatesIn[:limit]
 	}
 	return out
+}
+
+func markRerank(result *pb.SearchResult, state string, score float64) {
+	if result.Metadata == nil {
+		result.Metadata = map[string]string{}
+	}
+	result.Metadata["rerank"] = state
+	if score > 0 {
+		result.Metadata["rerank_score"] = fmt.Sprintf("%.2f", score)
+	}
 }
 
 func (s *KnowledgeService) attachSources(ctx context.Context, results []*pb.SearchResult, tenantID string) []*pb.SearchResult {

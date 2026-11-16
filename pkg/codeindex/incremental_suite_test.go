@@ -718,8 +718,8 @@ func TestSuiteSearchModesAndStats(t *testing.T) {
 		t.Fatalf("fulltext stats = %+v hits=%d", stats, len(hits))
 	}
 	for _, hit := range hits {
-		if len(hit.Sources) != 1 || hit.Sources[0] != "keyword" {
-			t.Fatalf("fulltext-only hit must come from keyword: %+v", hit.Sources)
+		if len(hit.Sources) != 1 || hit.Sources[0] != codeindex.RouteFulltext {
+			t.Fatalf("fulltext-only hit must come from fulltext route: %+v", hit.Sources)
 		}
 	}
 
