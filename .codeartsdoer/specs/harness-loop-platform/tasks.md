@@ -879,7 +879,7 @@
 
 > P1 合计：实施 31 个 + 测试 5 个 = **36 个任务**。
 
-## 3.3 P2：多语言索引、rerank 增强、调度优化、运维完善与 CLI 主线（21 个任务）
+## 3.3 P2：多语言索引、rerank 增强、调度优化、运维完善与 CLI 主线（22 个任务）
 
 ### T-P2-01 TypeScript / Python 解析
 
@@ -1133,7 +1133,19 @@
 | 验收标准 | 同租户存在 15 分钟级慢任务时，新父任务在准入层被拦下并返回 `E_SCHEDULER_LIMIT_EXCEEDED` + `reason=tenant_slots_full`；慢任务完成后新任务自动放行；`max_subtask_minutes` 生效且衰减窗口不再无限；`go test ./pkg/harnessloop/orchestrator/... -run "TestAdmission|TestFairness"` 全绿；`go build ./...`、depcheck 0。 |
 | 复杂度 | M |
 
-> P2 合计：实施 16 个 + 测试 5 个 = **21 个任务**。
+### T-P2-17 事件游标语义修复（P0 级功能缺陷）
+
+| 字段 | 内容 |
+|---|---|
+| 目标 | 修复「事件 `seq` 为每任务独立、而 `WatchEvents`/`MonitorStream` 把它当跨任务全局游标」导致的漏事件：50 并发任务时仅收到 11% 事件，大屏卡片状态会停在半路。 |
+| 关联需求 | REQ-108、REQ-110、REQ-118；design 4.12 / 4.12.6 / 9.7 |
+| 依赖 | T-P0-09、T-P1-28、T-P2-T1 |
+| 涉及文件 | [M] `services/harnessloop-service/internal/repository/event_repo.go`、[M] `services/harnessloop-service/internal/handler/grpc_handler.go`、[M] `services/gateway/internal/handler/harness_loop_handler.go`、[N] `services/harnessloop-service/internal/repository/event_cursor_test.go`、[M] `bench/p2/perf-suite.md`（复核 4.1） |
+| 实施要点 | 1) 现状：`event_repo.go:130` 用 `MAX(seq) WHERE tenant_id AND task_id` 生成 per-task seq；`WatchEvents` 用 `e.Seq > since` 过滤并把 `NextSinceSeq` 当全局游标，新任务 `seq` 从 1 开始即被永久滤掉；2) 三选一（按优先级）：①游标改 `(timestamp_ms, event_id)` 二元组，兼容 per-task seq；②`seq` 改租户级全局序列（单写者递增，需评估并发与迁移）；③按 taskIDs 分组保存游标；3) 补拉（`last_seq`）与新任务接入必须同时正确：既不重复也不漏；4) 前端/CLI 的 `last_seq` 语义若变化，需同步（`MonitorStream` 与事件协议字段）。 |
+| 验收标准 | 50 并发任务下事件收集率 **100%**（复跑 `bench/p2/scripts/run-events.sh` 的 50 任务场景）；`last_seq` 补拉不重不漏；跨任务事件不因新任务 seq 回绕被丢弃；大屏 50 卡片状态不再冻结；`go test ./services/harnessloop-service/... ./services/gateway/...` 全绿；容器 `-race`；`go build ./...`、depcheck 0。 |
+| 复杂度 | M |
+
+> P2 合计：实施 17 个 + 测试 5 个 = **22 个任务**。
 
 ---
 
