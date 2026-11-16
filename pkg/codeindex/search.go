@@ -21,6 +21,11 @@ type SearchOptions struct {
 	// GraphMaxNodes / GraphPerSymbol 限制扩展规模，<=0 走默认值。
 	GraphMaxNodes  int
 	GraphPerSymbol int
+	// GraphSeedLimit > 0 时只从检索排名前 N 的符号扩展；<= 0 全量（历史行为）。
+	GraphSeedLimit int
+	// GraphSeedDecay > 0 时按种子排名线性衰减扩展项权重（rank1 满权，每降一位减该步长）；
+	// <= 0 表示等权。
+	GraphSeedDecay float64
 	Embedder       EmbedFunc
 }
 
@@ -83,6 +88,7 @@ func (w *CodeWriter) Search(ctx context.Context, opts SearchOptions) ([]SearchHi
 	stats.VectorHits = len(vectorRows)
 
 	var graphRows []chunkRow
+	var graphWeights map[string]float64
 	if opts.EnableGraph {
 		symbols := collectSymbols(keywordRows, vectorRows)
 		if len(symbols) > 0 {
@@ -92,10 +98,16 @@ func (w *CodeWriter) Search(ctx context.Context, opts SearchOptions) ([]SearchHi
 				Seeds:     symbols,
 				MaxNodes:  opts.GraphMaxNodes,
 				PerSymbol: opts.GraphPerSymbol,
+				SeedLimit: opts.GraphSeedLimit,
+				DecayStep: opts.GraphSeedDecay,
 			})
 			if graphErr == nil {
 				graphRows = neighborsToRows(neighbors)
+				graphWeights = make(map[string]float64, len(neighbors))
 				for _, n := range neighbors {
+					if n.Weight > 0 {
+						graphWeights[n.ChunkID] = n.Weight
+					}
 					switch n.Direction {
 					case GraphDirectionCaller:
 						stats.GraphCallers++
@@ -114,7 +126,9 @@ func (w *CodeWriter) Search(ctx context.Context, opts SearchOptions) ([]SearchHi
 		toRoute(RouteGraph, graphRows),
 	}
 	weights := []float64{1, 1, graphWeight(opts.GraphWeight)}
-	merged := mergeWeighted(rrfK, routes, weights)
+	// 图路的逐项系数来自种子排名衰减；keyword/vector 路不加权。
+	itemWeights := []map[string]float64{nil, nil, graphWeights}
+	merged := mergeWeighted(rrfK, routes, weights, itemWeights)
 
 	byID := map[string]chunkRow{}
 	for _, row := range append(append(append([]chunkRow{}, keywordRows...), vectorRows...), graphRows...) {
@@ -171,14 +185,16 @@ func neighborsToRows(neighbors []GraphNeighbor) []chunkRow {
 			symbol:    n.Symbol,
 			snippet:   n.Snippet,
 			rank:      float64(len(neighbors) - i),
+			weight:    n.Weight,
 		})
 	}
 	return rows
 }
 
 // mergeWeighted 在 pkg/rrf 的融合结果上按路权重重算分，
-// 公式同 design 4.9.1：score(d) = Σ w_r / (k + rank_r(d))，k 取默认 60。
-func mergeWeighted(rrfK int, routes []rrf.Route, weights []float64) []rrf.Hit {
+// 公式同 design 4.9.1：score(d) = Σ w_r * c_r(d) / (k + rank_r(d))，k 取默认 60。
+// c_r(d) 是该条目在该路的逐项系数（图路用它承载种子排名衰减），缺省为 1。
+func mergeWeighted(rrfK int, routes []rrf.Route, weights []float64, itemWeights []map[string]float64) []rrf.Hit {
 	fusion := rrf.New(rrfK)
 	merged := fusion.MergeRoutes(routes...)
 	denominator := rrfK
@@ -191,7 +207,13 @@ func mergeWeighted(rrfK int, routes []rrf.Route, weights []float64) []rrf.Hit {
 			if rank < 0 || routeIndex >= len(weights) {
 				continue
 			}
-			score += weights[routeIndex] / float64(denominator+rank+1)
+			weight := weights[routeIndex]
+			if routeIndex < len(itemWeights) && itemWeights[routeIndex] != nil {
+				if factor, ok := itemWeights[routeIndex][merged[i].Entity.ID]; ok {
+					weight *= factor
+				}
+			}
+			score += weight / float64(denominator+rank+1)
 		}
 		merged[i].RRFScore = score
 	}
@@ -207,6 +229,8 @@ type chunkRow struct {
 	symbol    string
 	snippet   string
 	rank      float64
+	// weight 是该行在所属路的逐项系数，0 表示未设置（按 1 处理）。
+	weight float64
 }
 
 func toRoute(name string, rows []chunkRow) rrf.Route {

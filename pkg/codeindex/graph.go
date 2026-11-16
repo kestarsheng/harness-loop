@@ -3,7 +3,6 @@ package codeindex
 import (
 	"context"
 	"fmt"
-	"sort"
 )
 
 // 图扩展默认参数（design 4.9.2：每个命中符号 ≤ 5 跳邻居，图路权重 0.8）。
@@ -11,6 +10,12 @@ const (
 	DefaultGraphPerSymbol = 5
 	DefaultGraphMaxNodes  = 50
 	DefaultGraphWeight    = 0.8
+	// DefaultGraphSeedLimit 只从检索排名前 N 的种子符号扩展。
+	// 全量扩展会让低排名种子的邻居与头部 seed 同权进入 RRF，稀释最相关结果。
+	DefaultGraphSeedLimit = 5
+	// DefaultGraphSeedDecay 是种子排名每降一位的权重衰减步长：
+	// w(rank) = max(0, 1-(rank-1)*step)，rank1=1.0、rank5=0.6。
+	DefaultGraphSeedDecay = 0.1
 )
 
 // 扩展方向标记，写入 sources/统计，便于前端与压测区分调用方与被调用方。
@@ -23,9 +28,14 @@ const (
 type GraphExpandOptions struct {
 	TenantID  string
 	ProjectID string
+	// Seeds 必须按检索排名顺序传入（高相关在前）；扩展额度与衰减都按这个顺序算。
 	Seeds     []string
 	MaxNodes  int
 	PerSymbol int
+	// SeedLimit > 0 时只取前 N 个种子；<= 0 表示全量扩展。
+	SeedLimit int
+	// DecayStep > 0 时按种子排名线性衰减权重；<= 0 表示等权。
+	DecayStep float64
 }
 
 // GraphNeighbor 是扩展出的邻居 chunk。
@@ -38,18 +48,25 @@ type GraphNeighbor struct {
 	Snippet   string
 	Seed      string
 	Direction string
+	// SeedRank 是 seed 在本次扩展种子列表中的排名（1 起）。
+	SeedRank int
+	// Weight 是该邻居的相对权重（已含排名衰减，1.0 为满权）。
+	Weight float64
 }
 
 // GraphExpand 从命中符号沿 code_edges 做 1 跳双向扩展（调用方 + 被调用方）。
 //
 // 实现分两段，避免「每条边回表查 chunk」的嵌套循环（code_chunks 上没有
 // (tenant,project,symbol) 索引时会退化成逐边扫描，实测单种子 50ms+）：
-//  1. 用种子符号在 code_edges 上取一跳邻居的符号集合（双向）；
+//  1. 用种子符号在 code_edges 上取一跳邻居的符号集合（双向，按种子排名排序）；
 //  2. 用这组符号一次性取 chunk，再在 Go 侧按 seed 分组、去重、封顶。
 //
 // 两段查询都强制 tenant_id + project_id 行级过滤，跨租户/项目返回空。
 func (w *CodeWriter) GraphExpand(ctx context.Context, opts GraphExpandOptions) ([]GraphNeighbor, error) {
 	seeds := cleanSeeds(opts.Seeds)
+	if opts.SeedLimit > 0 && len(seeds) > opts.SeedLimit {
+		seeds = seeds[:opts.SeedLimit]
+	}
 	if len(seeds) == 0 {
 		return nil, nil
 	}
@@ -62,7 +79,12 @@ func (w *CodeWriter) GraphExpand(ctx context.Context, opts GraphExpandOptions) (
 		maxNodes = DefaultGraphMaxNodes
 	}
 
-	edges, err := w.graphEdges(ctx, opts.TenantID, opts.ProjectID, seeds, perSymbol*len(seeds)*2)
+	seedRank := make(map[string]int, len(seeds))
+	for i, seed := range seeds {
+		seedRank[seed] = i + 1
+	}
+
+	edges, err := w.graphEdges(ctx, opts.TenantID, opts.ProjectID, seeds, maxNodes*4, perSymbol*2)
 	if err != nil {
 		return nil, err
 	}
@@ -100,6 +122,12 @@ func (w *CodeWriter) GraphExpand(ctx context.Context, opts GraphExpandOptions) (
 		if perSeedCount[edge.seed] >= perSymbol {
 			continue
 		}
+		rank := seedRank[edge.seed]
+		weight := seedDecayWeight(rank, opts.DecayStep)
+		if weight <= 0 {
+			// 衰减到 0 等同不参与融合，不必占节点额度。
+			continue
+		}
 		row, ok := matchChunk(bySymbol[edge.symbol], edge.filePath, used)
 		if !ok {
 			continue
@@ -115,45 +143,73 @@ func (w *CodeWriter) GraphExpand(ctx context.Context, opts GraphExpandOptions) (
 			Snippet:   row.snippet,
 			Seed:      edge.seed,
 			Direction: edge.direction,
+			SeedRank:  rank,
+			Weight:    weight,
 		})
 	}
 	return out, nil
 }
 
+// seedDecayWeight 按种子排名做线性衰减：rank1 = 1.0，每降一位减 step，下限 0。
+func seedDecayWeight(rank int, step float64) float64 {
+	if step <= 0 || rank <= 1 {
+		return 1
+	}
+	weight := 1 - float64(rank-1)*step
+	if weight < 0 {
+		return 0
+	}
+	return weight
+}
+
 type graphEdge struct {
 	seed      string
+	seedOrd   int
 	filePath  string
 	symbol    string
 	direction string
 }
 
 // graphEdges 取一跳邻居的符号集合：target=seed 是调用方，source=seed 是被调用方。
-func (w *CodeWriter) graphEdges(ctx context.Context, tenantID, projectID string, seeds []string, limit int) ([]graphEdge, error) {
+//
+// 两个细节决定多 seed 扩展是否真的成立：
+//   - 种子带 ORDINALITY 透出排名，ORDER BY ord 保证高排名种子先占 MaxNodes 额度；
+//   - 每 seed 先按 ROW_NUMBER 截到 perSeed 条再汇总，否则单个高频 seed 会用光
+//     LIMIT，后面的种子一条都进不来（实测首个 seed 有 197 条边时，20 条预算全被吃掉）。
+func (w *CodeWriter) graphEdges(ctx context.Context, tenantID, projectID string, seeds []string, limit, perSeed int) ([]graphEdge, error) {
 	if limit <= 0 {
-		limit = DefaultGraphMaxNodes * 2
+		limit = DefaultGraphMaxNodes * 4
+	}
+	if perSeed <= 0 {
+		perSeed = DefaultGraphPerSymbol * 2
 	}
 	rows, err := w.db.Query(ctx, `
-		WITH seeds(sym) AS (
-			SELECT DISTINCT unnest($3::text[]) AS sym
+		WITH seeds(sym, ord) AS (
+			SELECT sym, ord FROM unnest($3::text[]) WITH ORDINALITY AS u(sym, ord)
 		)
-		, callers AS (
-			SELECT s.sym AS seed, e.source_file AS file_path, e.source_symbol AS symbol, 'caller' AS direction
+		, neighbors AS (
+			SELECT s.sym AS seed, s.ord AS ord, e.source_file AS file_path, e.source_symbol AS symbol, 'caller' AS direction
 			FROM seeds s
 			JOIN hlp_code.code_edges e
 			  ON e.tenant_id = $1 AND e.project_id = $2 AND e.target_symbol = s.sym
 			WHERE e.source_symbol <> s.sym
-		)
-		, callees AS (
-			SELECT s.sym AS seed, ''::text AS file_path, e.target_symbol AS symbol, 'callee' AS direction
+			UNION ALL
+			SELECT s.sym AS seed, s.ord AS ord, ''::text AS file_path, e.target_symbol AS symbol, 'callee' AS direction
 			FROM seeds s
 			JOIN hlp_code.code_edges e
 			  ON e.tenant_id = $1 AND e.project_id = $2 AND e.source_symbol = s.sym
 			WHERE e.target_symbol <> s.sym
 		)
-		SELECT DISTINCT seed, file_path, symbol, direction
-		FROM (SELECT * FROM callers UNION ALL SELECT * FROM callees) neighbors
-		ORDER BY seed, direction, file_path, symbol
-		LIMIT $4`, tenantID, projectID, seeds, limit)
+		, ranked AS (
+			SELECT seed, ord, file_path, symbol, direction,
+			       row_number() OVER (PARTITION BY seed ORDER BY direction, file_path, symbol) AS rn
+			FROM (SELECT DISTINCT seed, ord, file_path, symbol, direction FROM neighbors) deduped
+		)
+		SELECT seed, ord, file_path, symbol, direction
+		FROM ranked
+		WHERE rn <= $5
+		ORDER BY ord, rn
+		LIMIT $4`, tenantID, projectID, seeds, limit, perSeed)
 	if err != nil {
 		return nil, fmt.Errorf("codeindex: graph edges: %w", err)
 	}
@@ -162,7 +218,7 @@ func (w *CodeWriter) graphEdges(ctx context.Context, tenantID, projectID string,
 	var out []graphEdge
 	for rows.Next() {
 		var edge graphEdge
-		if err := rows.Scan(&edge.seed, &edge.filePath, &edge.symbol, &edge.direction); err != nil {
+		if err := rows.Scan(&edge.seed, &edge.seedOrd, &edge.filePath, &edge.symbol, &edge.direction); err != nil {
 			return nil, fmt.Errorf("codeindex: scan graph edge: %w", err)
 		}
 		out = append(out, edge)
@@ -213,6 +269,8 @@ func matchChunk(candidates []chunkRow, preferredFile string, used map[string]boo
 	return chunkRow{}, false
 }
 
+// cleanSeeds 去重但保留传入顺序——顺序即检索排名，截断与衰减都依赖它。
+// 这里刻意不排序：按字母序会丢失「哪个种子更相关」的信息。
 func cleanSeeds(seeds []string) []string {
 	seen := make(map[string]bool, len(seeds))
 	out := make([]string, 0, len(seeds))
@@ -223,6 +281,5 @@ func cleanSeeds(seeds []string) []string {
 		seen[seed] = true
 		out = append(out, seed)
 	}
-	sort.Strings(out)
 	return out
 }
