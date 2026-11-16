@@ -7,10 +7,11 @@
 #        → gateway WatchEvents(gRPC) → MonitorStream(SSE) → 本程序
 #
 # 必须带 -purge：网关 SSE 在建立连接时会先 catch-up 回放历史事件，把 since
-# 推到最后一条的 seq；而 hlp_event.events.seq 是 per-task 自增，新任务又从 1
-# 开始，于是 WatchFrom 的 `seq > since` 会把新任务的事件整段滤掉。
-# 清空本租户事件后 since 停在 0，测的才是纯推送延迟。
-# 这个缺陷本身已单独记录在 perf-suite.md 的偏差项里，不是测试脚手架的问题。
+# 推到最后一条的游标值。清空本租户事件后 since 停在 0，测的才是纯推送延迟
+# 与「本轮事件收集率」，不会把历史回放算进分子/分母。
+#
+# 事件游标在 T-P2-17 之后是租户级 global_seq（hlp_event.events.global_seq），
+# 新任务的事件不再被 since 过滤；本脚本同时校验 seq 单调不跳号。
 #
 # 用法：
 #   bash bench/p2/scripts/run-events.sh [-n 5]

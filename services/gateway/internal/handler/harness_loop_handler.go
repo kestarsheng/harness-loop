@@ -596,7 +596,9 @@ func (h *HarnessLoopHandler) MonitorStream(c *gin.Context) {
 	c.Writer.Flush()
 
 	// Catch-up phase: replay everything after last_seq before switching to
-	// the live stream. ListEvents uses seq > since, so replays never repeat.
+	// the live stream. Both last_seq and HarnessEvent.seq carry the tenant-wide
+	// global_seq, so replays never repeat and never skip (a brand-new task no
+	// longer restarts at seq=1 and gets filtered out).
 	since := lastSeq
 	for {
 		resp, listErr := client.ListEvents(ctx, &harnesspb.ListEventsRequest{
@@ -686,7 +688,8 @@ func writeSSEEvent(w gin.ResponseWriter, e *harnesspb.HarnessEvent) bool {
 		"event_type":     e.EventType,
 		"schema_version": e.SchemaVersion,
 		"task_id":        e.TaskId,
-		"seq":            e.Seq,
+		// seq 是租户级 global_seq：前端 lastSeqRef 用它补拉，per-task 序号在这里不成立。
+		"seq":          e.Seq,
 		"timestamp_ms":   e.TimestampMs,
 		"severity":       e.Severity,
 		"tenant_id":      e.TenantId,

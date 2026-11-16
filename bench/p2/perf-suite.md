@@ -16,11 +16,13 @@
 | 3 | 代码混合检索 | P95 ≤ 500ms | **P95 36ms / P99 46ms**（50 query × 10 轮 = 500 次，0 失败） | PASS |
 | 4 | 记忆召回 | P95 ≤ 300ms | 未测到端到端 | **偏差**（缺 embedding 服务，见 4.2） |
 | 5 | 阶段验收 | P95 ≤ 10s（程序路径） | **P95 13.58s**（含 `go build`）／**< 1ms**（纯进程内判据） | **偏差 + 归因**（见 4.3） |
-| 6 | 事件端到端 | P95 ≤ 1s | **P95 402ms**（5 任务全收）／**P95 527ms 但只收到 11% 事件**（50 任务） | **达标但漏事件**（见 4.1，P0 级） |
+| 6 | 事件端到端 | P95 ≤ 1s | **P95 785ms，200/200 事件全收**（50 任务，T-P2-17 修复后复跑） | PASS（见 4.1） |
 | 7 | 50 卡片大屏 | 单帧 ≤ 16ms，无内存增长 | 服务端数据面已压；**前端帧率未测** | **偏差**（见 4.4） |
 | 8 | 20 并发内存 | RSS ≤ 4GB；单任务 ≤ 256MB | **峰值 40.67MB；单任务增量 0.59MB** | PASS |
 
-一句总结：**索引、检索、内存三类余量充足（一到两个数量级），验收卡在子进程开销上，事件流则不是慢而是漏——这条必须在 P2 出口前修掉。**
+一句总结：**索引、检索、内存三类余量充足（一到两个数量级），验收卡在子进程开销上；事件流原先是「漏」不是「慢」（11% 收集率），T-P2-17 换租户级 `global_seq` 游标后复跑 200/200、P95 785ms，已消除。**
+
+> 修订记录：T-P2-17（事件游标语义修复）合入后，本报告复跑了 3.3 的事件场景并重写了 4.1（原「P0 未修复」→「已修复」）。其余章节维持 T-P2-T1 当时的实测，未重新计时。
 
 ## 2. 基准环境（可复现的前提）
 
@@ -68,14 +70,14 @@ vector 路为 0 不是 bug：夹具索引时 embedding 传 nil，向量列全为
 
 链路：`harnessloop-service 写 hlp_event.events` → `gateway WatchEvents(gRPC)` → `MonitorStream(SSE)` → 客户端。延迟 = 本地收到时刻 − 事件自带 `timestamp_ms`（同机同钟，无偏差）。
 
-| 规模 | 事件 | P50 | P95 | P99 | Max |
+| 规模 | 事件（收/应发） | P50 | P95 | P99 | Max |
 |---|---|---|---|---|---|
-| 5 源任务 | 20/20 全收 | 261 ms | **402 ms** | 402 ms | 417 ms |
-| 50 源任务 | **22/200（11%）** | 405 ms | 527 ms | 557 ms | 580 ms |
+| 5 源任务 | 20/20（100%） | 248 ms | **539 ms** | 539 ms | 550 ms |
+| 50 源任务 | **200/200（100%）** | 475 ms | **785 ms** | 865 ms | 883 ms |
 
-P95 都在 1s 内，但 50 任务那行的「事件」列才是重点：**应到 200 条，实到 22 条**。延迟数字再好看也不能掩盖丢了 89% 的事件——见 4.1。
+上一版这里 50 任务那行是 **22/200（11%）**：`seq` 是 per-task 序号却被当跨任务游标用，新任务的事件被 `seq > since` 整段滤掉。T-P2-17 把游标换成租户级 `global_seq` 后复跑，**200 条全收、`seq` 单调无跳号、补拉不重不漏**，延迟仍留 21% 余量。复跑与判定口径见 4.1。
 
-延迟本身主要来自服务端 500ms 的 `WatchEvents` 轮询 ticker（`grpc_handler.go:348`），均匀分布下均值约 250ms，与实测 P50 = 261ms 吻合。也就是说这条链是**轮询驱动的伪推送**，P95 的余量来自 tick 周期而非网络。
+延迟本身主要来自服务端 500ms 的 `WatchEvents` 轮询 ticker（`grpc_handler.go:348`），均匀分布下均值约 250ms，与实测 P50 = 475ms 的量级吻合（50 任务时数据库侧还要分摊 50 个任务的并发写入）。也就是说这条链是**轮询驱动的伪推送**，P95 的余量来自 tick 周期而非网络。
 
 ### 3.4 验收（DFX-P-06）
 
@@ -121,9 +123,11 @@ RSS 曲线（间隔约 200–400ms，20 任务全程在跑）：
 
 ## 4. 偏差与缺陷（按严重度）
 
-### 4.1 P0｜事件流整段丢失：`seq` 是 per-task 的，却被跨任务当游标用
+### 4.1 已修复（原 P0）｜事件流整段丢失：`seq` 是 per-task 的，却被跨任务当游标用
 
-**现象**：50 个任务并发，预期 200 条 `stage.transition`，SSE 只收到 **22 条（11%）**，且分布在 9 个 task 上、每个 task 只有第一条（`seq=1`）能过。
+**状态**：T-P2-17 修复并复跑通过（50 任务 **200/200，100%**）。以下保留原始定位过程，作为「怎么把 11% 找出来」的记录。
+
+**原现象**：50 个任务并发，预期 200 条 `stage.transition`，SSE 只收到 **22 条（11%）**，且分布在 9 个 task 上、每个 task 只有第一条（`seq=1`）能过。
 
 **根因**（两处代码合起来才成立）：
 
@@ -143,12 +147,30 @@ RSS 曲线（间隔约 200–400ms，20 任务全程在跑）：
 
 **影响**：DFX-P-07 直接不达标（不是延迟，是完整性）；DFX-P-08 的 50 卡片大屏将以同样比例丢事件，卡片状态会停在半路。**这是大屏可用性问题，不是性能问题。**
 
-**为什么本任务没修**：修复点在 `services/harnessloop-service/**` 与 `services/gateway/**`，不在 T-P2-T1 的文件域（`bench/p2/**`）。按任务约定停下回报，归实现线处理。可能的修法（供参考，未验证）：
-- 方案 A：把 `seq` 改成租户级全局序列（`nextval` 或租户级 `MAX(seq)+1`），游标语义自洽；
-- 方案 B：游标改为 `(task_id, seq)` 二元组或 `timestamp_ms + event_id`，SQL 改成 `WHERE (ts, event_id) > ($1, $2)`；
-- 方案 C：`WatchFrom` 按 `taskIDs` 分组取 `MAX(seq)`，游标也按任务存 map。
+**修复（T-P2-17，方案 A：租户级全局序列）**：
 
-**当前压测如何取得可用数字**：`events` 程序带 `-purge` 先清空本租户事件，使 catch-up 为空、`since` 停在 0，此时实时流不被误滤。5 任务那行（20/20 全收、P95 402ms）就是在这个条件下测到的**真实推送延迟**；50 任务那行的漏事件比例则是缺陷本身的证据。两个数字分别代表「链路速度」与「链路完整性」，不要混读。
+1. `014_event_global_seq.sql` 给 `hlp_event.events` 加 `global_seq bigint`，按 `ROW_NUMBER() OVER (PARTITION BY tenant_id ORDER BY ts, event_id)` 回填存量行，并加唯一约束 `(tenant_id, global_seq)`；迁移幂等、列保持可空（滚动升级期旧版本仍可写入）。
+2. `event_repo.Append` 在事务内先取 `pg_advisory_xact_lock(hashtext(tenant))`，再用 `INSERT ... SELECT COALESCE(MAX(global_seq),0)+1` 分配，写入在租户维度严格单调；`task_repo` 的状态转移事件走同一把锁、同一口径。**没有应用层缓存**。
+3. `List` / `WatchFrom` 改成 `WHERE tenant_id=$1 AND global_seq > $2 ORDER BY global_seq`；`seq` 仍是任务内序号（唯一约束 `(task_id, seq)` 与 Checkpoint 的 `event_seq_watermark` 不动）。
+4. proto 的 `since_seq` / `next_since_seq` / `HarnessEvent.seq` 字段名保留、语义改为 `global_seq`，注释已写明；网关 `last_seq` 随之语义一致，前端字段不用改。
+
+**复跑证据**（`bash bench/p2/scripts/run-events.sh -n 50`，同一台机、同一 PG 容器）：
+
+| 指标 | 修复前 | 修复后 |
+|---|---|---|
+| 收到 / 应发 | 22 / 200（**11%**） | **200 / 200（100%）** |
+| 覆盖 task 数 | 9 / 50 | **50 / 50** |
+| P95 | 527 ms | 785 ms |
+| `seq` 单调 | —（per-task 混读） | 单调、**0 跳号** |
+| 补拉（`last_seq` 回放最后 3 条） | 语义错位，未测 | 正好 3 条、连续、不重不漏 |
+
+复跑时 `events` 程序的分母不再是「任务数 × 4」的硬编码，而是 `SELECT count(*) FROM hlp_event.events WHERE tenant_id=$1 AND task_id = ANY($2)`；分子按 `event_id` 去重。`seq` 跳号判定跑在**未按 task 过滤**的原始流上——大屏订阅的是整个租户，子任务的事件本来就占号，用「只留本轮任务」的样本判跳号会误报（上一轮就误报过 11 次）。
+
+### 4.1.1 事件游标仍有的边界（不阻塞验收）
+
+- **租户内子集订阅会出现「跳号」**：`WatchEvents` 支持按 `task_ids` 过滤，此时客户端只看到部分任务的事件，`global_seq` 自然不连续。这不是漏事件——是别的任务占号。大屏与 CLI 都是整租户订阅，不受影响。
+- **`global_seq` 与 `ts` 不保证同序**：并发写入时两个事务的提交顺序与 `ts` 先后可能相反；`global_seq` 的语义是「分配顺序」，用 `ts` 排序的报表不要拿它当时间轴。
+- **回滚会烧号**：事务回滚会把分配过的 `global_seq` 一起回滚（`MAX+1` 从表里读，不落计数器），所以正常情况下连续；但如果写入路径将来改成独立计数器表，就要接受「回滚留下空洞」。当前实现不留空洞。
 
 ### 4.2 记忆召回（DFX-P-05）未取得端到端数字
 
@@ -179,7 +201,7 @@ DFX-P-08 要求「50 卡片 × 1s × 10min，主线程单帧 ≤ 16ms」。本�
 
 - **vector 路缺数据**：代码检索与记忆召回的向量路都因夹具/环境没有 embedding 而空跑（见 3.2、4.2）。
 - **事件流长度**：`WatchEvents` 是 500ms 轮询，P95 天然带 500ms 量级的下限；若未来要求 P95 < 200ms，必须改成真推送（LISTEN/NOTIFY 或内存扇出），不能靠调小 tick。
-- **断线补齐未实测**：DFX-P-07 后半句「断线重连 5s 内补齐」依赖 `last_seq`，而 `last_seq` 正是 4.1 里被证明语义错位的那个值。游标语义修好之前，这项测了也没有意义。
+- **断线补齐**：游标语义修好后已实测——用倒数第 3 条之前的 `last_seq` 重连，网关 catch-up 回放的正好是最后 3 条、`global_seq` 连续、`synced` 帧把 `last_seq` 推到最新（见 4.1 复跑表）。「5s 内补齐」的时延本身没有单独压测，但补齐路径是一次 `ListEvents`，5 任务场景同一接口 P95 在 200ms 量级。
 - **内存口径**：见 3.5，桩负载，不含真实模型上下文。
 
 ## 5. 复现
@@ -199,6 +221,8 @@ bash bench/p2/scripts/run-events.sh -n 5
 bash bench/p2/scripts/run-events.sh -n 50
 bash bench/p2/scripts/run-memload.sh -n 20
 ```
+
+首次跑需要 `bench/p2/scripts/runtime/harnessloop.yaml` 与 `gateway.yaml`（`runtime/` 已 gitignore）：前者填 PG DSN，后者须给 `services.harness_loop: 127.0.0.1:50008` 与 `http_port: 9000`（`NewChatHandler` 用空 target 会直接 panic）。`lib-service.sh` 会从当前源码重建 harnessloop-service / gateway / fakeagent 三个二进制——网关也在被测链路上，用上一轮遗留的 `gateway.exe` 会测到旧游标语义。
 
 产物一律写 `bench/p2/scripts/runtime/`：
 
@@ -230,6 +254,14 @@ bash bench/p2/scripts/run-memload.sh -n 20
 | `bench/p2/scripts/cmd/acceptbench/` | 新增 | 验收压测程序 |
 | `bench/p2/scripts/testdata/acceptfix/` | 新增 | 验收判据用的最小可构建工作区 |
 | `bench/p2/scripts/runtime/*.yaml` | 新增 | 压测运行时配置（DSN、端口、关闭记忆与审批依赖） |
+
+T-P2-17 复核时的改动（第 2 次修订）：
+
+| 路径 | 类型 | 说明 |
+|---|---|---|
+| `bench/p2/scripts/cmd/events/main.go` | 修改 | 增加收集率（分母取服务端 `count(*)`，分子按 `event_id` 去重）、`seq` 单调/跳号判定、`last_seq` 补拉探针 |
+| `bench/p2/scripts/lib-service.sh` | 修改 | 构建列表补上 `gateway.exe`（原来漏了，复跑会用到上一轮的旧二进制） |
+| `bench/p2/scripts/run-events.sh` | 修改 | 头部注释去掉「必须 purge 才能绕开缺陷」的旧说明 |
 
 未触碰：`pkg/codeindex/**`、`bench/repo-500/**`（只读）、`services/**`、`go.mod`。
 

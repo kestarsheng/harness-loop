@@ -331,8 +331,8 @@ func (h *Handler) ListEvents(ctx context.Context, req *harnesspb.ListEventsReque
 	resp := &harnesspb.ListEventsResponse{}
 	for _, e := range events {
 		resp.Events = append(resp.Events, toProtoEvent(e))
-		if e.Seq > resp.NextSinceSeq {
-			resp.NextSinceSeq = e.Seq
+		if e.GlobalSeq > resp.NextSinceSeq {
+			resp.NextSinceSeq = e.GlobalSeq
 		}
 	}
 	if len(events) == 0 {
