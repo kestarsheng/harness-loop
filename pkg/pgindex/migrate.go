@@ -45,7 +45,8 @@ func (db *DB) Migrate(ctx context.Context) error {
 		_, _ = conn.Exec(context.Background(), `SELECT pg_advisory_unlock($1)`, migrationLockKey)
 	}()
 
-	// 001_mem.sql / 002_code.sql 使用 vector(1024)，但 11 份 DDL 内均不创建扩展。
+	// 001_mem.sql / 002_code.sql 使用 vector(1024)，但全部 DDL 内均不创建扩展
+	// （当前 013 份，新增迁移时无需再改这句）。
 	// 空库必须在应用 DDL 前由迁移器自建，不能依赖运维手工安装（T-P1-30）。
 	// 放在 advisory lock 之后，避免多实例同时 CREATE EXTENSION 的竞态。
 	if _, err := conn.Exec(ctx, `CREATE EXTENSION IF NOT EXISTS vector`); err != nil {
