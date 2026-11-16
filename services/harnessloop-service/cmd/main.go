@@ -28,12 +28,15 @@ import (
 	"agent-platform/pkg/harnessloop/policy"
 	"agent-platform/pkg/harnessloop/policy/sandbox"
 	"agent-platform/pkg/harnessloop/retry"
+	"agent-platform/pkg/harnessloop/tracing"
 	"agent-platform/pkg/llm"
+	"agent-platform/pkg/observability"
 	codeindexpb "agent-platform/pkg/pb/codeindex"
 	harnesspb "agent-platform/pkg/pb/harnessloop"
 	"agent-platform/pkg/pgindex"
 	"agent-platform/services/harnessloop-service/internal/config"
 	"agent-platform/services/harnessloop-service/internal/handler"
+	"agent-platform/services/harnessloop-service/internal/metrics"
 	"agent-platform/services/harnessloop-service/internal/repository"
 	"agent-platform/services/harnessloop-service/internal/service"
 )
@@ -67,6 +70,33 @@ func main() {
 
 	rootCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// Tracing and metrics share the OTel pipeline (design 10.1/10.3). Metrics are
+	// also exposed directly on /metrics so a scrape works without a collector.
+	if tp, err := observability.InitServiceTracing("harnessloop-service"); err != nil {
+		log.Printf("harnessloop: otel init failed: %v", err)
+	} else if tp != nil {
+		defer func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = tp.Shutdown(ctx)
+		}()
+	}
+	metricsHarness := metrics.NewHarness()
+	metricsAddr := os.Getenv("HARNESSLOOP_METRICS_ADDR")
+	if metricsAddr == "" {
+		metricsAddr = ":9108"
+	}
+	if metricsAddr != "off" {
+		if srv := metricsHarness.Reg.Serve(metricsAddr); srv != nil {
+			defer func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				defer cancel()
+				_ = srv.Shutdown(ctx)
+			}()
+			log.Printf("harnessloop: metrics on %s/metrics", metricsAddr)
+		}
+	}
 
 	db, err := pgindex.Open(rootCtx, pgindex.Config{
 		DSN:                cfg.Postgres.DSN,
@@ -123,7 +153,7 @@ func main() {
 		log.Printf("harnessloop: agent client unavailable: %v", err)
 	} else {
 		defer agentClient.Close()
-		stages = service.NewStageRunner(agentClient).WithEvents(publisher)
+		stages = service.NewStageRunner(agentClient).WithEvents(publisher).WithTracer(tracing.NewTracer("harnessloop-tools"))
 	}
 
 	flags, flagErr := config.LoadFlagSet(cfg.FeatureFlags.File)
@@ -148,6 +178,8 @@ func main() {
 	}
 
 	runtime := service.NewRuntime(taskRepo, attemptRepo, stages)
+	runtime.Metrics = metricsHarness
+	runtime.Tracer = tracing.NewTracer("harnessloop-service")
 	runtime.Events = publisher
 	runtime.Checkpoints = checkpointRepo
 	runtime.Policy = retryPolicy
@@ -165,7 +197,7 @@ func main() {
 		}
 		log.Printf("harnessloop: model strategy bridge enabled")
 	}
-	orchestratorBridge := service.NewOrchestratorBridge(flagDefault(flags, config.FlagOrchestratorEnabled), emitter, subtaskExecutor(agentClient, cfg))
+	orchestratorBridge := service.NewOrchestratorBridge(flagDefault(flags, config.FlagOrchestratorEnabled), emitter, subtaskExecutor(agentClient, cfg, metricsHarness, tracing.NewTracer("harnessloop-subtasks")))
 	runtime.Orchestrator = orchestratorBridge
 	if orchestratorBridge.Enabled() {
 		if agentClient != nil {
@@ -330,15 +362,18 @@ func buildApprovalGate(cfg config.Config) (service.ToolApprovalGate, error) {
 	return client, nil
 }
 
-func subtaskExecutor(client *harnessclient.Client, cfg config.Config) service.SubtaskExecutor {
+func subtaskExecutor(client *harnessclient.Client, cfg config.Config, harness *metrics.Harness, tracer *tracing.Tracer) service.SubtaskExecutor {
 	if client == nil {
 		return nil
 	}
-	return service.NewAgentSubtaskExecutor(client, service.SubtaskExecutorConfig{
+	executor := service.NewAgentSubtaskExecutor(client, service.SubtaskExecutorConfig{
 		EntryAgent: cfg.Agent.EntryAgent,
 		Model:      cfg.Agent.StageModel,
 		Timeout:    time.Duration(cfg.Agent.TimeoutSeconds) * time.Second,
 	})
+	executor.Metrics = harness
+	executor.Tracer = tracer
+	return executor
 }
 
 func buildPolicy(cfg config.Config) (*policy.Engine, error) {

@@ -13,6 +13,7 @@ import (
 	"agent-platform/pkg/harnessloop/event"
 	"agent-platform/pkg/harnessloop/fsm"
 	"agent-platform/pkg/harnessloop/retry"
+	"agent-platform/pkg/harnessloop/tracing"
 	agentpb "agent-platform/pkg/pb/agent"
 	"agent-platform/services/harnessloop-service/internal/watchdog"
 
@@ -93,6 +94,7 @@ type StageRunner struct {
 	agents AgentStreamer
 	events EventPublisher
 	gate   ToolGate
+	tracer *tracing.Tracer
 }
 
 func NewStageRunner(agents AgentStreamer) *StageRunner {
@@ -101,6 +103,13 @@ func NewStageRunner(agents AgentStreamer) *StageRunner {
 
 func (r *StageRunner) WithEvents(p EventPublisher) *StageRunner {
 	r.events = p
+	return r
+}
+
+// WithTracer records tool spans under the ambient stage span supplied by the
+// runtime, so a trace explains tool invocation and policy denials.
+func (r *StageRunner) WithTracer(t *tracing.Tracer) *StageRunner {
+	r.tracer = t
 	return r
 }
 
@@ -209,6 +218,7 @@ func (r *StageRunner) Run(ctx context.Context, in StageRunInput) (*StageRunResul
 		}
 
 		if tc := chunk.ToolCall; tc != nil {
+			attrs := map[string]string{"model_id": in.StageModel}
 			if r.gate != nil && !fsm.IsStageFinishTool(tc.Name) {
 				gateErr := r.gate.AuthorizeTool(ctx, ToolCallInput{
 					TenantID: in.TenantID, ProjectID: in.ProjectID, TaskID: in.TaskID,
@@ -216,11 +226,15 @@ func (r *StageRunner) Run(ctx context.Context, in StageRunInput) (*StageRunResul
 					Tool: tc.Name, Arguments: []byte(tc.Arguments),
 				})
 				if gateErr != nil {
+					attrs["policy_decision"] = "deny"
+					r.tracer.StartToolFromContext(ctx, tc.Name, attrs).End()
 					res.Classification = &retry.Classification{Category: retry.System, Retryable: false, Reason: gateErr.Error()}
 					res.Decision = retry.FinishDecision{Action: retry.ActionFail, Category: retry.System, Reason: gateErr.Error()}
 					return gateErr
 				}
+				attrs["policy_decision"] = "allow"
 			}
+			r.tracer.StartToolFromContext(ctx, tc.Name, attrs).End()
 			tracker.Touch(watchdog.ActivityToolResult)
 			if fsm.IsStageFinishTool(tc.Name) {
 				args, perr := fsm.ParseStageFinish([]byte(tc.Arguments))

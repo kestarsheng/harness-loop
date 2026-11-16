@@ -12,7 +12,9 @@ import (
 	"time"
 
 	"agent-platform/pkg/harnessloop/subtask"
+	"agent-platform/pkg/harnessloop/tracing"
 	agentpb "agent-platform/pkg/pb/agent"
+	"agent-platform/services/harnessloop-service/internal/metrics"
 )
 
 // SubtaskExecutorConfig carries the agent-service parameters a subtask run
@@ -30,6 +32,10 @@ type SubtaskExecutorConfig struct {
 type AgentSubtaskExecutor struct {
 	agents AgentStreamer
 	cfg    SubtaskExecutorConfig
+
+	// Metrics and Tracer are optional; nil values are no-ops.
+	Metrics *metrics.Harness
+	Tracer  *tracing.Tracer
 }
 
 func NewAgentSubtaskExecutor(agents AgentStreamer, cfg SubtaskExecutorConfig) *AgentSubtaskExecutor {
@@ -55,6 +61,14 @@ func (e *AgentSubtaskExecutor) Execute(ctx context.Context, ec OrchestratorStage
 
 	runCtx, cancel := context.WithTimeout(ctx, e.cfg.Timeout)
 	defer cancel()
+
+	startedAt := time.Now()
+	subtaskStatus := "completed"
+	defer func() {
+		e.Metrics.Subtask(subtaskStatus, st.Role, time.Since(startedAt), st.ParallelSetID)
+	}()
+	subtaskSpan := e.Tracer.StartSubtaskFromContext(runCtx, st.SubtaskID, st.DagID, st.Depth, st.Role, st.ParentTaskID)
+	defer subtaskSpan.End()
 
 	req := &agentpb.ExecuteStreamRequest{
 		SessionId:       subtaskSessionID(ec.TaskID, st.SubtaskID),
@@ -108,14 +122,17 @@ func (e *AgentSubtaskExecutor) Execute(ctx context.Context, ec OrchestratorStage
 		return nil
 	})
 	if err != nil {
+		subtaskStatus = "failed"
 		return nil, fmt.Errorf("subtask %s: execute stream: %w", st.SubtaskID, err)
 	}
 	if streamErr != "" {
+		subtaskStatus = "failed"
 		return nil, fmt.Errorf("subtask %s: agent stream error: %s", st.SubtaskID, streamErr)
 	}
 
 	artifacts, artErr := collectSubtaskArtifacts(ec.WorkspaceRoot, st)
 	if artErr != nil {
+		subtaskStatus = "failed"
 		return nil, fmt.Errorf("subtask %s: %w", st.SubtaskID, artErr)
 	}
 	result.Artifacts = artifacts
