@@ -151,6 +151,8 @@ message HarnessEvent {
   string span_id = 6;
   optional string stage = 7;
   optional int32 attempt = 8;
+  // seq 字段名保留，语义为租户级全局游标（hlp_event.events.global_seq），
+  // 不再是任务内序号：客户端用它推进 since / last_seq 与跨任务去重。
   int64 seq = 9;
   int64 timestamp_ms = 10;
   string severity = 11;
@@ -172,17 +174,21 @@ message ListEventsRequest {
   string stage = 3;
   string event_type = 4;
   string severity = 5;
+  // since_seq 是 global_seq 下界（不含），不是任务内 seq。
   int64 since_seq = 6;
   int32 limit = 7;
 }
 
 message ListEventsResponse {
   repeated HarnessEvent events = 1;
+  // next_since_seq 是本次返回的最大 global_seq，可直接作为下一次 since_seq。
   int64 next_since_seq = 2;
 }
 
 message WatchEventsRequest {
   string tenant_id = 1;
+  // since_seq 是 global_seq 下界（不含）；新任务的事件与老任务共用同一条序列，
+  // 因此不会再被「新任务 seq 从 1 开始」整段滤掉。
   int64 since_seq = 2;
   repeated string task_ids = 3;
 }

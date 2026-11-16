@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -18,8 +19,10 @@ type EventFilter struct {
 	Stage     string
 	EventType string
 	Severity  string
-	SinceSeq  int64
-	Limit     int
+	// SinceSeq 是租户级游标（global_seq），不是任务内序号：List 返回
+	// global_seq > SinceSeq 的事件，按 global_seq 升序。
+	SinceSeq int64
+	Limit    int
 }
 
 type EventRepo struct {
@@ -32,13 +35,6 @@ func (r *EventRepo) Append(ctx context.Context, tenantID, projectID string, even
 	if len(events) == 0 {
 		return 0, nil
 	}
-	tx, err := r.db.Pool().Begin(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("event_repo: begin: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	inserted := 0
 	for _, e := range events {
 		if e == nil {
 			continue
@@ -49,15 +45,41 @@ func (r *EventRepo) Append(ctx context.Context, tenantID, projectID string, even
 		if e.ProjectID == "" {
 			e.ProjectID = projectID
 		}
+	}
+
+	tx, err := r.db.Pool().Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("event_repo: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// global_seq 必须在租户维度严格单调。MAX(global_seq)+1 的读-改-写只有在
+	// 「同租户同时只有一个写事务」时才成立，所以先取租户级 advisory 事务锁；
+	// 锁随事务提交/回滚释放，不留在应用层（应用层缓存会跨进程漂移）。
+	// 多租户批次按租户 ID 排序取锁，避免两个批次以相反顺序互锁。
+	for _, t := range batchTenants(events) {
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, t); err != nil {
+			return 0, fmt.Errorf("event_repo: lock tenant %s: %w", t, err)
+		}
+	}
+
+	inserted := 0
+	for _, e := range events {
+		if e == nil {
+			continue
+		}
 		if err := e.Validate(); err != nil {
 			return 0, err
 		}
+		// 分配与插入合成一条语句：子查询读的是本事务可见的最新 MAX，
+		// 因此同一批内逐条 +1，ON CONFLICT 跳过的行也不会留下空洞。
 		tag, err := tx.Exec(ctx, `
 			INSERT INTO hlp_event.events
 				(event_id, task_id, tenant_id, project_id, seq, event_type, schema_version, stage, attempt,
 				 severity, trace_id, span_id, ts, payload, payload_ref, agent_id,
-				 parent_task_id, subtask_id, handoff_id, dag_id, dag_node_id)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,NULLIF($8,''),NULLIF($9,0),$10,NULLIF($11,''),NULLIF($12,''),$13,$14,NULLIF($15,''),NULLIF($21,''),NULLIF($16,''),NULLIF($17,''),NULLIF($18,''),NULLIF($19,''),NULLIF($20,''))
+				 parent_task_id, subtask_id, handoff_id, dag_id, dag_node_id, global_seq)
+			SELECT $1,$2,$3,$4,$5,$6,$7,NULLIF($8,''),NULLIF($9,0),$10,NULLIF($11,''),NULLIF($12,''),$13,$14,NULLIF($15,''),NULLIF($21,''),NULLIF($16,''),NULLIF($17,''),NULLIF($18,''),NULLIF($19,''),NULLIF($20,''),
+			       COALESCE((SELECT MAX(g.global_seq) FROM hlp_event.events g WHERE g.tenant_id = $3), 0) + 1
 			ON CONFLICT (event_id) DO NOTHING`,
 			e.EventID, e.TaskID, e.TenantID, e.ProjectID, e.Seq, string(e.EventType), e.SchemaVersion,
 			e.Stage, e.Attempt, string(e.Severity), e.TraceID, e.SpanID, e.Timestamp, e.Payload, e.PayloadRef,
@@ -73,10 +95,28 @@ func (r *EventRepo) Append(ctx context.Context, tenantID, projectID string, even
 	return inserted, nil
 }
 
+// batchTenants 返回去重并按字典序排列的租户集合（取 advisory 锁的顺序）。
+func batchTenants(events []*eventpkg.Event) []string {
+	seen := make(map[string]struct{}, len(events))
+	out := make([]string, 0, len(events))
+	for _, e := range events {
+		if e == nil || e.TenantID == "" {
+			continue
+		}
+		if _, ok := seen[e.TenantID]; ok {
+			continue
+		}
+		seen[e.TenantID] = struct{}{}
+		out = append(out, e.TenantID)
+	}
+	sort.Strings(out)
+	return out
+}
+
 const eventColumns = `event_id, event_type, schema_version, task_id, COALESCE(trace_id,''), COALESCE(span_id,''),
 	COALESCE(stage,''), COALESCE(attempt,0), seq, ts, severity, tenant_id, project_id, COALESCE(agent_id,''),
 	payload, COALESCE(payload_ref,''), COALESCE(parent_task_id,''), COALESCE(subtask_id,''), COALESCE(handoff_id,''),
-	COALESCE(dag_id,''), COALESCE(dag_node_id,'')`
+	COALESCE(dag_id,''), COALESCE(dag_node_id,''), COALESCE(global_seq,0)`
 
 func scanEvent(s rowScanner) (*eventpkg.Event, error) {
 	var (
@@ -85,7 +125,8 @@ func scanEvent(s rowScanner) (*eventpkg.Event, error) {
 	)
 	if err := s.Scan(&e.EventID, &typ, &e.SchemaVersion, &e.TaskID, &e.TraceID, &e.SpanID,
 		&e.Stage, &e.Attempt, &e.Seq, &e.Timestamp, &sev, &e.TenantID, &e.ProjectID, &e.AgentID,
-		&e.Payload, &e.PayloadRef, &e.ParentTaskID, &e.SubtaskID, &e.HandoffID, &e.DagID, &e.DagNodeID); err != nil {
+		&e.Payload, &e.PayloadRef, &e.ParentTaskID, &e.SubtaskID, &e.HandoffID, &e.DagID, &e.DagNodeID,
+		&e.GlobalSeq); err != nil {
 		return nil, err
 	}
 	e.EventType = eventpkg.EventType(typ)
@@ -105,8 +146,8 @@ func (r *EventRepo) List(ctx context.Context, f EventFilter) ([]*eventpkg.Event,
 		  AND ($3 = '' OR stage = $3)
 		  AND ($4 = '' OR event_type = $4)
 		  AND ($5 = '' OR severity = $5)
-		  AND seq > $6
-		ORDER BY seq
+		  AND global_seq > $6
+		ORDER BY global_seq
 		LIMIT $7`,
 		f.TenantID, f.TaskID, f.Stage, f.EventType, f.Severity, f.SinceSeq, limit)
 	if err != nil {
@@ -125,6 +166,9 @@ func (r *EventRepo) List(ctx context.Context, f EventFilter) ([]*eventpkg.Event,
 	return out, rows.Err()
 }
 
+// NextSeq 返回某任务的「任务内」最大 seq，仅用于 Checkpoint 的
+// event_seq_watermark 漂移判定（该水位与 seq 同口径，都是 per-task）。
+// 它是水位，不是游标：跨任务增量拉取一律用 global_seq，见 WatchFrom。
 func (r *EventRepo) NextSeq(ctx context.Context, tenantID, taskID string) (int64, error) {
 	var seq int64
 	err := r.db.QueryRow(ctx, `SELECT COALESCE(MAX(seq), 0) FROM hlp_event.events WHERE tenant_id = $1 AND task_id = $2`, tenantID, taskID).Scan(&seq)
@@ -141,9 +185,9 @@ func (r *EventRepo) WatchFrom(ctx context.Context, tenantID string, taskIDs []st
 	rows, err := r.db.Query(ctx, `SELECT `+eventColumns+`
 		FROM hlp_event.events
 		WHERE tenant_id = $1
-		  AND seq > $2
+		  AND global_seq > $2
 		  AND (COALESCE(cardinality($3::text[]), 0) = 0 OR task_id = ANY($3))
-		ORDER BY seq
+		ORDER BY global_seq
 		LIMIT $4`, tenantID, sinceSeq, taskIDs, limit)
 	if err != nil {
 		return nil, sinceSeq, fmt.Errorf("event_repo: watch: %w", err)
@@ -160,8 +204,8 @@ func (r *EventRepo) WatchFrom(ctx context.Context, tenantID string, taskIDs []st
 			return nil, sinceSeq, fmt.Errorf("event_repo: scan: %w", err)
 		}
 		out = append(out, e)
-		if e.Seq > last {
-			last = e.Seq
+		if e.GlobalSeq > last {
+			last = e.GlobalSeq
 		}
 	}
 	return out, last, rows.Err()

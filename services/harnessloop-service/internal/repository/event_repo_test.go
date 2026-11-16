@@ -135,7 +135,8 @@ func TestEventRepoPagination(t *testing.T) {
 	if err != nil || len(page1) != 2 {
 		t.Fatalf("page1: %v %d", err, len(page1))
 	}
-	page2, err := repo.List(ctx, EventFilter{TenantID: task.TenantID, TaskID: task.TaskID, SinceSeq: page1[len(page1)-1].Seq, Limit: 2})
+	// 分页游标是 global_seq（租户级），不是 per-task 的 Seq。
+	page2, err := repo.List(ctx, EventFilter{TenantID: task.TenantID, TaskID: task.TaskID, SinceSeq: page1[len(page1)-1].GlobalSeq, Limit: 2})
 	if err != nil || len(page2) != 2 {
 		t.Fatalf("page2: %v %d", err, len(page2))
 	}
@@ -168,15 +169,16 @@ func TestEventRepoWatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("watch: %v", err)
 	}
-	if len(got) != 2 || watermark != 2 {
+	// watermark 是该租户的 global_seq 上界，不是这两条事件的 per-task seq。
+	if len(got) != 2 || watermark != got[len(got)-1].GlobalSeq {
 		t.Fatalf("watch len=%d watermark=%d", len(got), watermark)
 	}
 	got, watermark, err = repo.WatchFrom(ctx, task.TenantID, []string{task.TaskID}, watermark, 10)
 	if err != nil {
 		t.Fatalf("watch: %v", err)
 	}
-	if len(got) != 0 || watermark != 2 {
-		t.Fatalf("idle watch len=%d watermark=%d", len(got), watermark)
+	if len(got) != 0 {
+		t.Fatalf("idle watch len=%d", len(got))
 	}
 }
 

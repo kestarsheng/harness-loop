@@ -21,6 +21,10 @@ type Event struct {
 	Stage         string
 	Attempt       int
 	Seq           int64
+	// GlobalSeq 是租户级事件游标（hlp_event.events.global_seq），由仓储层在写入
+	// 事务内分配；Seq 仍是任务内序号。WatchFrom / List / SSE 的 since 语义都基于
+	// GlobalSeq —— 拿 per-task 的 Seq 当跨任务游标会漏掉每个新任务的事件。
+	GlobalSeq     int64
 	Timestamp     time.Time
 	Severity      Severity
 	TenantID      string

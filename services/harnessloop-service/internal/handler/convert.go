@@ -64,7 +64,9 @@ func toProtoEvent(e *event.Event) *harnesspb.HarnessEvent {
 		TaskId:        e.TaskID,
 		TraceId:       e.TraceID,
 		SpanId:        e.SpanID,
-		Seq:           e.Seq,
+		// proto 的 seq 字段名保留，语义改为租户级全局游标（global_seq）：
+		// 客户端（网关 SSE、CLI、前端）都拿它推进 since，per-task 序号不再出网。
+		Seq:           e.GlobalSeq,
 		TimestampMs:   e.Timestamp.UnixMilli(),
 		Severity:      string(e.Severity),
 		TenantId:      e.TenantID,

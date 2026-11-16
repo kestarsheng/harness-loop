@@ -297,14 +297,21 @@ func insertEvent(ctx context.Context, tx pgx.Tx, tenantID, taskID string, e Even
 	if len(payload) == 0 {
 		payload = []byte("{}")
 	}
+	// 状态转移也会直接写事件，必须与 EventRepo.Append 共用同一把租户锁：
+	// global_seq 的分配是「锁内 MAX+1」，两条写路径若不串行就会撞唯一约束
+	// (tenant_id, global_seq)，或者让全局游标出现回退。
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, tenantID); err != nil {
+		return fmt.Errorf("task_repo: lock tenant %s for event cursor: %w", tenantID, err)
+	}
 	_, err := tx.Exec(ctx, `
 		INSERT INTO hlp_event.events
-			(event_id, task_id, tenant_id, project_id, seq, event_type, schema_version, stage, attempt, severity, ts, payload)
+			(event_id, task_id, tenant_id, project_id, seq, event_type, schema_version, stage, attempt, severity, ts, payload, global_seq)
 		SELECT $1, $2, $3, t.project_id,
 		       CASE WHEN $4 > 0 THEN $4
 		            ELSE (SELECT COALESCE(MAX(e2.seq), 0) + 1 FROM hlp_event.events e2 WHERE e2.task_id = $2 AND e2.tenant_id = $3)
 		       END,
-		       $5, $6, NULLIF($7, ''), NULLIF($8, 0), $9, now(), $10
+		       $5, $6, NULLIF($7, ''), NULLIF($8, 0), $9, now(), $10,
+		       COALESCE((SELECT MAX(g.global_seq) FROM hlp_event.events g WHERE g.tenant_id = $3), 0) + 1
 		FROM hlp_task.task_runs t WHERE t.task_id = $2 AND t.tenant_id = $3`,
 		e.EventID, taskID, tenantID, e.Seq, e.EventType, schema, string(e.Stage), e.Attempt, severity, payload)
 	if err != nil {

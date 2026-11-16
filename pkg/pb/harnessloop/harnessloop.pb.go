@@ -1102,19 +1102,21 @@ type HarnessEvent struct {
 	SpanId        string  `protobuf:"bytes,6,opt,name=span_id,json=spanId,proto3" json:"span_id,omitempty"`
 	Stage         *string `protobuf:"bytes,7,opt,name=stage,proto3,oneof" json:"stage,omitempty"`
 	Attempt       *int32  `protobuf:"varint,8,opt,name=attempt,proto3,oneof" json:"attempt,omitempty"`
-	Seq           int64   `protobuf:"varint,9,opt,name=seq,proto3" json:"seq,omitempty"`
-	TimestampMs   int64   `protobuf:"varint,10,opt,name=timestamp_ms,json=timestampMs,proto3" json:"timestamp_ms,omitempty"`
-	Severity      string  `protobuf:"bytes,11,opt,name=severity,proto3" json:"severity,omitempty"`
-	TenantId      string  `protobuf:"bytes,12,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`
-	ProjectId     string  `protobuf:"bytes,13,opt,name=project_id,json=projectId,proto3" json:"project_id,omitempty"`
-	AgentId       string  `protobuf:"bytes,14,opt,name=agent_id,json=agentId,proto3" json:"agent_id,omitempty"`
-	Payload       []byte  `protobuf:"bytes,15,opt,name=payload,proto3" json:"payload,omitempty"`
-	PayloadRef    string  `protobuf:"bytes,16,opt,name=payload_ref,json=payloadRef,proto3" json:"payload_ref,omitempty"`
-	ParentTaskId  string  `protobuf:"bytes,17,opt,name=parent_task_id,json=parentTaskId,proto3" json:"parent_task_id,omitempty"`
-	SubtaskId     string  `protobuf:"bytes,18,opt,name=subtask_id,json=subtaskId,proto3" json:"subtask_id,omitempty"`
-	HandoffId     string  `protobuf:"bytes,19,opt,name=handoff_id,json=handoffId,proto3" json:"handoff_id,omitempty"`
-	DagId         string  `protobuf:"bytes,20,opt,name=dag_id,json=dagId,proto3" json:"dag_id,omitempty"`
-	DagNodeId     string  `protobuf:"bytes,21,opt,name=dag_node_id,json=dagNodeId,proto3" json:"dag_node_id,omitempty"`
+	// seq 字段名保留，语义为租户级全局游标（hlp_event.events.global_seq），
+	// 不再是任务内序号：客户端用它推进 since / last_seq 与跨任务去重。
+	Seq          int64  `protobuf:"varint,9,opt,name=seq,proto3" json:"seq,omitempty"`
+	TimestampMs  int64  `protobuf:"varint,10,opt,name=timestamp_ms,json=timestampMs,proto3" json:"timestamp_ms,omitempty"`
+	Severity     string `protobuf:"bytes,11,opt,name=severity,proto3" json:"severity,omitempty"`
+	TenantId     string `protobuf:"bytes,12,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`
+	ProjectId    string `protobuf:"bytes,13,opt,name=project_id,json=projectId,proto3" json:"project_id,omitempty"`
+	AgentId      string `protobuf:"bytes,14,opt,name=agent_id,json=agentId,proto3" json:"agent_id,omitempty"`
+	Payload      []byte `protobuf:"bytes,15,opt,name=payload,proto3" json:"payload,omitempty"`
+	PayloadRef   string `protobuf:"bytes,16,opt,name=payload_ref,json=payloadRef,proto3" json:"payload_ref,omitempty"`
+	ParentTaskId string `protobuf:"bytes,17,opt,name=parent_task_id,json=parentTaskId,proto3" json:"parent_task_id,omitempty"`
+	SubtaskId    string `protobuf:"bytes,18,opt,name=subtask_id,json=subtaskId,proto3" json:"subtask_id,omitempty"`
+	HandoffId    string `protobuf:"bytes,19,opt,name=handoff_id,json=handoffId,proto3" json:"handoff_id,omitempty"`
+	DagId        string `protobuf:"bytes,20,opt,name=dag_id,json=dagId,proto3" json:"dag_id,omitempty"`
+	DagNodeId    string `protobuf:"bytes,21,opt,name=dag_node_id,json=dagNodeId,proto3" json:"dag_node_id,omitempty"`
 }
 
 func (x *HarnessEvent) Reset() {
@@ -1306,8 +1308,9 @@ type ListEventsRequest struct {
 	Stage     string `protobuf:"bytes,3,opt,name=stage,proto3" json:"stage,omitempty"`
 	EventType string `protobuf:"bytes,4,opt,name=event_type,json=eventType,proto3" json:"event_type,omitempty"`
 	Severity  string `protobuf:"bytes,5,opt,name=severity,proto3" json:"severity,omitempty"`
-	SinceSeq  int64  `protobuf:"varint,6,opt,name=since_seq,json=sinceSeq,proto3" json:"since_seq,omitempty"`
-	Limit     int32  `protobuf:"varint,7,opt,name=limit,proto3" json:"limit,omitempty"`
+	// since_seq 是 global_seq 下界（不含），不是任务内 seq。
+	SinceSeq int64 `protobuf:"varint,6,opt,name=since_seq,json=sinceSeq,proto3" json:"since_seq,omitempty"`
+	Limit    int32 `protobuf:"varint,7,opt,name=limit,proto3" json:"limit,omitempty"`
 }
 
 func (x *ListEventsRequest) Reset() {
@@ -1396,8 +1399,9 @@ type ListEventsResponse struct {
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
 
-	Events       []*HarnessEvent `protobuf:"bytes,1,rep,name=events,proto3" json:"events,omitempty"`
-	NextSinceSeq int64           `protobuf:"varint,2,opt,name=next_since_seq,json=nextSinceSeq,proto3" json:"next_since_seq,omitempty"`
+	Events []*HarnessEvent `protobuf:"bytes,1,rep,name=events,proto3" json:"events,omitempty"`
+	// next_since_seq 是本次返回的最大 global_seq，可直接作为下一次 since_seq。
+	NextSinceSeq int64 `protobuf:"varint,2,opt,name=next_since_seq,json=nextSinceSeq,proto3" json:"next_since_seq,omitempty"`
 }
 
 func (x *ListEventsResponse) Reset() {
@@ -1451,7 +1455,9 @@ type WatchEventsRequest struct {
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
 
-	TenantId string   `protobuf:"bytes,1,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`
+	TenantId string `protobuf:"bytes,1,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`
+	// since_seq 是 global_seq 下界（不含）；新任务的事件与老任务共用同一条序列，
+	// 因此不会再被「新任务 seq 从 1 开始」整段滤掉。
 	SinceSeq int64    `protobuf:"varint,2,opt,name=since_seq,json=sinceSeq,proto3" json:"since_seq,omitempty"`
 	TaskIds  []string `protobuf:"bytes,3,rep,name=task_ids,json=taskIds,proto3" json:"task_ids,omitempty"`
 }

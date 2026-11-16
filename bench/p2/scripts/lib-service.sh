@@ -40,6 +40,9 @@ build_binaries() {
   log "building harnessloop-service / fakeagent / gateway"
   ( cd "$REPO_ROOT" && go build -o "$BIN_DIR/harnessloop-service.exe" ./services/harnessloop-service/cmd )
   ( cd "$REPO_ROOT" && go build -o "$BIN_DIR/fakeagent.exe" ./scripts/fakeagent )
+  # 网关也在被测链路上（WatchEvents → SSE），必须与本次源码同版本重建：
+  # 用上一轮遗留的 gateway.exe 会测到旧二进制，游标语义新旧混跑。
+  ( cd "$REPO_ROOT" && go build -o "$BIN_DIR/gateway.exe" ./services/gateway/cmd )
 }
 
 kill_named() {

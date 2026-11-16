@@ -157,6 +157,8 @@ func TestSchemaMatchesDesign(t *testing.T) {
 		{"hlp_task.model_selections", "is_fallback"},
 		{"hlp_task.model_selections", "approval_id"},
 		{"hlp_task.model_selections", "operator"},
+		// 014_event_global_seq.sql：事件游标列。
+		{"hlp_event.events", "global_seq"},
 		// 013_code_chunks_symbol.sql 的索引列必须真实存在于表上。
 		{"hlp_code.code_chunks", "tenant_id"},
 		{"hlp_code.code_chunks", "project_id"},
@@ -237,6 +239,7 @@ func TestSchemaMatchesDesign(t *testing.T) {
 
 	assertModelSelectionComboIndex(t, db)
 	assertCodeChunksSymbolIndex(t, db)
+	assertEventGlobalSeqIndex(t, db)
 
 	applied, err := AppliedMigrations(ctx, db)
 	if err != nil {
@@ -375,6 +378,21 @@ func assertModelSelectionComboIndex(t *testing.T, db *DB) {
 	}
 	if !strings.Contains(def, "(stage, model_id)") {
 		t.Fatalf("idx_model_selection_combo columns mismatch: %s", def)
+	}
+}
+
+func assertEventGlobalSeqIndex(t *testing.T, db *DB) {
+	t.Helper()
+	var def string
+	if err := db.QueryRow(context.Background(), `
+		SELECT indexdef FROM pg_indexes
+		WHERE schemaname = 'hlp_event'
+		  AND tablename = 'events'
+		  AND indexname = 'uq_events_tenant_global_seq'`).Scan(&def); err != nil {
+		t.Fatalf("uq_events_tenant_global_seq missing: %v", err)
+	}
+	if !strings.Contains(def, "UNIQUE") || !strings.Contains(def, "(tenant_id, global_seq)") {
+		t.Fatalf("uq_events_tenant_global_seq columns mismatch: %s", def)
 	}
 }
 

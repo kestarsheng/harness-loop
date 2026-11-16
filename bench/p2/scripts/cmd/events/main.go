@@ -7,10 +7,10 @@
 //
 // 延迟 = 本地收到时刻 − 事件自带的 timestamp_ms。两端同机同钟，无时钟偏差。
 //
-// 一个坑必须绕开：SSE 连接建立时会先做 catch-up 回放历史事件（last_seq 之前
-// 的全部事件），那些事件的 timestamp_ms 可能是几十分钟前，直接统计会把 P95
-// 拉到分钟级，得到完全错误的结论。所以本程序只统计「本轮创建的任务」产生的
-// 事件——用 task_id 集合过滤，而不是用时间窗猜。
+// 一行必须说清的口径：本程序同时报「延迟」和「收集率」。延迟只统计本轮任务的
+// 事件（历史回放的事件 timestamp 是几十分钟前，混进来会把 P95 拉到分钟级）；
+// 收集率的分母取自服务端数据库，不是「任务数 × 4」这种硬编码——FSM 路径不同，
+// 每个任务产生的事件条数不固定。分子按 event_id 去重。
 //
 // 用法：
 //
@@ -65,6 +65,13 @@ type result struct {
 	StreamURL    string          `json:"stream_url"`
 	Tasks        int             `json:"tasks"`
 	Events       int             `json:"events"`
+	Expected     int             `json:"expected_events"`
+	Missing      int             `json:"missing_events"`
+	Collected    float64         `json:"collection_rate"`
+	SeqMonotonic bool            `json:"seq_monotonic"`
+	SeqGaps      int             `json:"seq_gaps"`
+	CatchupOK    bool            `json:"catchup_no_dup_no_gap"`
+	CatchupSeq   []int64         `json:"catchup_seqs"`
 	Dropped      int             `json:"dropped_before_tasks"`
 	P50Ms        float64         `json:"p50_ms"`
 	P95Ms        float64         `json:"p95_ms"`
@@ -105,30 +112,28 @@ func main() {
 		fmt.Fprintf(os.Stderr, "events: purged %d rows for tenant %s\n", n, tenantID)
 	}
 
-	streamURL := fmt.Sprintf("%s/api/v2/harness-loop/monitor/stream?tenant=%s&last_seq=0", *base, tenantID)
+	streamBase := fmt.Sprintf("%s/api/v2/harness-loop/monitor/stream?tenant=%s", *base, tenantID)
+	streamURL := streamBase + "&last_seq=0"
 
 	ctx, cancel := context.WithTimeout(context.Background(), *wait+60*time.Second)
 	defer cancel()
 
 	res := result{
-		Name:      "events_e2e",
-		StartedAt: time.Now().Format(time.RFC3339),
-		Base:      *base,
-		StreamURL: streamURL,
-		Tasks:     *tasks,
-		ByType:    map[string]int{},
-		Budgets:   map[string]bool{},
+		Name:         "events_e2e",
+		StartedAt:    time.Now().Format(time.RFC3339),
+		Base:         *base,
+		StreamURL:    streamURL,
+		Tasks:        *tasks,
+		SeqMonotonic: true,
+		ByType:       map[string]int{},
+		Budgets:      map[string]bool{},
 	}
 
 	// 收集端：先连 SSE，等 catch-up 结束（收到 synced）再算「就绪」。
 	//
-	// 过滤只能用 task_id，不能用 seq——这是被实测推翻的：
-	// hlp_event.events 的 seq 是 per-task 自增（`SELECT MAX(seq) WHERE task_id`），
-	// 不是租户级全局序列。新任务的第一个事件 seq 又是 1，拿 catch-up 的
-	// last_seq 当下界会把本轮事件 100% 误判为历史（第一次跑就是这么丢光的）。
-	//
-	// 所以这里全收，最后按本轮 createdIDs 过一遍。catch-up 回放的历史事件
-	// 天然属于别的 task_id，会被这道过滤摘掉。
+	// 过滤只用 task_id：seq 在 T-P2-17 之后是租户级全局游标（global_seq），
+	// 游标本身已经可信，但 catch-up 回放的历史事件仍然会混进来，用本轮
+	// createdIDs 过一遍最省事，也不依赖时间窗。
 	var (
 		mu       sync.Mutex
 		samples  []arrival
@@ -260,8 +265,18 @@ func main() {
 	time.Sleep(800 * time.Millisecond)
 
 	mu.Lock()
-	// 最终再按本轮 task_id 过一遍：seq 下界能排除回放，但排除不掉「同一租户
-	// 上其它客户端刚写的事件」——压测机上没有别人，仍做这道过滤以防串味。
+	// seq 是租户级 global_seq：整路 SSE（不做 task 过滤）必须严格递增且逐条 +1。
+	// 必须在校验完 raw 流之后再按 task_id 过滤——大屏订阅的是整个租户，子任务、
+	// 别的任务的事件本来就会占号；用「只留本轮任务」的样本去判跳号会误报。
+	for i := 1; i < len(samples); i++ {
+		if samples[i].Seq <= samples[i-1].Seq {
+			res.SeqMonotonic = false
+		}
+		if samples[i].Seq > samples[i-1].Seq+1 {
+			res.SeqGaps++
+		}
+	}
+	// 过滤只用 task_id：回放的历史事件与本轮无关，延迟也只能按本轮任务算。
 	mine := make(map[string]bool, len(createdIDs))
 	for _, id := range createdIDs {
 		mine[id] = true
@@ -273,6 +288,7 @@ func main() {
 		}
 	}
 	dropped += len(samples) - len(kept)
+	allSamples := append([]arrival(nil), samples...)
 	samples = kept
 
 	res.Events = len(samples)
@@ -287,6 +303,30 @@ func main() {
 	}
 	mu.Unlock()
 
+	// 收集率的分母来自服务端数据库：本轮任务实际落库了多少条事件。
+	uniq := make(map[string]bool, len(samples))
+	for _, s := range samples {
+		uniq[s.EventID] = true
+	}
+	if *dsn != "" {
+		expected, countErr := countEvents(ctx, *dsn, tenantID, createdIDs)
+		if countErr != nil {
+			res.Notes = append(res.Notes, "collection rate unavailable: "+countErr.Error())
+		} else {
+			res.Expected = expected
+			res.Missing = expected - len(uniq)
+			if res.Missing < 0 {
+				res.Missing = 0
+			}
+			if expected > 0 {
+				res.Collected = float64(len(uniq)) / float64(expected)
+			}
+			res.Budgets["collection_rate_100"] = expected > 0 && len(uniq) >= expected
+		}
+	} else {
+		res.Notes = append(res.Notes, "collection rate not measured: -dsn not set")
+	}
+
 	sort.Float64s(lags)
 	res.P50Ms = pctF(lags, 50)
 	res.P95Ms = pctF(lags, 95)
@@ -298,6 +338,36 @@ func main() {
 		res.FirstEventMs = firstEventAt.Sub(createStart).Milliseconds()
 	}
 
+	// 补拉校验：从倒数第 3 条之前重连一次，catch-up 必须正好回放最后 3 条、
+	// global_seq 连续、不重不漏，且 synced 的 last_seq 推到当前最新。
+	rawMax := int64(0)
+	for _, s := range allSamples {
+		if s.Seq > rawMax {
+			rawMax = s.Seq
+		}
+	}
+	if rawMax > 3 {
+		from := rawMax - 3
+		seqs, synced, probeErr := catchupProbe(ctx, streamBase, from)
+		res.CatchupSeq = seqs
+		if probeErr != nil {
+			res.Notes = append(res.Notes, "catch-up probe failed: "+probeErr.Error())
+		} else {
+			ok := len(seqs) == 3 && synced == rawMax
+			for i, s := range seqs {
+				if s != from+int64(i)+1 {
+					ok = false
+				}
+			}
+			res.CatchupOK = ok
+			res.Budgets["catchup_no_dup_no_gap"] = ok
+			if !ok {
+				res.Notes = append(res.Notes, fmt.Sprintf(
+					"catch-up replayed %v from %d, synced=%d, want %d", seqs, from, synced, rawMax))
+			}
+		}
+	}
+
 	res.Hardware = map[string]any{
 		"os":     "windows/amd64",
 		"link":   "harnessloop-service -> gateway SSE -> client (loopback)",
@@ -305,12 +375,74 @@ func main() {
 	}
 	res.Budgets["p95_le_budget"] = res.P95Ms <= *budget
 	res.Budgets["events_observed"] = res.Events > 0
+	res.Budgets["seq_monotonic_no_gap"] = res.SeqMonotonic && res.SeqGaps == 0
 	res.Passed = res.Budgets["p95_le_budget"] && res.Budgets["events_observed"]
+	if rate, ok := res.Budgets["collection_rate_100"]; ok {
+		res.Passed = res.Passed && rate
+	}
+	if ok, exists := res.Budgets["catchup_no_dup_no_gap"]; exists {
+		res.Passed = res.Passed && ok
+	}
 	if res.Events == 0 {
 		res.Notes = append(res.Notes, "no event carried a task_id created in this run; check tenant filtering")
 	}
 
 	emit(res, *out)
+}
+
+// catchupProbe 用指定的 last_seq 重连一次，返回 catch-up 阶段（synced 之前）
+// 收到的事件 seq 与网关上报的 last_seq。
+func catchupProbe(ctx context.Context, streamBase string, from int64) ([]int64, int64, error) {
+	pctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	url := fmt.Sprintf("%s&last_seq=%d", streamBase, from)
+	req, err := http.NewRequestWithContext(pctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	req.Header.Set("Accept", "text/event-stream")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, 0, fmt.Errorf("SSE status %d", resp.StatusCode)
+	}
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	var (
+		evName, dataLine string
+		seqs             []int64
+	)
+	for scanner.Scan() {
+		line := scanner.Text()
+		switch {
+		case strings.HasPrefix(line, "event:"):
+			evName = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+		case strings.HasPrefix(line, "data:"):
+			dataLine = strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		case line == "":
+			if evName == "harness" && dataLine != "" {
+				var ev sseEvent
+				if err := json.Unmarshal([]byte(dataLine), &ev); err == nil {
+					seqs = append(seqs, ev.Seq)
+				}
+			}
+			if evName == "synced" {
+				var meta struct {
+					LastSeq int64 `json:"last_seq"`
+				}
+				_ = json.Unmarshal([]byte(dataLine), &meta)
+				return seqs, meta.LastSeq, nil
+			}
+			evName, dataLine = "", ""
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return seqs, 0, err
+	}
+	return seqs, 0, fmt.Errorf("stream ended before synced")
 }
 
 func pctF(sorted []float64, p float64) float64 {
@@ -323,12 +455,25 @@ func pctF(sorted []float64, p float64) float64 {
 
 func ctx0() context.Context { return context.Background() }
 
-// purgeEvents 清掉指定租户的历史事件，等于把大屏刚打开时的空库场景复现出来。
-//
-// 为什么必须清：网关 SSE 的 catch-up 会把 since 推到历史最大 seq，
-// 而 hlp_event.events.seq 是 per-task 自增，新任务又是从 1 开始，
-// 于是 WatchFrom 的 `seq > since` 会把新任务的事件永久滤掉（详见报告偏差项）。
-// 清空后 since 停在 0，测到的才是真实推送延迟。
+// countEvents 是收集率的分母：本轮任务在服务端实际落库的事件条数。
+func countEvents(ctx context.Context, dsn, tenant string, taskIDs []string) (int, error) {
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = conn.Close(ctx) }()
+	var n int
+	if err := conn.QueryRow(ctx,
+		`SELECT count(*) FROM hlp_event.events WHERE tenant_id = $1 AND task_id = ANY($2)`,
+		tenant, taskIDs).Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+// purgeEvents 清掉指定租户的历史事件，把大屏刚打开时的空库场景复现出来：
+// 清空后 client 的游标停在 0，测到的才是「纯实时推送」，不会混入 catch-up 回放的
+// 历史事件。T-P2-17 修好游标语义后这不再是绕开缺陷的手段，只是口径选择。
 func purgeEvents(ctx context.Context, dsn, tenant string) (int64, error) {
 	conn, err := pgx.Connect(ctx, dsn)
 	if err != nil {
