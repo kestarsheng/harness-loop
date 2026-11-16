@@ -1,0 +1,13 @@
+{
+  "cpu_model": "Intel(R) Core(TM) Ultra 5 125H",
+  "cores": 18,
+  "ram_gb": 32,
+  "os": "windows/amd64",
+  "go_version": "go1.22.12",
+  "pg_version": "postgres 16 + pgvector（专用实例，端口见 HARNESS_TEST_PG_DSN）",
+  "gomaxprocs": 8,
+  "concurrency": 4,
+  "insert_batch": 200,
+  "batch_size": 32,
+  "note": "基准机：18 逻辑核（14 物理核）/ 32GB 宿主，PG 与 pgvector 跑在同一台机器的独立实例上（端口见 HARNESS_TEST_PG_DSN）。GOMAXPROCS 固定 8（而非 18），让「索引与检索抢 CPU」的场景更接近线上小规格；换机器跑时 hardware_match=false，数字不可直接对比。"
+}

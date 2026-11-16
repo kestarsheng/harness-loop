@@ -71,7 +71,7 @@ func NewRootCmd() *cobra.Command {
 	pf.BoolVar(&opts.JSON, "json", false, "emit JSON envelope")
 	pf.BoolVar(&opts.NoColor, "no-color", false, "disable colored output")
 
-	root.AddCommand(newLoopCmd(), newRunCmd(), newStatusCmd(), newAbortCmd(), newResumeCmd(), newLogsCmd(), newKBCmd(), newVersionCmd())
+	root.AddCommand(newLoopCmd(), newRunCmd(), newStatusCmd(), newAbortCmd(), newResumeCmd(), newLogsCmd(), newKBCmd(), newIndexCmd(), newVersionCmd())
 	return root
 }
 

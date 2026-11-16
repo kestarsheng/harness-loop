@@ -1,0 +1,106 @@
+{
+  "snapshot": {
+    "name": "repo-500",
+    "files": 500,
+    "total_bytes": 1437169,
+    "digest": "sha256:a19bf169980db008e20916f06d0fcfad087e3d16247769ed3ff33c25129d1a59",
+    "generator_version": 1
+  },
+  "hardware": {
+    "cpu_model": "Intel64 Family 6 Model 170 Stepping 4, GenuineIntel",
+    "cores": 18,
+    "ram_gb": 32,
+    "os": "windows/amd64",
+    "go_version": "go1.22.12",
+    "pg_version": "postgres 16.15 (Debian 16.15-1.pgdg12+2)",
+    "gomaxprocs": 8,
+    "concurrency": 4,
+    "insert_batch": 200,
+    "batch_size": 32,
+    "note": "基准机：18 逻辑核（14 物理核）/ 32GB 宿主，PG 与 pgvector 跑在同一台机器的独立实例上（端口见 HARNESS_TEST_PG_DSN）。GOMAXPROCS 固定 8（而非 18），让「索引与检索抢 CPU」的场景更接近线上小规格；换机器跑时 hardware_match=false，数字不可直接对比。"
+  },
+  "hardware_reference": {
+    "cpu_model": "Intel(R) Core(TM) Ultra 5 125H",
+    "cores": 18,
+    "ram_gb": 32,
+    "os": "windows/amd64",
+    "go_version": "go1.22.12",
+    "pg_version": "postgres 16 + pgvector（专用实例，端口见 HARNESS_TEST_PG_DSN）",
+    "gomaxprocs": 8,
+    "concurrency": 4,
+    "insert_batch": 200,
+    "batch_size": 32,
+    "note": "基准机：18 逻辑核（14 物理核）/ 32GB 宿主，PG 与 pgvector 跑在同一台机器的独立实例上（端口见 HARNESS_TEST_PG_DSN）。GOMAXPROCS 固定 8（而非 18），让「索引与检索抢 CPU」的场景更接近线上小规格；换机器跑时 hardware_match=false，数字不可直接对比。"
+  },
+  "hardware_match": true,
+  "dsn_host": "***@127.0.0.1:55432/agent_platform?sslmode=disable",
+  "full_index": {
+    "name": "full_index",
+    "files": 500,
+    "indexed": 500,
+    "skipped": 0,
+    "failed": 0,
+    "chunks": 5994,
+    "edges": 15482,
+    "bytes": 1437169,
+    "elapsed_ms": 6197,
+    "files_per_sec": 80.67140812330102,
+    "p50_ms": 42,
+    "p95_ms": 83,
+    "p99_ms": 126,
+    "max_ms": 158
+  },
+  "single_file_sample": {
+    "name": "single_file_sample",
+    "files": 20,
+    "indexed": 20,
+    "skipped": 0,
+    "failed": 0,
+    "chunks": 237,
+    "edges": 611,
+    "bytes": 0,
+    "elapsed_ms": 823,
+    "files_per_sec": 24.29807124340277,
+    "p50_ms": 37,
+    "p95_ms": 60,
+    "p99_ms": 64,
+    "max_ms": 64
+  },
+  "batch_100": {
+    "name": "batch_100",
+    "files": 100,
+    "indexed": 100,
+    "skipped": 0,
+    "failed": 0,
+    "chunks": 1195,
+    "edges": 3085,
+    "bytes": 285505,
+    "elapsed_ms": 1054,
+    "files_per_sec": 94.85786876375913,
+    "p50_ms": 38,
+    "p95_ms": 55,
+    "p99_ms": 66,
+    "max_ms": 72
+  },
+  "search_probe": {
+    "probes": 12,
+    "ok": 12,
+    "failed": 0,
+    "success_rate": 100,
+    "p50_ms": 43,
+    "p95_ms": 60,
+    "max_ms": 60
+  },
+  "verify_hits": 5,
+  "budgets": {
+    "batch100_p95_le_60s": true,
+    "full_index_searchable": true,
+    "probe_success_100": true,
+    "single_p95_le_2s": true,
+    "single_p99_le_5s": true
+  },
+  "passed": true,
+  "notes": [
+    "cpu string differs from reference (\"Intel64 Family 6 Model 170 Stepping 4, GenuineIntel\" vs \"Intel(R) Core(TM) Ultra 5 125H\") — informational only"
+  ]
+}
