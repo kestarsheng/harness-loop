@@ -89,7 +89,7 @@ func TestSearchCodeKeyword(t *testing.T) {
 	if hit.Snippet == "" || hit.ChunkID == "" || hit.Scores <= 0 {
 		t.Fatalf("hit must carry snippet/score: %+v", hit)
 	}
-	if len(hit.Sources) == 0 || hit.Sources[0] != "keyword" {
+	if len(hit.Sources) == 0 || hit.Sources[0] != codeindex.RouteFulltext {
 		t.Fatalf("sources = %v", hit.Sources)
 	}
 	if res.Stats.KeywordHits == 0 || res.Stats.LatencyMs < 0 {

@@ -157,7 +157,7 @@ func TestParseFailureDegradesToFileChunk(t *testing.T) {
 }
 
 func TestUnsupportedLanguageDegrades(t *testing.T) {
-	res := parseSample(t, "app.ts", "export function a() { return 1 }\n")
+	res := parseSample(t, "app.rb", "def a; end\n")
 	if !res.Degraded || len(res.Chunks) != 1 || res.Chunks[0].ChunkType != codeindex.ChunkFile {
 		t.Fatalf("unsupported language must degrade: %+v", res)
 	}

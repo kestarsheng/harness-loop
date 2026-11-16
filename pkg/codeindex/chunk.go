@@ -15,6 +15,7 @@ type ChunkType string
 const (
 	ChunkFunction     ChunkType = "function"
 	ChunkMethod       ChunkType = "method"
+	ChunkClass        ChunkType = "class"
 	ChunkHeader       ChunkType = "header"
 	ChunkFunctionPart ChunkType = "function_part"
 	ChunkFile         ChunkType = "file"
@@ -53,7 +54,10 @@ type ParseResult struct {
 	Imports  []string
 	Calls    []string
 	ParserID string
-	Degraded bool
+	// Capability is the fidelity level of the parser that produced this result:
+	// "full" (grammar/AST backed) or "regex" (heuristic). Empty when degraded.
+	Capability string
+	Degraded   bool
 }
 
 func ComputeContentHash(text string) string {

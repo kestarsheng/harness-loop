@@ -16,7 +16,12 @@ type SearchOptions struct {
 	TopK        int
 	RRFK        int
 	EnableGraph bool
-	Embedder    EmbedFunc
+	// GraphWeight 是图扩展路在 RRF 里的权重（默认 0.8），<0 视为 0。
+	GraphWeight float64
+	// GraphMaxNodes / GraphPerSymbol 限制扩展规模，<=0 走默认值。
+	GraphMaxNodes  int
+	GraphPerSymbol int
+	Embedder       EmbedFunc
 }
 
 type SearchHit struct {
@@ -32,12 +37,21 @@ type SearchHit struct {
 }
 
 type SearchStats struct {
-	VectorHits  int
-	KeywordHits int
-	GraphHits   int
-	Merged      int
-	LatencyMs   int64
+	VectorHits   int
+	KeywordHits  int
+	GraphHits    int
+	GraphCallers int
+	GraphCallees int
+	Merged       int
+	LatencyMs    int64
 }
+
+// 检索路名。fulltext/vector/graph 与 design 4.9.2、指标标签 hlp_recall_hit_total 一致。
+const (
+	RouteFulltext = "fulltext"
+	RouteVector   = "vector"
+	RouteGraph    = "graph"
+)
 
 func (w *CodeWriter) Search(ctx context.Context, opts SearchOptions) ([]SearchHit, SearchStats, error) {
 	start := time.Now()
@@ -72,20 +86,35 @@ func (w *CodeWriter) Search(ctx context.Context, opts SearchOptions) ([]SearchHi
 	if opts.EnableGraph {
 		symbols := collectSymbols(keywordRows, vectorRows)
 		if len(symbols) > 0 {
-			graphRows, err = w.graphSearch(ctx, opts.TenantID, opts.ProjectID, symbols, topK*2)
-			if err != nil {
-				graphRows = nil
+			neighbors, graphErr := w.GraphExpand(ctx, GraphExpandOptions{
+				TenantID:  opts.TenantID,
+				ProjectID: opts.ProjectID,
+				Seeds:     symbols,
+				MaxNodes:  opts.GraphMaxNodes,
+				PerSymbol: opts.GraphPerSymbol,
+			})
+			if graphErr == nil {
+				graphRows = neighborsToRows(neighbors)
+				for _, n := range neighbors {
+					switch n.Direction {
+					case GraphDirectionCaller:
+						stats.GraphCallers++
+					case GraphDirectionCallee:
+						stats.GraphCallees++
+					}
+				}
 			}
 		}
 	}
 	stats.GraphHits = len(graphRows)
 
 	routes := []rrf.Route{
-		toRoute("keyword", keywordRows),
-		toRoute("vector", vectorRows),
-		toRoute("graph", graphRows),
+		toRoute(RouteFulltext, keywordRows),
+		toRoute(RouteVector, vectorRows),
+		toRoute(RouteGraph, graphRows),
 	}
-	merged := rrf.New(rrfK).MergeRoutes(routes...)
+	weights := []float64{1, 1, graphWeight(opts.GraphWeight)}
+	merged := mergeWeighted(rrfK, routes, weights)
 
 	byID := map[string]chunkRow{}
 	for _, row := range append(append(append([]chunkRow{}, keywordRows...), vectorRows...), graphRows...) {
@@ -118,6 +147,56 @@ func (w *CodeWriter) Search(ctx context.Context, opts SearchOptions) ([]SearchHi
 	stats.Merged = len(hits)
 	stats.LatencyMs = time.Since(start).Milliseconds()
 	return hits, stats, nil
+}
+
+func graphWeight(weight float64) float64 {
+	switch {
+	case weight == 0:
+		return DefaultGraphWeight
+	case weight < 0:
+		return 0
+	default:
+		return weight
+	}
+}
+
+func neighborsToRows(neighbors []GraphNeighbor) []chunkRow {
+	rows := make([]chunkRow, 0, len(neighbors))
+	for i, n := range neighbors {
+		rows = append(rows, chunkRow{
+			chunkID:   n.ChunkID,
+			filePath:  n.FilePath,
+			startLine: n.StartLine,
+			endLine:   n.EndLine,
+			symbol:    n.Symbol,
+			snippet:   n.Snippet,
+			rank:      float64(len(neighbors) - i),
+		})
+	}
+	return rows
+}
+
+// mergeWeighted 在 pkg/rrf 的融合结果上按路权重重算分，
+// 公式同 design 4.9.1：score(d) = Σ w_r / (k + rank_r(d))，k 取默认 60。
+func mergeWeighted(rrfK int, routes []rrf.Route, weights []float64) []rrf.Hit {
+	fusion := rrf.New(rrfK)
+	merged := fusion.MergeRoutes(routes...)
+	denominator := rrfK
+	if denominator <= 0 {
+		denominator = rrf.DefaultK
+	}
+	for i := range merged {
+		score := 0.0
+		for routeIndex, rank := range merged[i].Ranks {
+			if rank < 0 || routeIndex >= len(weights) {
+				continue
+			}
+			score += weights[routeIndex] / float64(denominator+rank+1)
+		}
+		merged[i].RRFScore = score
+	}
+	rrf.StableSort(merged)
+	return merged
 }
 
 type chunkRow struct {
@@ -190,23 +269,6 @@ func (w *CodeWriter) vectorSearch(ctx context.Context, tenantID, projectID strin
 		LIMIT $4`, tenantID, projectID, vectorLiteral(vec), limit)
 	if err != nil {
 		return nil, fmt.Errorf("codeindex: vector search: %w", err)
-	}
-	defer rows.Close()
-	return scanChunkRows(rows)
-}
-
-func (w *CodeWriter) graphSearch(ctx context.Context, tenantID, projectID string, symbols []string, limit int) ([]chunkRow, error) {
-	rows, err := w.db.Query(ctx, `
-		SELECT c.chunk_id::text, c.file_path, c.start_line, c.end_line, COALESCE(c.symbol,''), left(c.content, 400), 0
-		FROM hlp_code.code_edges e
-		JOIN hlp_code.code_chunks c
-		  ON c.tenant_id = e.tenant_id AND c.project_id = e.project_id
-		 AND c.file_path = e.source_file AND c.symbol = e.source_symbol
-		WHERE e.tenant_id = $1 AND e.project_id = $2
-		  AND e.target_symbol = ANY($3)
-		LIMIT $4`, tenantID, projectID, symbols, limit)
-	if err != nil {
-		return nil, fmt.Errorf("codeindex: graph search: %w", err)
 	}
 	defer rows.Close()
 	return scanChunkRows(rows)

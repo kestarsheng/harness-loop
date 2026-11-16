@@ -15,6 +15,7 @@ require (
 	github.com/jackc/pgx/v5 v5.5.5
 	github.com/mattn/go-isatty v0.0.20
 	github.com/redis/go-redis/v9 v9.5.1
+	github.com/smacker/go-tree-sitter v0.0.0-20240827094217-dd81d9e9be82
 	github.com/spf13/cobra v1.8.1
 	go.mongodb.org/mongo-driver v1.14.0
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.49.0
