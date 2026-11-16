@@ -879,7 +879,7 @@
 
 > P1 合计：实施 31 个 + 测试 5 个 = **36 个任务**。
 
-## 3.3 P2：多语言索引、rerank 增强、调度优化、运维完善与 CLI 主线（20 个任务）
+## 3.3 P2：多语言索引、rerank 增强、调度优化、运维完善与 CLI 主线（21 个任务）
 
 ### T-P2-01 TypeScript / Python 解析
 
@@ -1121,7 +1121,19 @@
 | 验收标准 | 两终端链路全部通过；报告留档；真实终端目视无异常。 |
 | 复杂度 | M |
 
-> P2 合计：实施 15 个 + 测试 5 个 = **20 个任务**。
+### T-P2-16 租户池准入层流控
+
+| 字段 | 内容 |
+|---|---|
+| 目标 | 在调度层之前增加租户池准入校验：池剩余不足时给出可预期反馈，避免新父任务首字节延迟被最长在跑子任务钉死。 |
+| 关联需求 | REQ-128、REQ-138、DFX-R-08；design 4.13.3 / 4.13.8 |
+| 依赖 | T-P2-09、T-P2-10 |
+| 涉及文件 | [N] `pkg/harnessloop/orchestrator/admission.go`、[M] `pkg/harnessloop/orchestrator/fairness.go`、[M] `pkg/harnessloop/orchestrator/errors.go`、[N] `pkg/harnessloop/orchestrator/admission_test.go`、[M] `pkg/config/harness_loop/scheduler.yaml`（若存在） |
+| 实施要点 | 1) 在 `TenantFairness.CanAcquire` 之上提供 `Admit`：租户池剩余 ≥ 1 slot 才接单，不足返回可预期的排队/拒绝；2) 错误码**复用** `E_SCHEDULER_LIMIT_EXCEEDED` 并带 `reason=tenant_slots_full`，不新增错误码（新增码会破坏前端/CLI 错误字典）；若需程序化区分，增加结构化 `details.reason` 字段；3) 新增 `max_subtask_minutes` 配置，默认取 `min(阶段超时, 15min)`，作为衰减窗口上界，与父任务 `TimeoutMinutes` 解耦；4) 准入拒绝/排队需产生可观测记录（事件或结构化日志）；5) 保留调度层超额衰减作为兜底，不删除。 |
+| 验收标准 | 同租户存在 15 分钟级慢任务时，新父任务在准入层被拦下并返回 `E_SCHEDULER_LIMIT_EXCEEDED` + `reason=tenant_slots_full`；慢任务完成后新任务自动放行；`max_subtask_minutes` 生效且衰减窗口不再无限；`go test ./pkg/harnessloop/orchestrator/... -run "TestAdmission|TestFairness"` 全绿；`go build ./...`、depcheck 0。 |
+| 复杂度 | M |
+
+> P2 合计：实施 16 个 + 测试 5 个 = **21 个任务**。
 
 ---
 

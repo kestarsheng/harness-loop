@@ -52,12 +52,15 @@ func newRunCmd() *cobra.Command {
 			defer conn.Close()
 
 			ctx := callContext(cmd, tenant)
+			session := newSessionIdentity()
 			created, err := client.CreateTask(ctx, &harnesspb.CreateTaskRequest{
 				TenantId:      tenant,
 				ProjectId:     project,
 				WorkspaceRoot: workspace,
 				Goal:          goal,
 				Budget:        &harnesspb.Budget{Tokens: budgetTok, Cost: budgetCost},
+				SessionId:     session.ID,
+				TerminalLabel: session.Label,
 			})
 			if err != nil {
 				env := describeError(err)

@@ -76,12 +76,15 @@ func newLoopCmd() *cobra.Command {
 			}
 			defer conn.Close()
 
+			session := newSessionIdentity()
 			created, err := client.CreateTask(callContext(cmd, tenant), &harnesspb.CreateTaskRequest{
 				TenantId:      tenant,
 				ProjectId:     project,
 				WorkspaceRoot: workspace,
 				Goal:          goal,
 				Budget:        &harnesspb.Budget{Tokens: budgetTok, Cost: budgetCost},
+				SessionId:     session.ID,
+				TerminalLabel: session.Label,
 			})
 			if err != nil {
 				emit(cmd, describeError(err))
