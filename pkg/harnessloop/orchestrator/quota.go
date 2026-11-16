@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"sync"
@@ -28,11 +29,17 @@ type FairnessSettings struct {
 // QuotaConfig holds the scheduler limits from DFX-P-11 / U13-A. Defaults are
 // deliberately closed: raising them requires an explicit configuration change.
 type QuotaConfig struct {
-	MaxParallelPerParent int     `yaml:"max_parallel_per_parent"`
-	MaxAgentsPerTenant   int     `yaml:"max_agents_per_tenant"`
-	MaxDirectChildren    int     `yaml:"max_direct_children"`
-	MaxDepth             int     `yaml:"max_depth"`
-	TimeoutMinutes       int     `yaml:"timeout_minutes"`
+	MaxParallelPerParent int `yaml:"max_parallel_per_parent"`
+	MaxAgentsPerTenant   int `yaml:"max_agents_per_tenant"`
+	MaxDirectChildren    int `yaml:"max_direct_children"`
+	MaxDepth             int `yaml:"max_depth"`
+	TimeoutMinutes       int `yaml:"timeout_minutes"`
+	// MaxSubtaskMinutes bounds the admission decay window (T-P2-16): a subtask
+	// holding a tenant slot longer than this stops counting against new parents.
+	// Zero derives min(TimeoutMinutes, 15min). It is decoupled from
+	// TimeoutMinutes on purpose—the timeout fails the subtask, this window only
+	// stops it from pinning the tenant pool.
+	MaxSubtaskMinutes    int     `yaml:"max_subtask_minutes"`
 	DefaultSubtaskTokens int64   `yaml:"default_subtask_tokens"`
 	ParentBudgetTokens   int64   `yaml:"parent_budget_tokens"`
 	CircuitFailureRatio  float64 `yaml:"circuit_failure_ratio"`
@@ -69,7 +76,17 @@ func DefaultQuotaConfig() QuotaConfig {
 	}
 }
 
-// LoadQuotaConfig overlays YAML on the closed defaults.
+// quotaFileShape accepts both the flat form (keys at the document root) and the
+// design's dotted form (`subtask:` block), so the policy snapshot reads like
+// subtask.max_agents_per_tenant while flat snapshots keep working.
+type quotaFileShape struct {
+	Version     int `yaml:"version"`
+	QuotaConfig `yaml:",inline"`
+	Subtask     *QuotaConfig `yaml:"subtask"`
+}
+
+// LoadQuotaConfig overlays YAML on the closed defaults. Unknown keys are an
+// error: a typo in the policy snapshot must not silently fall back to defaults.
 func LoadQuotaConfig(path string) (QuotaConfig, error) {
 	cfg := DefaultQuotaConfig()
 	if path == "" {
@@ -79,8 +96,15 @@ func LoadQuotaConfig(path string) (QuotaConfig, error) {
 	if err != nil {
 		return cfg, fmt.Errorf("orchestrator: read quota config: %w", err)
 	}
-	if err := yaml.Unmarshal(raw, &cfg); err != nil {
+	shape := quotaFileShape{QuotaConfig: cfg}
+	decoder := yaml.NewDecoder(bytes.NewReader(raw))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&shape); err != nil {
 		return cfg, fmt.Errorf("orchestrator: parse quota config: %w", err)
+	}
+	cfg = shape.QuotaConfig
+	if shape.Subtask != nil {
+		cfg = *shape.Subtask
 	}
 	cfg.normalize()
 	return cfg, nil
@@ -102,6 +126,13 @@ func (c *QuotaConfig) normalize() {
 	}
 	if c.TimeoutMinutes <= 0 {
 		c.TimeoutMinutes = def.TimeoutMinutes
+	}
+	if c.MaxSubtaskMinutes <= 0 {
+		// 默认 min(阶段超时, 15min)：窗口不可能比子任务超时还长，也不必比 15 分钟更宽。
+		c.MaxSubtaskMinutes = c.TimeoutMinutes
+		if c.MaxSubtaskMinutes > DefaultMaxSubtaskMinutes {
+			c.MaxSubtaskMinutes = DefaultMaxSubtaskMinutes
+		}
 	}
 	if c.DefaultSubtaskTokens <= 0 {
 		c.DefaultSubtaskTokens = def.DefaultSubtaskTokens
