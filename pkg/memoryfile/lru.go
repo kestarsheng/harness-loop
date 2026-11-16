@@ -71,7 +71,7 @@ func NewStore(doc *Document, limits Limits) *Store {
 }
 
 // WithSink wires an EventSink into the store. Once wired, Get publishes
-// memory.lru_promoted whenever it actually moves a topic to the front, and
+// memory.promoted whenever it actually moves a topic to the front, and
 // Insert publishes memory.evicted as soon as an LRU victim is removed. Callers
 // no longer need to forward Writer.EmitPromotion / Store.DrainEvictions by hand.
 //

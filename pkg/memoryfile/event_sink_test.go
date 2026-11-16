@@ -30,7 +30,7 @@ func eventKeys(events []ChangeEvent, typ string) map[string]int {
 	return out
 }
 
-// Store.WithSink must publish memory.lru_promoted when Get actually reorders a
+// Store.WithSink must publish memory.promoted when Get actually reorders a
 // topic, and must not publish again when the topic is already at the front.
 func TestStoreGetAutoPublishesPromotedOncePerReorder(t *testing.T) {
 	_, store, _, sink := newWriterFixture(t)
@@ -141,6 +141,35 @@ func TestEvictedAndDeletedAreBothKept(t *testing.T) {
 	}
 	if eventKeys(sink.events, EventEvicted)["a"] != 1 {
 		t.Fatalf("evicted[a] = %d, want 1", eventKeys(sink.events, EventEvicted)["a"])
+	}
+}
+
+// G23 drift guard: the promoted event name must match the platform whitelist
+// entry event.MemoryPromoted ("memory.promoted"). This asserts the wire literal
+// rather than importing pkg/harnessloop/event, so the file layer keeps no
+// upward dependency while still failing loudly if the name is edited again.
+func TestPromotedEventNameMatchesPlatformWhitelist(t *testing.T) {
+	const whitelistedPromoted = "memory.promoted"
+	if EventPromoted != whitelistedPromoted {
+		t.Fatalf("EventPromoted = %q, want %q (platform whitelist)", EventPromoted, whitelistedPromoted)
+	}
+	_, store, _, sink := newWriterFixture(t)
+	for _, key := range []string{"a", "b"} {
+		if err := store.Insert(topicFor(key, CategoryUserPreference, "pref-"+key, false)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, ok := store.Get("a"); !ok {
+		t.Fatal("a must exist")
+	}
+	found := false
+	for _, e := range sink.events {
+		if e.Type == whitelistedPromoted {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no %q event emitted, got %+v", whitelistedPromoted, sink.count(whitelistedPromoted))
 	}
 }
 

@@ -5,11 +5,15 @@ import (
 	"time"
 )
 
+// Event type names emitted by the file layer. Every name here must exist in
+// the platform whitelist in pkg/harnessloop/event/types.go: the file layer owns
+// no event-name namespace of its own, and a name that is not whitelisted is
+// silently dropped at the publisher boundary (see G23: EventPromoted).
 const (
 	EventWritten      = "memory.written"
 	EventMerged       = "memory.merged"
 	EventEvicted      = "memory.evicted"
-	EventPromoted     = "memory.lru_promoted"
+	EventPromoted     = "memory.promoted"
 	EventCorrupted    = "memory.corrupted"
 	EventResync       = "memory.resync"
 	EventCapacityWarn = "memory.capacity_warning"
