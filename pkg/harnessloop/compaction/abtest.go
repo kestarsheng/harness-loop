@@ -30,6 +30,23 @@ type CompactionRun struct {
 	OutputRef                string    `json:"output_ref,omitempty"`
 	DurationMs               int64     `json:"duration_ms"`
 	CreatedAt                time.Time `json:"created_at"`
+
+	// EngineFragments 是已有统计字段的扩展位：仅当引擎适配器开启并真正产出片段时 >0。
+	// 关闭开关时为 0，CompactionEventPayload 不输出该键，事件 schema 保持不变。
+	EngineFragments int    `json:"engine_fragments,omitempty"`
+	EngineName      string `json:"engine_name,omitempty"`
+}
+
+// WithEngineFragments 在既有 run 记录上标记引擎片段产出，不改变其它字段语义。
+func (r CompactionRun) WithEngineFragments(engineName string, fragments int) CompactionRun {
+	if fragments < 0 {
+		fragments = 0
+	}
+	r.EngineFragments = fragments
+	if fragments > 0 {
+		r.EngineName = engineName
+	}
+	return r
 }
 
 func (r CompactionRun) Validate() error {
@@ -166,6 +183,13 @@ func CompactionEventPayload(run CompactionRun) map[string]any {
 	}
 	if run.OutputRef != "" {
 		payload["output_ref"] = run.OutputRef
+	}
+	// 仅在引擎真正产出片段时追加统计字段；关闭开关时 payload 与既有 schema 完全一致。
+	if run.EngineFragments > 0 {
+		payload["engine_fragment"] = run.EngineFragments
+		if run.EngineName != "" {
+			payload["engine_name"] = run.EngineName
+		}
 	}
 	return payload
 }
