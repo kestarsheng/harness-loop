@@ -26,6 +26,9 @@ type SearchOptions struct {
 	// GraphSeedDecay > 0 时按种子排名线性衰减扩展项权重（rank1 满权，每降一位减该步长）；
 	// <= 0 表示等权。
 	GraphSeedDecay float64
+	// GraphDirection 限定图扩展方向：caller / callee / both。
+	// 空串等同 both，与加方向维度前的行为完全一致；只改召回侧，不改权重与融合公式。
+	GraphDirection string
 	Embedder       EmbedFunc
 }
 
@@ -100,6 +103,7 @@ func (w *CodeWriter) Search(ctx context.Context, opts SearchOptions) ([]SearchHi
 				PerSymbol: opts.GraphPerSymbol,
 				SeedLimit: opts.GraphSeedLimit,
 				DecayStep: opts.GraphSeedDecay,
+				Direction: opts.GraphDirection,
 			})
 			if graphErr == nil {
 				graphRows = neighborsToRows(neighbors)
