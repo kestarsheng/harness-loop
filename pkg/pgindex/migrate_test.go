@@ -128,6 +128,7 @@ func TestMigrateIsIdempotent(t *testing.T) {
 		t.Fatalf("replay changed schema_migrations:\nfirst:  %+v\nsecond: %+v", first, second)
 	}
 	assertModelSelectionComboIndex(t, db)
+	assertCodeChunksSymbolIndex(t, db)
 }
 
 func TestSchemaMatchesDesign(t *testing.T) {
@@ -156,6 +157,10 @@ func TestSchemaMatchesDesign(t *testing.T) {
 		{"hlp_task.model_selections", "is_fallback"},
 		{"hlp_task.model_selections", "approval_id"},
 		{"hlp_task.model_selections", "operator"},
+		// 013_code_chunks_symbol.sql 的索引列必须真实存在于表上。
+		{"hlp_code.code_chunks", "tenant_id"},
+		{"hlp_code.code_chunks", "project_id"},
+		{"hlp_code.code_chunks", "symbol"},
 	}
 	for _, c := range cases {
 		var exists bool
@@ -231,6 +236,7 @@ func TestSchemaMatchesDesign(t *testing.T) {
 	}
 
 	assertModelSelectionComboIndex(t, db)
+	assertCodeChunksSymbolIndex(t, db)
 
 	applied, err := AppliedMigrations(ctx, db)
 	if err != nil {
@@ -369,6 +375,21 @@ func assertModelSelectionComboIndex(t *testing.T, db *DB) {
 	}
 	if !strings.Contains(def, "(stage, model_id)") {
 		t.Fatalf("idx_model_selection_combo columns mismatch: %s", def)
+	}
+}
+
+func assertCodeChunksSymbolIndex(t *testing.T, db *DB) {
+	t.Helper()
+	var def string
+	if err := db.QueryRow(context.Background(), `
+		SELECT indexdef FROM pg_indexes
+		WHERE schemaname = 'hlp_code'
+		  AND tablename = 'code_chunks'
+		  AND indexname = 'idx_code_chunks_symbol'`).Scan(&def); err != nil {
+		t.Fatalf("idx_code_chunks_symbol missing: %v", err)
+	}
+	if !strings.Contains(def, "(tenant_id, project_id, symbol)") {
+		t.Fatalf("idx_code_chunks_symbol columns mismatch: %s", def)
 	}
 }
 
