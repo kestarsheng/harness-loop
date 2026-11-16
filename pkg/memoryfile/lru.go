@@ -13,6 +13,12 @@ var (
 	ErrTooManyTopics    = errors.New("memoryfile: topic limit exceeded")
 )
 
+// capacityWarningType 是「全局记忆软上限」告警的类型名，只经由
+// Store.DrainWarnings 交给调用方读取。它不在平台事件白名单
+// (pkg/harnessloop/event/types.go) 里，也没有发布方，因此不作为 events.go
+// 中的导出事件名：内部预留，不接入事件流。
+const capacityWarningType = "memory.capacity_warning"
+
 type Limits struct {
 	MaxTopicsProject   int
 	MaxTopicsGlobal    int
@@ -214,7 +220,7 @@ func (s *Store) insertLocked(topic Topic) error {
 
 	if len(s.doc.Topics) >= max {
 		if softLimit {
-			s.warnings = append(s.warnings, Event{Type: "memory.capacity_warning", Key: topic.Key, Detail: fmt.Sprintf("global memory has %d topics (soft limit %d)", len(s.doc.Topics), max)})
+			s.warnings = append(s.warnings, Event{Type: capacityWarningType, Key: topic.Key, Detail: fmt.Sprintf("global memory has %d topics (soft limit %d)", len(s.doc.Topics), max)})
 			s.doc.UpsertTopic(topic, false)
 			return nil
 		}

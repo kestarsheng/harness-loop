@@ -4,6 +4,14 @@
 
 ## [Unreleased]
 
+### Changed
+
+- 记忆事件出口：memory-service 新增 `internal/events`（EventSink 契约 + 默认 `NoopSink` + 白名单校验），**暂不落库**——mdsync 只做 md→PG 派生索引，全链路从不构造 `memoryfile.Store`，没有真实的 LRU 提升/淘汰生产方；写 `hlp_event.events` 还需要解决 `task_id NOT NULL` 的语义缺口。
+
+### Removed
+
+- `memoryfile.EventCapacityWarn`：该事件名不在平台白名单且没有发送方，改为 `lru.go` 内部常量 `capacityWarningType`（内部预留，不接入事件流）。
+
 ## [0.2.0-p1] - 2026-11-13
 
 ### Added

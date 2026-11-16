@@ -154,7 +154,7 @@ func TestGlobalSoftLimitOnlyWarns(t *testing.T) {
 		t.Fatalf("global topics = %d, want no eviction", len(s.Document().Topics))
 	}
 	warnings := s.DrainWarnings()
-	if len(warnings) == 0 || warnings[0].Type != "memory.capacity_warning" {
+	if len(warnings) == 0 || warnings[0].Type != capacityWarningType {
 		t.Fatalf("warnings = %+v", warnings)
 	}
 	if len(s.DrainEvictions()) != 0 {
