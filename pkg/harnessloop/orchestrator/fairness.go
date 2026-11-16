@@ -123,6 +123,9 @@ type fairParent struct {
 	queue     int
 	allocs    int
 	updatedAt time.Time
+	// holds records when each held slot was acquired (oldest first), so the
+	// admission layer can age out slots that outlive the decay window (T-P2-16).
+	holds []time.Time
 }
 
 // TenantFairness is the tenant-wide allocator: one instance per tenant, shared
@@ -359,6 +362,7 @@ func (f *TenantFairness) Acquire(parentTaskID string, tokens int64) (bool, strin
 	}
 	parent := f.parents[parentTaskID]
 	parent.slots++
+	parent.holds = append(parent.holds, f.now().UTC())
 	if tokens > 0 {
 		parent.tokens += tokens
 	}
@@ -377,6 +381,9 @@ func (f *TenantFairness) Release(parentTaskID string, tokens int64) {
 	}
 	if parent.slots > 0 {
 		parent.slots--
+	}
+	if len(parent.holds) > 0 {
+		parent.holds = append(parent.holds[:0], parent.holds[1:]...)
 	}
 	if tokens > 0 {
 		parent.tokens -= tokens
@@ -488,19 +495,90 @@ func (f *TenantFairness) TenantActive() (used, max int) {
 	return f.gate.Active(), f.gate.Max()
 }
 
+// Occupancy reports the tenant pool as the admission layer must see it (T-P2-16):
+// used is the raw slot count, decayed is how many of those holds are already
+// older than the decay window, and max is the pool ceiling. A slot past the
+// window no longer counts against admission—the scheduler will fail it at its
+// timeout and release it, so letting it pin new parents forever would be the
+// unbounded window this task exists to remove. The slot itself is never
+// preempted (REQ-128): decay only changes admission accounting.
+func (f *TenantFairness) Occupancy(window time.Duration) (used, decayed, max int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	used = f.gate.Active()
+	max = f.gate.Max()
+	if window <= 0 {
+		return used, 0, max
+	}
+	now := f.now()
+	for _, parent := range f.parents {
+		for _, hold := range parent.holds {
+			if now.Sub(hold) >= window {
+				decayed++
+			}
+		}
+	}
+	if decayed > used {
+		decayed = used
+	}
+	return used, decayed, max
+}
+
+// RetryAfter is how long until the oldest still-counted slot crosses the decay
+// window: the predictable "come back in N" value for a queued parent. Zero when
+// nothing is holding the pool.
+func (f *TenantFairness) RetryAfter(window time.Duration) time.Duration {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if window <= 0 {
+		return 0
+	}
+	now := f.now()
+	var oldest time.Duration
+	found := false
+	for _, parent := range f.parents {
+		for _, hold := range parent.holds {
+			age := now.Sub(hold)
+			if age >= window {
+				continue
+			}
+			if !found || age > oldest {
+				oldest = age
+				found = true
+			}
+		}
+	}
+	if !found {
+		return 0
+	}
+	return window - oldest
+}
+
 // TenantDispatcher drives every parent scheduler of one tenant through a single
 // WFQ pick loop. One Tick admits at most as many subtasks as the tenant pool and
 // the per-parent hard caps allow, always choosing the parent with the smallest
 // virtual_time first (design 4.13.8).
 type TenantDispatcher struct {
-	mu      sync.Mutex
-	fair    *TenantFairness
-	parents map[string]*Scheduler
-	order   []string
+	mu        sync.Mutex
+	fair      *TenantFairness
+	admission *Admission
+	parents   map[string]*Scheduler
+	order     []string
 }
 
 func NewTenantDispatcher(fair *TenantFairness) *TenantDispatcher {
 	return &TenantDispatcher{fair: fair, parents: make(map[string]*Scheduler)}
+}
+
+// WithAdmission gates every parent attach on the tenant pool (T-P2-16): a parent
+// is only registered when the pool still has an effective slot, so a new parent
+// never joins just to queue behind a 15-minute slow task. Without it the
+// dispatcher keeps its pre-T-P2-16 behaviour.
+func (d *TenantDispatcher) WithAdmission(a *Admission) *TenantDispatcher {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.admission = a
+	return d
 }
 
 // Attach registers a parent scheduler with the tenant WFQ queue.
@@ -508,7 +586,18 @@ func (d *TenantDispatcher) Attach(s *Scheduler, weight float64) error {
 	if s == nil {
 		return newError(CodeSchedulerLimitExceeded, "scheduler is nil")
 	}
+	d.mu.Lock()
+	admission := d.admission
+	d.mu.Unlock()
+	if admission != nil {
+		if _, err := admission.Admit(context.Background(), s.parentID); err != nil {
+			return err
+		}
+	}
 	if err := s.AttachFairness(d.fair, weight); err != nil {
+		if admission != nil {
+			admission.Release(context.Background(), s.parentID)
+		}
 		return err
 	}
 	parent := s.parentID

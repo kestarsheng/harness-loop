@@ -1,0 +1,27 @@
+version: 1
+# T-P2-16 · 调度器与租户池准入（design 4.13.3 / 4.13.8，REQ-128 / REQ-138）。
+# 键与 orchestrator.QuotaConfig 的 yaml tag 一一对应，由 LoadQuotaConfig 覆盖默认值；
+# 这里写的就是代码默认值，改这里才真正扩大/收紧闸门。
+subtask:
+  max_parallel_per_parent: 8
+  max_agents_per_tenant: 20
+  max_direct_children: 20
+  max_depth: 2
+  timeout_minutes: 15
+  # 准入层衰减窗口上界：子任务占用 slot 超过该时长后不再计入准入，新父任务不再被它钉死。
+  # 0 / 缺省 = min(timeout_minutes, 15)；与父任务 timeout 解耦，可单独放宽。
+  max_subtask_minutes: 15
+  default_subtask_tokens: 1024
+  parent_budget_tokens: 1048576
+  circuit_failure_ratio: 0.5
+  circuit_min_samples: 4
+  circuit_sample_window: 0
+  retry_max_attempts: 2
+  tolerate_ratio_max: 0.5
+  min_samples_for_ratio: 5
+  fairness:
+    weight: 1.0
+    parent_share: 0
+    tenant_tokens: 0
+    min_weight: 0.5
+    max_weight: 4.0
