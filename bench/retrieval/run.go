@@ -8,6 +8,7 @@
 //	go run ./bench/retrieval -build           # 从仓库重新自动采样并覆盖 queries.jsonl
 //	go run ./bench/retrieval -k 20 -distractors 60
 //	go run ./bench/retrieval -graph-abc -json # 图扩展种子策略 A/B/C 对照（含稀释度指标）
+//	go run ./bench/retrieval -graph-direction -repeats 4  # caller/callee 方向诊断（只诊断不调参）
 //
 // 数据来源与标注口径：
 //   - queries.jsonl 由 -build 从仓库 Go 源码自动采样生成，ground truth 为「文件 + 函数」；
@@ -90,6 +91,8 @@ func main() {
 		distractors = flag.Int("distractors", 60, "number of distractor files indexed alongside ground-truth files")
 		fullOnly    = flag.Bool("full-only", false, "index only ground-truth files (fast sanity run)")
 		graphABC    = flag.Bool("graph-abc", false, "run graph seed strategies A/B/C and emit JSON")
+		graphDir    = flag.Bool("graph-direction", false, "run caller/callee direction diagnostic (B-group params frozen)")
+		repeats     = flag.Int("repeats", directionRepeats, "repeats per variant for the direction diagnostic")
 		jsonOut     = flag.Bool("json", false, "emit one JSON line per variant instead of the markdown report")
 		decayStep   = flag.Float64("decay-step", 0.1, "linear seed-rank decay step for variant C")
 	)
@@ -129,6 +132,15 @@ func main() {
 	if len(queries) == 0 {
 		fail("query set is empty")
 	}
+	// ground truth 文件缺失的样本直接剔除并打印：queries.jsonl 是提交物，不在评测里改它，
+	// 但也不能让一条指向已清理临时文件的样本把整轮评测打挂（各组分母保持一致即可比）。
+	queries, droppedQueries := dropMissingGroundTruth(root, queries)
+	for _, q := range droppedQueries {
+		fmt.Printf("skipped %s: ground-truth file missing (%s)\n", q.ID, q.File)
+	}
+	if len(queries) == 0 {
+		fail("no query left after dropping missing ground-truth files")
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 	defer cancel()
@@ -157,6 +169,13 @@ func main() {
 	if *graphABC {
 		if err := runGraphABC(ctx, writer, root, queries, *kFlag, *decayStep, *jsonOut); err != nil {
 			fail("graph abc: %v", err)
+		}
+		return
+	}
+
+	if *graphDir {
+		if err := runGraphDirection(ctx, writer, root, queries, *kFlag, *repeats, *jsonOut); err != nil {
+			fail("graph direction: %v", err)
 		}
 		return
 	}
@@ -193,6 +212,17 @@ func findRepoRoot() (string, error) {
 
 // ---------------------------------------------------------------- query set
 
+// corpusSkipDirs 是语料采样时跳过的目录。
+//
+// 除了依赖/产物目录，这里还排掉 IDE 与 agent 的临时状态目录（`.codeartsdoer/temp` 等）：
+// 这些目录里的文件会在采样与读取之间被清理掉，导致 `open ...: cannot find the path` 中断整轮评测。
+// 它们也不是源码，进语料只会污染 ground truth。
+var corpusSkipDirs = map[string]bool{
+	".git": true, "node_modules": true, "vendor": true, "dist": true, "build": true,
+	"bin": true, "tmp": true, "coverage": true, ".harness": true, "testdata": true,
+	"frontend": true, ".codeartsdoer": true, ".arts": true, ".ohmyagent": true, ".workbuddy": true,
+}
+
 var identifierRE = regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_]*`)
 
 var stopTokens = map[string]bool{
@@ -222,9 +252,7 @@ func buildQuerySet(root string, limit int) ([]QueryCase, error) {
 			return nil
 		}
 		if d.IsDir() {
-			switch d.Name() {
-			case ".git", "node_modules", "vendor", "dist", "build", "bin", "tmp",
-				"coverage", ".harness", "testdata", "frontend":
+			if corpusSkipDirs[d.Name()] {
 				return filepath.SkipDir
 			}
 			return nil
@@ -304,6 +332,20 @@ func buildQuerySet(root string, limit int) ([]QueryCase, error) {
 func sha1Hex(s string) string {
 	sum := sha1.Sum([]byte(s))
 	return hex.EncodeToString(sum[:])
+}
+
+// dropMissingGroundTruth 剔除 ground truth 文件已不存在的样本，返回保留集合与被剔除项。
+func dropMissingGroundTruth(root string, queries []QueryCase) ([]QueryCase, []QueryCase) {
+	kept := make([]QueryCase, 0, len(queries))
+	var dropped []QueryCase
+	for _, q := range queries {
+		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(q.File))); err != nil {
+			dropped = append(dropped, q)
+			continue
+		}
+		kept = append(kept, q)
+	}
+	return kept, dropped
 }
 
 func buildQuery(symbol, text string) string {
@@ -462,9 +504,7 @@ func sampleDistractors(root string, exclude map[string]bool, limit int) []string
 			return nil
 		}
 		if d.IsDir() {
-			switch d.Name() {
-			case ".git", "node_modules", "vendor", "dist", "build", "bin", "tmp",
-				"coverage", ".harness", "testdata", "frontend":
+			if corpusSkipDirs[d.Name()] {
 				return filepath.SkipDir
 			}
 			return nil

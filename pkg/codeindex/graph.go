@@ -3,6 +3,7 @@ package codeindex
 import (
 	"context"
 	"fmt"
+	"strings"
 )
 
 // 图扩展默认参数（design 4.9.2：每个命中符号 ≤ 5 跳邻居，图路权重 0.8）。
@@ -22,7 +23,24 @@ const (
 const (
 	GraphDirectionCaller = "caller"
 	GraphDirectionCallee = "callee"
+	// GraphDirectionBoth 是双向扩展（caller + callee），也是零值等价方向。
+	GraphDirectionBoth = "both"
 )
+
+// NormalizeGraphDirection 把方向归一化为 caller / callee / both 三取一。
+//
+// 空串与未知值一律回退 both：方向只决定「召回哪一侧邻居」，不影响权重与融合公式，
+// 不该让一个拼错的开关把整条检索打挂。归一化集中在这里，调用方无需自己判空。
+func NormalizeGraphDirection(direction string) string {
+	switch strings.ToLower(strings.TrimSpace(direction)) {
+	case GraphDirectionCaller:
+		return GraphDirectionCaller
+	case GraphDirectionCallee:
+		return GraphDirectionCallee
+	default:
+		return GraphDirectionBoth
+	}
+}
 
 // GraphExpandOptions 描述一次 1 跳扩展。
 type GraphExpandOptions struct {
@@ -36,6 +54,10 @@ type GraphExpandOptions struct {
 	SeedLimit int
 	// DecayStep > 0 时按种子排名线性衰减权重；<= 0 表示等权。
 	DecayStep float64
+	// Direction 限定扩展方向：caller / callee / both。
+	// 空串与未知值归一化为 both（既有调用方零改动即保持双向行为）。
+	// 方向只决定召回哪一侧邻居，不改变种子截断、额度上限与权重公式。
+	Direction string
 }
 
 // GraphNeighbor 是扩展出的邻居 chunk。
@@ -54,11 +76,12 @@ type GraphNeighbor struct {
 	Weight float64
 }
 
-// GraphExpand 从命中符号沿 code_edges 做 1 跳双向扩展（调用方 + 被调用方）。
+// GraphExpand 从命中符号沿 code_edges 做 1 跳扩展，方向由 opts.Direction 决定
+// （caller / callee / both，空串 = both）。
 //
 // 实现分两段，避免「每条边回表查 chunk」的嵌套循环（code_chunks 上没有
 // (tenant,project,symbol) 索引时会退化成逐边扫描，实测单种子 50ms+）：
-//  1. 用种子符号在 code_edges 上取一跳邻居的符号集合（双向，按种子排名排序）；
+//  1. 用种子符号在 code_edges 上取一跳邻居的符号集合（按 opts.Direction 取臂，按种子排名排序）；
 //  2. 用这组符号一次性取 chunk，再在 Go 侧按 seed 分组、去重、封顶。
 //
 // 两段查询都强制 tenant_id + project_id 行级过滤，跨租户/项目返回空。
@@ -78,13 +101,14 @@ func (w *CodeWriter) GraphExpand(ctx context.Context, opts GraphExpandOptions) (
 	if maxNodes <= 0 {
 		maxNodes = DefaultGraphMaxNodes
 	}
+	direction := NormalizeGraphDirection(opts.Direction)
 
 	seedRank := make(map[string]int, len(seeds))
 	for i, seed := range seeds {
 		seedRank[seed] = i + 1
 	}
 
-	edges, err := w.graphEdges(ctx, opts.TenantID, opts.ProjectID, seeds, maxNodes*4, perSymbol*2)
+	edges, err := w.graphEdges(ctx, opts.TenantID, opts.ProjectID, seeds, maxNodes*4, perSymbol*2, direction)
 	if err != nil {
 		return nil, err
 	}
@@ -176,29 +200,48 @@ type graphEdge struct {
 //   - 种子带 ORDINALITY 透出排名，ORDER BY ord 保证高排名种子先占 MaxNodes 额度；
 //   - 每 seed 先按 ROW_NUMBER 截到 perSeed 条再汇总，否则单个高频 seed 会用光
 //     LIMIT，后面的种子一条都进不来（实测首个 seed 有 197 条边时，20 条预算全被吃掉）。
-func (w *CodeWriter) graphEdges(ctx context.Context, tenantID, projectID string, seeds []string, limit, perSeed int) ([]graphEdge, error) {
+//
+// direction 决定拼哪几个臂：单臂时该侧独占 perSeed 份额度（测的是单路真实上限），
+// 双臂时沿用 direction 排序共享同一份额度——即加方向维度前的既有行为。
+func (w *CodeWriter) graphEdges(ctx context.Context, tenantID, projectID string, seeds []string,
+	limit, perSeed int, direction string) ([]graphEdge, error) {
 	if limit <= 0 {
 		limit = DefaultGraphMaxNodes * 4
 	}
 	if perSeed <= 0 {
 		perSeed = DefaultGraphPerSymbol * 2
 	}
+
+	const callerArm = `
+			SELECT s.sym AS seed, s.ord AS ord, e.source_file AS file_path,
+			       e.source_symbol AS symbol, 'caller' AS direction
+			FROM seeds s
+			JOIN hlp_code.code_edges e
+			  ON e.tenant_id = $1 AND e.project_id = $2 AND e.target_symbol = s.sym
+			WHERE e.source_symbol <> s.sym`
+	const calleeArm = `
+			SELECT s.sym AS seed, s.ord AS ord, ''::text AS file_path,
+			       e.target_symbol AS symbol, 'callee' AS direction
+			FROM seeds s
+			JOIN hlp_code.code_edges e
+			  ON e.tenant_id = $1 AND e.project_id = $2 AND e.source_symbol = s.sym
+			WHERE e.target_symbol <> s.sym`
+
+	var arms string
+	switch direction {
+	case GraphDirectionCaller:
+		arms = callerArm
+	case GraphDirectionCallee:
+		arms = calleeArm
+	default:
+		arms = callerArm + "\n\t\t\tUNION ALL" + calleeArm
+	}
+
 	rows, err := w.db.Query(ctx, `
 		WITH seeds(sym, ord) AS (
 			SELECT sym, ord FROM unnest($3::text[]) WITH ORDINALITY AS u(sym, ord)
 		)
-		, neighbors AS (
-			SELECT s.sym AS seed, s.ord AS ord, e.source_file AS file_path, e.source_symbol AS symbol, 'caller' AS direction
-			FROM seeds s
-			JOIN hlp_code.code_edges e
-			  ON e.tenant_id = $1 AND e.project_id = $2 AND e.target_symbol = s.sym
-			WHERE e.source_symbol <> s.sym
-			UNION ALL
-			SELECT s.sym AS seed, s.ord AS ord, ''::text AS file_path, e.target_symbol AS symbol, 'callee' AS direction
-			FROM seeds s
-			JOIN hlp_code.code_edges e
-			  ON e.tenant_id = $1 AND e.project_id = $2 AND e.source_symbol = s.sym
-			WHERE e.target_symbol <> s.sym
+		, neighbors AS (`+arms+`
 		)
 		, ranked AS (
 			SELECT seed, ord, file_path, symbol, direction,
