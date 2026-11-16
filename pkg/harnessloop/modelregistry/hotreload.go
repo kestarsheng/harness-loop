@@ -2,6 +2,8 @@ package modelregistry
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -14,6 +16,20 @@ import (
 var ErrNoConfigPath = errors.New("modelregistry: hot reload requires a config path")
 
 const DefaultReloadInterval = 5 * time.Second
+
+// hashFallbackTicks bounds the content-hash fallback: with the default 10ms
+// test interval it re-reads the config every 500ms, and with the 5s production
+// interval every 25s.
+const hashFallbackTicks = 50
+
+func fileHash(path string) string {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
+}
 
 type ReloadResult struct {
 	Changed     bool
@@ -30,6 +46,8 @@ type HotReloader struct {
 	mu       sync.Mutex
 	lastMod  time.Time
 	lastSize int64
+	lastHash string
+	ticks    int
 	started  bool
 
 	now   func() time.Time
@@ -47,6 +65,7 @@ func NewHotReloader(reg *Registry, path string) *HotReloader {
 			h.lastMod = fi.ModTime()
 			h.lastSize = fi.Size()
 		}
+		h.lastHash = fileHash(path)
 	}
 	return h
 }
@@ -81,7 +100,17 @@ func (h *HotReloader) ReloadIfChanged(operator string) (ReloadResult, error) {
 		return h.failLocked(operator, err), err
 	}
 	if !h.lastMod.IsZero() && fi.ModTime().Equal(h.lastMod) && fi.Size() == h.lastSize {
-		return ReloadResult{Changed: false, Version: h.current.Load().Version}, nil
+		// mtime granularity is coarser than the reload interval on some
+		// filesystems (overlayfs, network shares), so an equal-size rewrite can
+		// keep both signals unchanged. Re-hash every hashFallbackTicks to catch
+		// that case without reading the file on every tick.
+		h.ticks++
+		if h.ticks%hashFallbackTicks != 0 {
+			return ReloadResult{Changed: false, Version: h.current.Load().Version}, nil
+		}
+		if fileHash(h.path) == h.lastHash {
+			return ReloadResult{Changed: false, Version: h.current.Load().Version}, nil
+		}
 	}
 	return h.reloadLocked(fi, operator)
 }
@@ -101,6 +130,7 @@ func (h *HotReloader) reloadLocked(fi os.FileInfo, operator string) (ReloadResul
 	}
 	h.lastMod = fi.ModTime()
 	h.lastSize = fi.Size()
+	h.lastHash = fileHash(h.path)
 	prev := h.current.Load()
 	changedKeys := diffRegistries(prev, next)
 	h.current.Store(next)

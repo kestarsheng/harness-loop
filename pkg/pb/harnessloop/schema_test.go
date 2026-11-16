@@ -62,6 +62,7 @@ func TestServiceMethods(t *testing.T) {
 		"CreateTask", "GetTask", "ListTasks", "PauseTask", "ResumeTask", "AbortTask",
 		"ListEvents", "WatchEvents", "ListCheckpoints", "RestoreFromCheckpoint",
 		"ListModels", "ResolveModel", "PreflightTool",
+		"ListSubtasks", "ListModelSelections", "ListHandoffs",
 	}
 	got := make(map[string]bool, svc.Methods().Len())
 	for i := 0; i < svc.Methods().Len(); i++ {
@@ -102,5 +103,28 @@ func TestTaskViewCoreFields(t *testing.T) {
 		"budget", "consumed_tokens", "consumed_cost", "fsm_enabled", "version",
 	} {
 		fieldByName(t, md, name)
+	}
+}
+func TestTerminalIdentityFields(t *testing.T) {
+	cases := []struct {
+		name string
+		md   protoreflect.MessageDescriptor
+	}{
+		{"TaskView", (&TaskView{}).ProtoReflect().Descriptor()},
+		{"CreateTaskRequest", (&CreateTaskRequest{}).ProtoReflect().Descriptor()},
+		{"TaskCommand", (&TaskCommand{}).ProtoReflect().Descriptor()},
+	}
+	for _, c := range cases {
+		for _, field := range []string{"session_id", "terminal_label"} {
+			if f := fieldByName(t, c.md, field); f.Kind() != protoreflect.StringKind {
+				t.Fatalf("%s.%s kind = %v, want string", c.name, field, f.Kind())
+			}
+		}
+	}
+	if got := fieldByName(t, (&TaskView{}).ProtoReflect().Descriptor(), "session_id").Number(); got != 22 {
+		t.Fatalf("TaskView.session_id number = %d, want 22", got)
+	}
+	if got := fieldByName(t, (&TaskView{}).ProtoReflect().Descriptor(), "terminal_label").Number(); got != 23 {
+		t.Fatalf("TaskView.terminal_label number = %d, want 23", got)
 	}
 }

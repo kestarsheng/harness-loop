@@ -98,6 +98,13 @@ func (s *MemoryHandoffStore) ListByParent(_ context.Context, parentTaskID, tenan
 	return out, nil
 }
 
+// HandoffObserver receives every persisted handoff transition. It keeps this
+// package free of metrics/tracing dependencies: the service layer supplies an
+// adapter that records hlp_handoff_total and the handoff child span.
+type HandoffObserver interface {
+	HandoffTransition(ctx context.Context, record *HandoffRecord)
+}
+
 // HandoffService coordinates validation, context construction, transport and
 // persistence. Transport is optional so contract-only tests do not need a2a.
 type HandoffService struct {
@@ -105,7 +112,14 @@ type HandoffService struct {
 	transport HandoffTransport
 	store     HandoffStore
 	emitter   Emitter
+	observer  HandoffObserver
 	now       func() time.Time
+}
+
+// WithObserver wires the optional observability adapter.
+func (s *HandoffService) WithObserver(o HandoffObserver) *HandoffService {
+	s.observer = o
+	return s
 }
 
 func NewHandoffService(roles *subtask.Registry, transport HandoffTransport, store HandoffStore, emitter Emitter) *HandoffService {
@@ -190,6 +204,9 @@ func (s *HandoffService) Create(ctx context.Context, h *HandoffContract, req Han
 	}); err != nil {
 		return nil, nil, err
 	}
+	if s.observer != nil {
+		s.observer.HandoffTransition(ctx, record)
+	}
 	return record, receiverCtx, nil
 }
 
@@ -218,13 +235,19 @@ func (s *HandoffService) transition(ctx context.Context, handoffID string, to Ha
 	if err := s.store.Save(ctx, record); err != nil {
 		return err
 	}
-	return emit(ctx, s.emitter, Event{
+	if err := emit(ctx, s.emitter, Event{
 		Type:         eventType,
 		ParentTaskID: record.ParentTaskID,
 		SubtaskID:    record.SubtaskID,
 		HandoffID:    record.HandoffID,
 		Payload:      map[string]any{"reason": reason},
-	})
+	}); err != nil {
+		return err
+	}
+	if s.observer != nil {
+		s.observer.HandoffTransition(ctx, record)
+	}
+	return nil
 }
 
 func (s *HandoffService) ListByParent(ctx context.Context, parentTaskID, tenantID, projectID string) ([]*HandoffRecord, error) {

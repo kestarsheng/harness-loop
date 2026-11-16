@@ -18,7 +18,9 @@ import (
 	"agent-platform/pkg/harnessloop/fsm"
 	"agent-platform/pkg/harnessloop/orchestrator"
 	"agent-platform/pkg/harnessloop/retry"
+	"agent-platform/pkg/harnessloop/tracing"
 	"agent-platform/pkg/llm"
+	"agent-platform/services/harnessloop-service/internal/metrics"
 	"agent-platform/services/harnessloop-service/internal/repository"
 )
 
@@ -133,6 +135,11 @@ type Runtime struct {
 	CompactionLimits     compaction.DegradeLimits
 	CompactionDir        string
 
+	// Metrics and Tracer are optional; nil values are no-ops so existing
+	// constructors in tests keep working unchanged.
+	Metrics *metrics.Harness
+	Tracer  *tracing.Tracer
+
 	mu                sync.Mutex
 	pubMu             sync.Mutex
 	aborts            map[abortKey]AbortResult
@@ -170,6 +177,9 @@ func (r *Runtime) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 	if in.GoalHash == "" {
 		in.GoalHash = in.PolicyHash
 	}
+
+	taskSpan := r.Tracer.StartTask(ctx, in.TenantID, in.ProjectID, in.TaskID)
+	defer taskSpan.End()
 
 	task, err := r.Tasks.Get(ctx, in.TenantID, in.TaskID)
 	if err != nil {
@@ -277,7 +287,11 @@ func (r *Runtime) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 			}
 		}
 		stageInput.Message = r.maybeCompact(ctx, in, task, stage, attempt, stageInput.Message, result)
-		stageRes, stageErr := r.Stages.Run(ctx, stageInput)
+		stageStart := r.now()
+		stageSpan := r.Tracer.StartStage(taskSpan, string(stage), attemptNo)
+		stageRes, stageErr := r.Stages.Run(stageSpan.Context(), stageInput)
+		r.Metrics.StageDuration(string(stage), attemptNo, r.now().Sub(stageStart))
+		stageSpan.End()
 		result.Steps++
 		entryReason = fsm.EntryRetry
 		if stageRes == nil {
@@ -326,7 +340,11 @@ func (r *Runtime) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 		}
 		aggregation := r.runOrchestration(ctx, in, task.WorkspaceRoot, stage, attempt, stageRes)
 
+		accSpan := r.Tracer.StartAcceptance(stageSpan, string(stage), attemptNo, "")
 		verdict := r.evaluate(ctx, in, task, aggregation, stage, attempt, stageRes)
+		accSpan.SetAttr("verdict", string(verdict.Verdict))
+		accSpan.End()
+		r.Metrics.Acceptance(string(stage), string(verdict.Verdict), string(verdict.VerifiedBy))
 		attempt.AcceptanceID = verdict.AcceptanceID
 		if verdict.AcceptanceID != "" {
 			_ = r.Attempts.AttachAcceptance(ctx, attempt.AttemptID, verdict.AcceptanceID)
@@ -446,6 +464,7 @@ func (r *Runtime) finalize(ctx context.Context, in RunInput, res *RunResult, rea
 		}
 	}
 	r.publishTerminal(ctx, in.TenantID, in.ProjectID, in.TaskID, reason)
+	r.Metrics.TaskTerminal(string(status))
 
 	res.TerminalReason = reason
 	res.FinalStage = string(stage)
@@ -684,7 +703,9 @@ func (r *Runtime) saveCheckpoint(ctx context.Context, in RunInput, task *reposit
 		CreatedAt: r.now().UTC(),
 	}
 	cp.Seal()
-	_ = r.Checkpoints.Save(ctx, cp)
+	if err := r.Checkpoints.Save(ctx, cp); err == nil {
+		r.Metrics.Checkpoint("saved")
+	}
 }
 
 func (r *Runtime) transitionEvents(in RunInput, from, to fsm.Stage, attempt fsm.Attempt) []repository.EventInsert {
@@ -737,6 +758,7 @@ func (r *Runtime) publishTerminal(ctx context.Context, tenantID, projectID, task
 }
 
 func (r *Runtime) publishError(ctx context.Context, in RunInput, stage fsm.Stage, attempt fsm.Attempt, category retry.Category, reason string) {
+	r.Metrics.Error(string(category), string(stage), r.Policy.Retryable(category))
 	if r.Events == nil {
 		return
 	}
@@ -807,6 +829,8 @@ func (r *Runtime) maybeCompact(ctx context.Context, in RunInput, task *repositor
 				if outputRef != "" {
 					payload["output_ref"] = outputRef
 				}
+				r.Metrics.Compaction(decision.Reason, false)
+				r.Metrics.CompactionRatio(string(compaction.TemplateV1), 0.5)
 				r.publishCompaction(ctx, in, stage, attempt, event.CompactionCompleted, payload)
 				return compacted
 			}
@@ -824,6 +848,8 @@ func (r *Runtime) maybeCompact(ctx context.Context, in RunInput, task *repositor
 			"degrade_level":  degraded.Level,
 			"reason":         degraded.Reason,
 		}
+		r.Metrics.Compaction(decision.Reason, true)
+		r.Metrics.CompactionRatio("degrade_l1", degraded.Ratio)
 		r.publishCompaction(ctx, in, stage, attempt, event.CompactionDegraded, payload)
 		return compaction.RenderLinesAsMessage(degraded.Lines).Content
 	}

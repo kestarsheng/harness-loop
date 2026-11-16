@@ -185,6 +185,19 @@ func TestEventRepoCleanup(t *testing.T) {
 	repo := NewEventRepo(db)
 	ctx := context.Background()
 
+	// Cleanup is global by design (it is a maintenance sweep, not a tenant API).
+	// The shared test database accumulates old events from earlier runs, so drain
+	// them first or the row count assertion below observes unrelated rows.
+	for {
+		drained, err := repo.Cleanup(ctx, time.Now(), 1000)
+		if err != nil {
+			t.Fatalf("drain legacy events: %v", err)
+		}
+		if drained == 0 {
+			break
+		}
+	}
+
 	old := []*eventpkg.Event{
 		mkTestEvent(task.TaskID, task.TenantID, task.ProjectID, 1, "a", "stage.transition", time.Now().Add(-72*time.Hour)),
 		mkTestEvent(task.TaskID, task.TenantID, task.ProjectID, 2, "a", "stage.transition", time.Now().Add(-48*time.Hour)),

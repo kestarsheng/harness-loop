@@ -46,6 +46,8 @@ func toProtoTask(t *repository.TaskRun) *harnesspb.TaskView {
 		ConsumedCost:        t.ConsumedCost,
 		FsmEnabled:          t.FSMEnabled,
 		Version:             t.Version,
+		SessionId:           t.SessionID,
+		TerminalLabel:       t.TerminalLabel,
 		CreatedAtMs:         t.CreatedAt.UnixMilli(),
 		UpdatedAtMs:         t.UpdatedAt.UnixMilli(),
 	}
