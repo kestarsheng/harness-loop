@@ -1,0 +1,3 @@
+# 压测运行期产物（含本地 DSN 与逐轮结果），不入库。
+# 报告 bench/p2/perf-suite.md 已包含数据与复现命令。
+runtime/
