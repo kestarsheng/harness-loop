@@ -54,17 +54,65 @@ type CodeWriter struct {
 	parse   ParseFunc
 	embed   EmbedFunc
 	metrics *Metrics
-	batch   int
+	// batch 是单次 embedding 调用的文本条数（沿用历史默认 64）。
+	batch int
+	// insert 是单条多行 INSERT 的行数上限；0 视为 DefaultInsertBatch。
+	insert int
 }
 
 func NewCodeWriter(db *pgdb.DB, parse ParseFunc, embed EmbedFunc, metrics *Metrics) *CodeWriter {
 	if metrics == nil {
 		metrics = NewMetrics()
 	}
-	return &CodeWriter{db: db, parse: parse, embed: embed, metrics: metrics, batch: 64}
+	return &CodeWriter{db: db, parse: parse, embed: embed, metrics: metrics, batch: 64, insert: DefaultInsertBatch}
 }
 
 func (w *CodeWriter) Metrics() *Metrics { return w.metrics }
+
+// SetEmbedBatch 调整单次 embedding 的文本条数；<=0 时恢复默认 64。
+func (w *CodeWriter) SetEmbedBatch(n int) {
+	if w == nil {
+		return
+	}
+	if n <= 0 {
+		n = 64
+	}
+	w.batch = n
+}
+
+// SetInsertBatch 调整单条多行 INSERT 的行数；<=0 时恢复 DefaultInsertBatch。
+// 批量索引把它与并发度一起调，能显著减少单文件写库的往返次数。
+func (w *CodeWriter) SetInsertBatch(n int) {
+	if w == nil {
+		return
+	}
+	if n <= 0 {
+		n = DefaultInsertBatch
+	}
+	if n > 1000 {
+		n = 1000
+	}
+	w.insert = n
+}
+
+func (w *CodeWriter) insertBatch() int {
+	if w.insert <= 0 {
+		return DefaultInsertBatch
+	}
+	return w.insert
+}
+
+// IndexOptions 是 IndexFileWith 的行为开关。
+type IndexOptions struct {
+	// Force 为 true 时忽略 content_hash 相同即跳过的短路（全量语义）。
+	Force bool
+	// SkipStateLookup 为 true 时跳过 indexed_files 预检；仅在 Force 时安全。
+	SkipStateLookup bool
+	// InsertBatch 覆盖单条多行 INSERT 的行数；<=0 用 writer 默认。
+	InsertBatch int
+	// EmbedBatch 覆盖单次 embedding 的文本条数；<=0 用 writer 默认。
+	EmbedBatch int
+}
 
 func (w *CodeWriter) GetFileState(ctx context.Context, tenantID, projectID, filePath string) (*FileState, error) {
 	var (
@@ -97,7 +145,13 @@ func (w *CodeWriter) GetFileState(ctx context.Context, tenantID, projectID, file
 	return &state, nil
 }
 
+// IndexFile 保持历史签名：force 等价于 IndexOptions{Force: force}。
 func (w *CodeWriter) IndexFile(ctx context.Context, tenantID, projectID, path string, src []byte, mtime time.Time, force bool) (IndexResult, error) {
+	return w.IndexFileWith(ctx, tenantID, projectID, path, src, mtime, IndexOptions{Force: force})
+}
+
+// IndexFileWith 是带行为开关的入口，批量索引用它跳过全量模式下多余的预检往返。
+func (w *CodeWriter) IndexFileWith(ctx context.Context, tenantID, projectID, path string, src []byte, mtime time.Time, options IndexOptions) (IndexResult, error) {
 	start := time.Now()
 	result := IndexResult{FilePath: path}
 	if w.parse == nil {
@@ -108,11 +162,16 @@ func (w *CodeWriter) IndexFile(ctx context.Context, tenantID, projectID, path st
 	}
 	hash := FileHash(src)
 
-	existing, err := w.GetFileState(ctx, tenantID, projectID, path)
-	if err != nil {
-		return result, err
+	// 全量模式下 hash 命中也要重写，跳过预检即可省掉一次往返（少一次 RTT/文件）。
+	var existing *FileState
+	if !options.SkipStateLookup {
+		var err error
+		existing, err = w.GetFileState(ctx, tenantID, projectID, path)
+		if err != nil {
+			return result, err
+		}
 	}
-	if !force && existing != nil && existing.ContentHash == hash && existing.Status == StatusIndexed {
+	if !options.Force && existing != nil && existing.ContentHash == hash && existing.Status == StatusIndexed {
 		result.Skipped = true
 		result.Status = StatusIndexed
 		w.metrics.RecordSkipped()
@@ -132,7 +191,7 @@ func (w *CodeWriter) IndexFile(ctx context.Context, tenantID, projectID, path st
 		for _, chunk := range parsed.Chunks {
 			texts = append(texts, chunk.Symbol+"\n"+chunk.Text)
 		}
-		vectors = w.embedBatch(ctx, texts)
+		vectors = w.embedTexts(ctx, texts, options.EmbedBatch)
 	}
 
 	tx, err := w.db.Pool().Begin(ctx)
@@ -164,37 +223,17 @@ func (w *CodeWriter) IndexFile(ctx context.Context, tenantID, projectID, path st
 	}
 
 	language := LanguageOf(path)
-	for i, chunk := range parsed.Chunks {
-		tokens := strings.Join(IdentifierTokens(chunk.Text), " ")
-		var embedding any
-		if i < len(vectors) && len(vectors[i]) > 0 {
-			embedding = vectorLiteral(vectors[i])
-		}
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO hlp_code.code_chunks
-				(tenant_id, project_id, file_path, language, chunk_type, symbol, parent_symbol,
-				 start_line, end_line, content, content_hash, parser_id, embedding, content_tokens, content_tsvector)
-			VALUES ($1,$2,$3,$4,$5,NULLIF($6,''),NULLIF($7,''),$8,$9,$10,$11,$12,
-			        CASE WHEN $13 = '' THEN NULL ELSE $13::vector END,
-			        $14, to_tsvector('simple', $14))`,
-			tenantID, projectID, path, language, string(chunk.ChunkType), chunk.Symbol, chunk.ParentSymbol,
-			chunk.StartLine, chunk.EndLine, chunk.Text, chunk.ContentHash, chunk.ParserID,
-			toString(embedding), tokens); err != nil {
-			return result, fmt.Errorf("codeindex: insert chunk %s: %w", chunk.Symbol, err)
-		}
-		result.Chunks++
+	chunks, err := w.insertChunks(ctx, tx, tenantID, projectID, path, language, parsed.Chunks, vectors, options.InsertBatch)
+	if err != nil {
+		return result, err
 	}
-	for _, edge := range parsed.Edges {
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO hlp_code.code_edges
-				(tenant_id, project_id, edge_type, source_symbol, target_symbol, source_file, target_file)
-			VALUES ($1,$2,$3,$4,$5,$6,NULLIF($7,''))
-			ON CONFLICT (tenant_id, project_id, edge_type, source_symbol, target_symbol, source_file) DO NOTHING`,
-			tenantID, projectID, edge.EdgeType, edge.Source, edge.Target, path, edge.TargetFile); err != nil {
-			return result, fmt.Errorf("codeindex: insert edge %s->%s: %w", edge.Source, edge.Target, err)
-		}
-		result.Edges++
+	result.Chunks = chunks
+
+	edges, err := w.insertEdges(ctx, tx, tenantID, projectID, path, parsed.Edges, options.InsertBatch)
+	if err != nil {
+		return result, err
 	}
+	result.Edges = edges
 
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO hlp_code.indexed_files
@@ -283,10 +322,128 @@ func (w *CodeWriter) CountEdges(ctx context.Context, tenantID, projectID, path s
 	return n, nil
 }
 
-func (w *CodeWriter) embedBatch(ctx context.Context, texts []string) [][]float32 {
+// chunkInsertColumns 是 code_chunks 多行 INSERT 每行占用的绑定参数个数。
+// content_tokens 与 content_tsvector 复用同一个参数（to_tsvector 由库侧生成），故是 14 而不是 15。
+const chunkInsertColumns = 14
+
+// edgeInsertColumns 是 code_edges 多行 INSERT 每行占用的绑定参数个数。
+const edgeInsertColumns = 7
+
+// maxInsertBatch 是多行 INSERT 的行数硬上限（1000 行 × 14 参数远低于 65535 上限）。
+const maxInsertBatch = 1000
+
+func (w *CodeWriter) batchSize(override int) int {
+	if override > 0 {
+		if override > maxInsertBatch {
+			return maxInsertBatch
+		}
+		return override
+	}
+	return w.insertBatch()
+}
+
+// insertChunks 用多行 INSERT 写入一个文件的全部 chunk。
+// 单文件几十个 chunk 时把往返次数从 N 降到 ⌈N/InsertBatch⌉，是全量吞吐的主要来源之一。
+func (w *CodeWriter) insertChunks(ctx context.Context, tx pgx.Tx, tenantID, projectID, path, language string,
+	chunks []Chunk, vectors [][]float32, override int) (int, error) {
+	if len(chunks) == 0 {
+		return 0, nil
+	}
+	size := w.batchSize(override)
+	inserted := 0
+	for start := 0; start < len(chunks); start += size {
+		end := start + size
+		if end > len(chunks) {
+			end = len(chunks)
+		}
+		group := chunks[start:end]
+		var (
+			sb   strings.Builder
+			args = make([]any, 0, len(group)*chunkInsertColumns)
+		)
+		sb.WriteString(`INSERT INTO hlp_code.code_chunks
+			(tenant_id, project_id, file_path, language, chunk_type, symbol, parent_symbol,
+			 start_line, end_line, content, content_hash, parser_id, embedding, content_tokens, content_tsvector)
+			VALUES `)
+		for i, chunk := range group {
+			if i > 0 {
+				sb.WriteString(",")
+			}
+			base := i * chunkInsertColumns
+			fmt.Fprintf(&sb, "($%d,$%d,$%d,$%d,$%d,NULLIF($%d,''),NULLIF($%d,''),$%d,$%d,$%d,$%d,$%d,NULLIF($%d,'')::vector,$%d,to_tsvector('simple',$%d))",
+				base+1, base+2, base+3, base+4, base+5, base+6, base+7, base+8, base+9,
+				base+10, base+11, base+12, base+13, base+14, base+14)
+
+			var embedding string
+			if idx := start + i; idx < len(vectors) && len(vectors[idx]) > 0 {
+				embedding = vectorLiteral(vectors[idx])
+			}
+			args = append(args,
+				tenantID, projectID, path, language, string(chunk.ChunkType),
+				chunk.Symbol, chunk.ParentSymbol, chunk.StartLine, chunk.EndLine,
+				chunk.Text, chunk.ContentHash, chunk.ParserID, embedding,
+				strings.Join(IdentifierTokens(chunk.Text), " "))
+		}
+		if _, err := tx.Exec(ctx, sb.String(), args...); err != nil {
+			return inserted, fmt.Errorf("codeindex: insert chunks for %s: %w", path, err)
+		}
+		inserted += len(group)
+	}
+	return inserted, nil
+}
+
+// insertEdges 用多行 INSERT 写入边表，冲突由 UNIQUE 约束吸收（同一批内重复边也会被合并）。
+func (w *CodeWriter) insertEdges(ctx context.Context, tx pgx.Tx, tenantID, projectID, path string,
+	edges []Edge, override int) (int, error) {
+	if len(edges) == 0 {
+		return 0, nil
+	}
+	size := w.batchSize(override)
+	inserted := 0
+	for start := 0; start < len(edges); start += size {
+		end := start + size
+		if end > len(edges) {
+			end = len(edges)
+		}
+		group := edges[start:end]
+		var (
+			sb   strings.Builder
+			args = make([]any, 0, len(group)*edgeInsertColumns)
+		)
+		sb.WriteString(`INSERT INTO hlp_code.code_edges
+			(tenant_id, project_id, edge_type, source_symbol, target_symbol, source_file, target_file)
+			VALUES `)
+		for i, edge := range group {
+			if i > 0 {
+				sb.WriteString(",")
+			}
+			base := i * edgeInsertColumns
+			fmt.Fprintf(&sb, "($%d,$%d,$%d,$%d,$%d,$%d,NULLIF($%d,''))",
+				base+1, base+2, base+3, base+4, base+5, base+6, base+7)
+			args = append(args, tenantID, projectID, edge.EdgeType, edge.Source, edge.Target, path, edge.TargetFile)
+		}
+		sb.WriteString(` ON CONFLICT (tenant_id, project_id, edge_type, source_symbol, target_symbol, source_file) DO NOTHING`)
+		if _, err := tx.Exec(ctx, sb.String(), args...); err != nil {
+			return inserted, fmt.Errorf("codeindex: insert edges for %s: %w", path, err)
+		}
+		inserted += len(group)
+	}
+	return inserted, nil
+}
+
+// embedTexts 按 batch 条一批调用 embedder；任一批失败即返回已得到的部分向量，
+// 调用方据此降级为 NULL embedding（与历史行为一致：embedding 失败不丢 chunk）。
+func (w *CodeWriter) embedTexts(ctx context.Context, texts []string, batch int) [][]float32 {
+	size := batch
+	if size <= 0 {
+		size = w.batch
+	}
+	if size <= 0 {
+		size = 64
+	}
 	out := make([][]float32, 0, len(texts))
-	for start := 0; start < len(texts); start += w.batch {
-		end := start + w.batch
+	for start := 0; start < len(texts); start += size {
+		end := start + size
 		if end > len(texts) {
 			end = len(texts)
 		}
@@ -299,11 +456,9 @@ func (w *CodeWriter) embedBatch(ctx context.Context, texts []string) [][]float32
 	return out
 }
 
-func toString(v any) string {
-	if s, ok := v.(string); ok {
-		return s
-	}
-	return ""
+// embedBatch 保留历史名字：按 writer 默认批量切分。
+func (w *CodeWriter) embedBatch(ctx context.Context, texts []string) [][]float32 {
+	return w.embedTexts(ctx, texts, 0)
 }
 
 func vectorLiteral(vec []float32) string {
