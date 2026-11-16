@@ -1,0 +1,3 @@
+# 混沌演练运行期产物（探针二进制、套件日志、逐用例结果）
+# 全部可通过 `inject.sh build` / `inject.sh suite` 重新生成，不入库
+out/
