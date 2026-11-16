@@ -153,9 +153,30 @@ Frontend:
 ```bash
 cd frontend
 npm install
-npm run dev          # Vite dev server on :5173
+npm run dev          # Vite dev server on :5174
 npm run build        # production build
 ```
+
+### 本地一键起停（dev-up / dev-down）
+
+只想跑「PG + harnessloop-service + gateway + 前端」，不整套 compose 时用这两个脚本：
+
+```bash
+scripts/dev-up.sh          # PG(55432) -> harnessloop(50013) -> gateway(9000) -> vite(5174)
+scripts/dev-down.sh        # 按 PID 停业务进程，并停掉数据容器
+scripts/dev-down.sh --keep-db   # 只停业务进程，保留 PG / Mongo
+```
+
+成功后会打印看板地址 <http://localhost:5174/harness-loop/monitor> 与各组件 PID。
+二进制、日志、PID、生成的临时配置均在 `.harness/dev/`（已 gitignore），不污染仓库。
+
+- `scripts/dev-up.sh --install`：`frontend/node_modules` 缺失时自动 `npm ci`（默认只提示）
+- `scripts/dev-up.sh --rebuild`：强制重新编译 Go 服务
+- 前端 API 自动指向本地网关（`VITE_API_URL=http://localhost:9000`），不需要改 `vite.config.ts`
+- 端口可用环境变量覆盖：`HLP_PG_PORT` / `HLP_HARNESSLOOP_PORT` / `HLP_GATEWAY_PORT` / `HLP_VITE_PORT`
+- Windows：`scripts/dev-up.ps1` 是对 bash 脚本的薄包装
+
+细节见 [`docs/dev.md`](./docs/dev.md)。
 
 ## Deployment
 
