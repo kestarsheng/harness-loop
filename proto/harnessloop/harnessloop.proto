@@ -60,6 +60,9 @@ message CreateTaskRequest {
   Budget budget = 6;
   string user_id = 7;
   string idempotency_key = 8;
+  // Terminal identity. Optional so legacy clients can omit both fields.
+  string session_id = 9;
+  string terminal_label = 10;
 }
 
 message CreateTaskResponse {
@@ -89,6 +92,9 @@ message TaskCommand {
   string task_id = 2;
   string reason = 3;
   int64 abort_epoch = 4;
+  // Audit context of the issuing terminal. Optional.
+  string session_id = 5;
+  string terminal_label = 6;
 }
 
 message ResumeTaskRequest {
@@ -119,6 +125,9 @@ message TaskView {
   int64 updated_at_ms = 19;
   string last_checkpoint_id = 20;
   repeated StageAttemptView attempts = 21;
+  // Terminal identity; empty for tasks created by legacy clients.
+  string session_id = 22;
+  string terminal_label = 23;
 }
 
 message StageAttemptView {

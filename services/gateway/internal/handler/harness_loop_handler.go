@@ -30,11 +30,18 @@ type HarnessLoopHandler struct {
 	mu     sync.Mutex
 	conn   *grpc.ClientConn
 	client harnesspb.HarnessLoopServiceClient
+
+	// audit is the append-only gateway audit trail shared by the audit
+	// middleware and the /harness-loop/audit endpoints.
+	audit *AuditLog
 }
 
 func NewHarnessLoopHandler(cfg *config.Config) *HarnessLoopHandler {
-	return &HarnessLoopHandler{cfg: cfg}
+	return &HarnessLoopHandler{cfg: cfg, audit: NewAuditLog(10000)}
 }
+
+// Audit exposes the gateway audit trail so the router can wire the middleware.
+func (h *HarnessLoopHandler) Audit() *AuditLog { return h.audit }
 
 func (h *HarnessLoopHandler) Close() {
 	h.mu.Lock()
@@ -210,10 +217,27 @@ type createTaskBody struct {
 	ProjectID     string `json:"project_id"`
 	WorkspaceRoot string `json:"workspace_root"`
 	Goal          string `json:"goal"`
+	SessionID     string `json:"session_id"`
+	TerminalLabel string `json:"terminal_label"`
 	Budget        struct {
 		Tokens int64   `json:"tokens"`
 		Cost   float64 `json:"cost"`
 	} `json:"budget"`
+}
+
+// terminalIdentity resolves the terminal identity from the request body first
+// and the X-Session-ID / X-Terminal-Label headers second. Both are optional so
+// legacy clients keep working with an empty label.
+func terminalIdentity(c *gin.Context, bodySession, bodyLabel string) (string, string) {
+	session := bodySession
+	if session == "" {
+		session = c.GetHeader("X-Session-ID")
+	}
+	label := bodyLabel
+	if label == "" {
+		label = c.GetHeader("X-Terminal-Label")
+	}
+	return session, label
 }
 
 func (h *HarnessLoopHandler) CreateTask(c *gin.Context) {
@@ -231,11 +255,14 @@ func (h *HarnessLoopHandler) CreateTask(c *gin.Context) {
 		writeRPCError(c, err)
 		return
 	}
+	sessionID, terminalLabel := terminalIdentity(c, body.SessionID, body.TerminalLabel)
 	resp, err := client.CreateTask(outboundContext(c), &harnesspb.CreateTaskRequest{
 		TenantId:      tenantOf(c),
 		ProjectId:     body.ProjectID,
 		WorkspaceRoot: body.WorkspaceRoot,
 		Goal:          body.Goal,
+		SessionId:     sessionID,
+		TerminalLabel: terminalLabel,
 		Budget:        &harnesspb.Budget{Tokens: body.Budget.Tokens, Cost: body.Budget.Cost},
 	})
 	if err != nil {
@@ -276,6 +303,8 @@ func (h *HarnessLoopHandler) PauseTask(c *gin.Context) {
 	}
 	task, err := client.PauseTask(outboundContext(c), &harnesspb.TaskCommand{
 		TenantId: tenantOf(c), TaskId: c.Param("id"), Reason: body.Reason,
+		SessionId:     c.GetHeader("X-Session-ID"),
+		TerminalLabel: c.GetHeader("X-Terminal-Label"),
 	})
 	if err != nil {
 		writeRPCError(c, err)
@@ -316,6 +345,8 @@ func (h *HarnessLoopHandler) AbortTask(c *gin.Context) {
 	}
 	task, err := client.AbortTask(outboundContext(c), &harnesspb.TaskCommand{
 		TenantId: tenantOf(c), TaskId: c.Param("id"), Reason: body.Reason, AbortEpoch: body.AbortEpoch,
+		SessionId:     c.GetHeader("X-Session-ID"),
+		TerminalLabel: c.GetHeader("X-Terminal-Label"),
 	})
 	if err != nil {
 		writeRPCError(c, err)

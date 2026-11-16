@@ -323,3 +323,60 @@ func TestFeatureFlagEnablesAndFreezes(t *testing.T) {
 		t.Fatalf("new task must be rejected when disabled: %v", err)
 	}
 }
+
+func TestCreateTaskTerminalIdentity(t *testing.T) {
+	h := setupHandler(t)
+	ctx := context.Background()
+	tenant := "tenant-terminal-" + time.Now().Format("150405.000000000")
+
+	labels := []string{"host-1:/ws/one", "host-2:/ws/two"}
+	tasks := make([]*harnesspb.TaskView, len(labels))
+	for i, label := range labels {
+		resp, err := h.CreateTask(ctx, &harnesspb.CreateTaskRequest{
+			TenantId:      tenant,
+			ProjectId:     "proj-a",
+			WorkspaceRoot: t.TempDir(),
+			Goal:          "goal",
+			SessionId:     tenant + "-sess-" + label,
+			TerminalLabel: label,
+		})
+		if err != nil {
+			t.Fatalf("create %s: %v", label, err)
+		}
+		tasks[i] = resp.Task
+	}
+
+	list, err := h.ListTasks(ctx, &harnesspb.ListTasksRequest{TenantId: tenant, Limit: 10})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(list.Tasks) != len(labels) {
+		t.Fatalf("expected %d tasks, got %d", len(labels), len(list.Tasks))
+	}
+	sessions := map[string]bool{}
+	for _, v := range list.Tasks {
+		if v.SessionId == "" || v.TerminalLabel == "" {
+			t.Fatalf("task %s lost terminal identity: %+v", v.TaskId, v)
+		}
+		sessions[v.SessionId] = true
+	}
+	if len(sessions) != len(labels) {
+		t.Fatalf("session ids must be distinct: %v", sessions)
+	}
+
+	legacy, err := h.CreateTask(ctx, &harnesspb.CreateTaskRequest{
+		TenantId:      tenant,
+		ProjectId:     "proj-a",
+		WorkspaceRoot: t.TempDir(),
+		Goal:          "legacy client without terminal identity",
+	})
+	if err != nil {
+		t.Fatalf("create legacy: %v", err)
+	}
+	if legacy.Task.SessionId == "" {
+		t.Fatal("server must assign a session id when the client omits it")
+	}
+	if legacy.Task.TerminalLabel != "" {
+		t.Fatalf("server must not invent a terminal label: %q", legacy.Task.TerminalLabel)
+	}
+}

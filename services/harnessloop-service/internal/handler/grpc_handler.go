@@ -121,6 +121,10 @@ func (h *Handler) CreateTask(ctx context.Context, req *harnesspb.CreateTaskReque
 		return nil, status.Error(codes.FailedPrecondition, "E_FSM_DISABLED: harness loop is disabled")
 	}
 	taskID := newID("task")
+	sessionID := req.GetSessionId()
+	if sessionID == "" {
+		sessionID = newID("sess")
+	}
 
 	snapshot, err := json.Marshal(map[string]any{
 		"criteria": req.GetStageCriteria(),
@@ -147,6 +151,8 @@ func (h *Handler) CreateTask(ctx context.Context, req *harnesspb.CreateTaskReque
 		BudgetCost:     req.GetBudget().GetCost(),
 		FSMEnabled:     fsmEnabled,
 		PolicySnapshot: snapshot,
+		SessionID:      sessionID,
+		TerminalLabel:  req.GetTerminalLabel(),
 	}
 	if err := h.tasks.Create(ctx, run); err != nil {
 		return nil, status.Error(codes.Internal, err.Error())

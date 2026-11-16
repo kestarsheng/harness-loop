@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -318,5 +319,80 @@ func TestTaskList(t *testing.T) {
 	}
 	if len(items) != 0 {
 		t.Fatalf("cross-tenant list must be empty, got %d", len(items))
+	}
+}
+func TestTaskSessionIdentity(t *testing.T) {
+	db, repo, _ := setupTask(t)
+	ctx := context.Background()
+	tenant := fmt.Sprintf("tenant-session-%d", time.Now().UnixNano())
+
+	labels := []string{"host-1:/ws/one", "host-2:/ws/two"}
+	var wg sync.WaitGroup
+	for i := range labels {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			tr := &TaskRun{
+				TaskID:         fmt.Sprintf("%s-task-%d", tenant, idx),
+				TenantID:       tenant,
+				ProjectID:      "proj-a",
+				WorkspaceRoot:  "/tmp/ws",
+				Goal:           "goal",
+				GoalHash:       "hash",
+				CurrentStage:   fsm.StageRequirement,
+				SessionID:      fmt.Sprintf("%s-sess-%d", tenant, idx),
+				TerminalLabel:  labels[idx],
+				PolicySnapshot: []byte(`{}`),
+			}
+			if err := repo.Create(ctx, tr); err != nil {
+				t.Errorf("create terminal %d: %v", idx, err)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	items, err := repo.List(ctx, tenant, "", nil, 10)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(items) != len(labels) {
+		t.Fatalf("expected %d tasks, got %d", len(labels), len(items))
+	}
+	sessions := map[string]bool{}
+	got := map[string]string{}
+	for _, it := range items {
+		if it.SessionID == "" || it.TerminalLabel == "" {
+			t.Fatalf("task %s has empty identity: session=%q label=%q", it.TaskID, it.SessionID, it.TerminalLabel)
+		}
+		sessions[it.SessionID] = true
+		got[it.TaskID] = it.TerminalLabel
+	}
+	if len(sessions) != len(labels) {
+		t.Fatalf("session ids must be distinct, got %v", sessions)
+	}
+	if got[tenant+"-task-0"] != labels[0] || got[tenant+"-task-1"] != labels[1] {
+		t.Fatalf("terminal labels mismatched: %v", got)
+	}
+
+	legacyID := tenant + "-legacy"
+	if _, err := db.Exec(ctx, `
+		INSERT INTO hlp_task.task_runs
+			(task_id, tenant_id, project_id, workspace_root, goal, goal_hash, current_stage, status, policy_snapshot)
+		VALUES ($1, $2, 'proj-a', '/tmp/ws', 'goal', 'hash', 'a', 'running', '{}')`, legacyID, tenant); err != nil {
+		t.Fatalf("insert legacy row: %v", err)
+	}
+	legacy, err := repo.Get(ctx, tenant, legacyID)
+	if err != nil {
+		t.Fatalf("get legacy task: %v", err)
+	}
+	if legacy.SessionID != "" || legacy.TerminalLabel != "" {
+		t.Fatalf("legacy task must read empty identity: %+v", legacy)
+	}
+	items, err = repo.List(ctx, tenant, "", nil, 10)
+	if err != nil {
+		t.Fatalf("list with legacy row: %v", err)
+	}
+	if len(items) != len(labels)+1 {
+		t.Fatalf("legacy task must still be listed, got %d items", len(items))
 	}
 }

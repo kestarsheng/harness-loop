@@ -56,6 +56,8 @@ type TaskRun struct {
 	ConsumedCost   float64
 	FSMEnabled     bool
 	PolicySnapshot []byte
+	SessionID      string
+	TerminalLabel  string
 	Version        int64
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
@@ -126,13 +128,13 @@ func (r *TaskRepo) Create(ctx context.Context, t *TaskRun) error {
 		INSERT INTO hlp_task.task_runs
 			(task_id, tenant_id, project_id, workspace_root, goal, goal_hash, current_stage, status,
 			 terminal_reason, attempt_no, retry_count, acceptance_fail, budget_tokens, budget_cost,
-			 consumed_tokens, consumed_cost, fsm_enabled, policy_snapshot, version)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,0)`,
+			 consumed_tokens, consumed_cost, fsm_enabled, policy_snapshot, session_id, terminal_label, version)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,0)`,
 		t.TaskID, t.TenantID, t.ProjectID, t.WorkspaceRoot, t.Goal, t.GoalHash,
 		string(t.CurrentStage), string(t.Status), nullable(t.TerminalReason),
 		nullJSON(t.AttemptNo), nullJSON(t.RetryCount), nullJSON(t.AcceptanceFail),
 		t.BudgetTokens, t.BudgetCost, t.ConsumedTokens, t.ConsumedCost,
-		t.FSMEnabled, t.PolicySnapshot)
+		t.FSMEnabled, t.PolicySnapshot, nullable(t.SessionID), nullable(t.TerminalLabel))
 	if err != nil {
 		return fmt.Errorf("task_repo: create %s: %w", t.TaskID, err)
 	}
@@ -150,7 +152,7 @@ func nullable(s string) any {
 const taskColumns = `task_id, tenant_id, project_id, workspace_root, goal, goal_hash,
 	current_stage, status, COALESCE(terminal_reason, ''), attempt_no, retry_count, acceptance_fail,
 	budget_tokens, budget_cost, consumed_tokens, consumed_cost, fsm_enabled, policy_snapshot,
-	version, created_at, updated_at`
+	version, created_at, updated_at, COALESCE(session_id, ''), COALESCE(terminal_label, '')`
 
 type rowScanner interface {
 	Scan(dest ...any) error
@@ -167,7 +169,7 @@ func scanTask(s rowScanner) (*TaskRun, error) {
 	if err := s.Scan(&t.TaskID, &t.TenantID, &t.ProjectID, &t.WorkspaceRoot, &t.Goal, &t.GoalHash,
 		&stage, &status, &t.TerminalReason, &attempt, &retry, &fail,
 		&t.BudgetTokens, &t.BudgetCost, &t.ConsumedTokens, &t.ConsumedCost, &t.FSMEnabled, &policy,
-		&t.Version, &t.CreatedAt, &t.UpdatedAt); err != nil {
+		&t.Version, &t.CreatedAt, &t.UpdatedAt, &t.SessionID, &t.TerminalLabel); err != nil {
 		return nil, err
 	}
 	t.CurrentStage = fsm.Stage(stage)
