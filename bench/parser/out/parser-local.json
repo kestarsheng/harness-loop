@@ -1,0 +1,234 @@
+{
+  "labels": "bench\\parser\\labels.jsonl",
+  "treesitter": false,
+  "threshold": 0.9,
+  "files": [
+    {
+      "file": "samples/go/service.go",
+      "lang": "go",
+      "parser_id": "go_ast",
+      "capability": "full",
+      "degraded": false,
+      "symbols": {
+        "want": 3,
+        "got": 3,
+        "hit": 3
+      },
+      "imports": {
+        "want": 3,
+        "got": 3,
+        "hit": 3
+      },
+      "calls": {
+        "want": 8,
+        "got": 8,
+        "hit": 8
+      }
+    },
+    {
+      "file": "samples/go/registry.go",
+      "lang": "go",
+      "parser_id": "go_ast",
+      "capability": "full",
+      "degraded": false,
+      "symbols": {
+        "want": 4,
+        "got": 4,
+        "hit": 4
+      },
+      "imports": {
+        "want": 2,
+        "got": 2,
+        "hit": 2
+      },
+      "calls": {
+        "want": 7,
+        "got": 7,
+        "hit": 7
+      }
+    },
+    {
+      "file": "samples/typescript/pipeline.ts",
+      "lang": "typescript",
+      "parser_id": "ts_regex",
+      "capability": "regex",
+      "degraded": false,
+      "symbols": {
+        "want": 7,
+        "got": 7,
+        "hit": 7
+      },
+      "imports": {
+        "want": 3,
+        "got": 3,
+        "hit": 3
+      },
+      "calls": {
+        "want": 10,
+        "got": 11,
+        "hit": 10
+      },
+      "misses": [
+        "call extra: runPipeline-\u003eStageRunner"
+      ]
+    },
+    {
+      "file": "samples/typescript/eventbus.ts",
+      "lang": "typescript",
+      "parser_id": "ts_regex",
+      "capability": "regex",
+      "degraded": false,
+      "symbols": {
+        "want": 7,
+        "got": 7,
+        "hit": 7
+      },
+      "imports": {
+        "want": 2,
+        "got": 2,
+        "hit": 2
+      },
+      "calls": {
+        "want": 16,
+        "got": 15,
+        "hit": 15
+      },
+      "misses": [
+        "call missing: summarize-\u003efrom"
+      ]
+    },
+    {
+      "file": "samples/python/checkpoint.py",
+      "lang": "python",
+      "parser_id": "py_regex",
+      "capability": "regex",
+      "degraded": false,
+      "symbols": {
+        "want": 9,
+        "got": 9,
+        "hit": 9
+      },
+      "imports": {
+        "want": 5,
+        "got": 5,
+        "hit": 5
+      },
+      "calls": {
+        "want": 17,
+        "got": 17,
+        "hit": 17
+      }
+    },
+    {
+      "file": "samples/python/scheduler.py",
+      "lang": "python",
+      "parser_id": "py_regex",
+      "capability": "regex",
+      "degraded": false,
+      "symbols": {
+        "want": 10,
+        "got": 10,
+        "hit": 10
+      },
+      "imports": {
+        "want": 4,
+        "got": 4,
+        "hit": 4
+      },
+      "calls": {
+        "want": 9,
+        "got": 12,
+        "hit": 9
+      },
+      "misses": [
+        "call extra: timed-\u003ewrapper",
+        "call extra: timed-\u003emonotonic",
+        "call extra: timed-\u003efn"
+      ]
+    }
+  ],
+  "languages": [
+    {
+      "lang": "go",
+      "files": 2,
+      "symbols": {
+        "want": 7,
+        "got": 7,
+        "hit": 7
+      },
+      "imports": {
+        "want": 5,
+        "got": 5,
+        "hit": 5
+      },
+      "calls": {
+        "want": 15,
+        "got": 15,
+        "hit": 15
+      },
+      "symbol_f1": 1,
+      "import_f1": 1,
+      "call_f1": 1,
+      "min_f1": 1,
+      "pass": true,
+      "parser_ids": [
+        "go_ast"
+      ]
+    },
+    {
+      "lang": "python",
+      "files": 2,
+      "symbols": {
+        "want": 19,
+        "got": 19,
+        "hit": 19
+      },
+      "imports": {
+        "want": 9,
+        "got": 9,
+        "hit": 9
+      },
+      "calls": {
+        "want": 26,
+        "got": 29,
+        "hit": 26
+      },
+      "symbol_f1": 1,
+      "import_f1": 1,
+      "call_f1": 0.9454545454545454,
+      "min_f1": 0.9454545454545454,
+      "pass": true,
+      "parser_ids": [
+        "py_regex"
+      ]
+    },
+    {
+      "lang": "typescript",
+      "files": 2,
+      "symbols": {
+        "want": 14,
+        "got": 14,
+        "hit": 14
+      },
+      "imports": {
+        "want": 5,
+        "got": 5,
+        "hit": 5
+      },
+      "calls": {
+        "want": 26,
+        "got": 26,
+        "hit": 25
+      },
+      "symbol_f1": 1,
+      "import_f1": 1,
+      "call_f1": 0.9615384615384616,
+      "min_f1": 0.9615384615384616,
+      "pass": true,
+      "parser_ids": [
+        "ts_regex"
+      ]
+    }
+  ],
+  "pass": true
+}

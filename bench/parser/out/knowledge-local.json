@@ -1,0 +1,183 @@
+{
+  "dataset": "bench\\parser\\knowledge",
+  "docs": 10,
+  "cases": 6,
+  "min_score": 0.4,
+  "max_regress": 0.05,
+  "runs": [
+    {
+      "name": "run1-baseline-lexical",
+      "cases": [
+        {
+          "case_id": "case-01",
+          "config": "run1-baseline-lexical",
+          "retrieved": [
+            "doc-01"
+          ],
+          "context_precision": 1,
+          "faithfulness": 1,
+          "answer_relevancy": 1,
+          "answer": "增量索引按文件内容 sha256 hash 判定变更。变更文件重新解析并 upsert chunks，被删除的文件写入 tombstone 记录以便清理"
+        },
+        {
+          "case_id": "case-02",
+          "config": "run1-baseline-lexical",
+          "retrieved": [
+            "doc-02",
+            "doc-01"
+          ],
+          "context_precision": 0.5,
+          "faithfulness": 1,
+          "answer_relevancy": 1,
+          "answer": "在 cgo 与 treesitter 标签下，TypeScript 与 Python 走语法树解析；未启用该标签时降级为正则解析。实际解析能力写入 indexed_files 的 parser_id 字段，取值为 go_ast、ts_tree_sitter、ts_regex 等"
+        },
+        {
+          "case_id": "case-03",
+          "config": "run1-baseline-lexical",
+          "retrieved": [
+            "doc-03",
+            "doc-09",
+            "doc-04"
+          ],
+          "context_precision": 0.3333333333333333,
+          "faithfulness": 1,
+          "answer_relevancy": 1,
+          "answer": "检索融合走 fulltext、vector、graph 三路 RRF，常数 K 取 60。图路默认权重 0.8，每个符号最多扩展 5 个邻居"
+        },
+        {
+          "case_id": "case-04",
+          "config": "run1-baseline-lexical",
+          "retrieved": [
+            "doc-04",
+            "doc-03"
+          ],
+          "context_precision": 0.5,
+          "faithfulness": 1,
+          "answer_relevancy": 1,
+          "answer": "rerank 超时或返回 5xx 时保留融合顺序，并在 metadata 标记 rerank=degraded。融合后的 top20 送 HTTP rerank 取 top5"
+        },
+        {
+          "case_id": "case-05",
+          "config": "run1-baseline-lexical",
+          "retrieved": [
+            "doc-05",
+            "doc-09",
+            "doc-08"
+          ],
+          "context_precision": 0.3333333333333333,
+          "faithfulness": 0.6666666666666666,
+          "answer_relevancy": 1,
+          "answer": "每次 harness loop 新建一个 session_id，terminal_label 默认取 hostname:cwd 且可配置，二者随任务提交给服务端。调度器按租户权重做 WFQ 分配 slot，单任务独占 slot 数受配额上限约束，超额任务进入等待队列",
+          "unsupported_claims": [
+            "看板卡片标题优先显示 terminal_label"
+          ]
+        },
+        {
+          "case_id": "case-06",
+          "config": "run1-baseline-lexical",
+          "retrieved": [
+            "doc-07",
+            "doc-06",
+            "doc-08"
+          ],
+          "context_precision": 0.3333333333333333,
+          "faithfulness": 1,
+          "answer_relevancy": 1,
+          "answer": "SSE 用 last_seq 查询参数断点续传，先用 ListEvents 补齐缺口，再切到 WatchEvents 实时流。WatchEvents 按 seq 单调递增推送事件"
+        }
+      ],
+      "mean_context_precision": 0.5,
+      "mean_faithfulness": 0.9444444444444445,
+      "mean_relevancy": 1,
+      "mean_overall": 0.8148148148148149
+    },
+    {
+      "name": "run2-seed+neighbor",
+      "cases": [
+        {
+          "case_id": "case-01",
+          "config": "run2-seed+neighbor",
+          "retrieved": [
+            "doc-01",
+            "doc-02"
+          ],
+          "context_precision": 0.5,
+          "faithfulness": 1,
+          "answer_relevancy": 1,
+          "answer": "增量索引按文件内容 sha256 hash 判定变更。变更文件重新解析并 upsert chunks，被删除的文件写入 tombstone 记录以便清理"
+        },
+        {
+          "case_id": "case-02",
+          "config": "run2-seed+neighbor",
+          "retrieved": [
+            "doc-02",
+            "doc-01"
+          ],
+          "context_precision": 0.5,
+          "faithfulness": 1,
+          "answer_relevancy": 1,
+          "answer": "在 cgo 与 treesitter 标签下，TypeScript 与 Python 走语法树解析；未启用该标签时降级为正则解析。实际解析能力写入 indexed_files 的 parser_id 字段，取值为 go_ast、ts_tree_sitter、ts_regex 等"
+        },
+        {
+          "case_id": "case-03",
+          "config": "run2-seed+neighbor",
+          "retrieved": [
+            "doc-03",
+            "doc-09",
+            "doc-04"
+          ],
+          "context_precision": 0.3333333333333333,
+          "faithfulness": 1,
+          "answer_relevancy": 1,
+          "answer": "检索融合走 fulltext、vector、graph 三路 RRF，常数 K 取 60。图路默认权重 0.8，每个符号最多扩展 5 个邻居"
+        },
+        {
+          "case_id": "case-04",
+          "config": "run2-seed+neighbor",
+          "retrieved": [
+            "doc-04",
+            "doc-03"
+          ],
+          "context_precision": 0.5,
+          "faithfulness": 1,
+          "answer_relevancy": 1,
+          "answer": "rerank 超时或返回 5xx 时保留融合顺序，并在 metadata 标记 rerank=degraded。融合后的 top20 送 HTTP rerank 取 top5"
+        },
+        {
+          "case_id": "case-05",
+          "config": "run2-seed+neighbor",
+          "retrieved": [
+            "doc-05",
+            "doc-09",
+            "doc-06"
+          ],
+          "context_precision": 0.6666666666666666,
+          "faithfulness": 1,
+          "answer_relevancy": 1,
+          "answer": "每次 harness loop 新建一个 session_id，terminal_label 默认取 hostname:cwd 且可配置，二者随任务提交给服务端。调度器按租户权重做 WFQ 分配 slot，单任务独占 slot 数受配额上限约束，超额任务进入等待队列"
+        },
+        {
+          "case_id": "case-06",
+          "config": "run2-seed+neighbor",
+          "retrieved": [
+            "doc-07",
+            "doc-06",
+            "doc-05"
+          ],
+          "context_precision": 0.3333333333333333,
+          "faithfulness": 1,
+          "answer_relevancy": 1,
+          "answer": "SSE 用 last_seq 查询参数断点续传，先用 ListEvents 补齐缺口，再切到 WatchEvents 实时流。WatchEvents 按 seq 单调递增推送事件"
+        }
+      ],
+      "mean_context_precision": 0.47222222222222227,
+      "mean_faithfulness": 1,
+      "mean_relevancy": 1,
+      "mean_overall": 0.8240740740740741
+    }
+  ],
+  "regressions": [
+    "case-01: context_precision 1.000 -\u003e 0.500 (retrieved [doc-01] -\u003e [doc-01 doc-02])"
+  ],
+  "pass": true
+}

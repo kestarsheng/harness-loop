@@ -1,0 +1,11 @@
+// bench/parser/knowledge/docs.jsonl —— 固定知识语料（10 篇，人工撰写）
+{"id":"doc-01","title":"增量索引","tags":["索引","增量"],"text":"增量索引按文件内容 sha256 hash 判定变更。变更文件重新解析并 upsert chunks，被删除的文件写入 tombstone 记录以便清理。"}
+{"id":"doc-02","title":"多语言解析能力","tags":["解析","索引"],"text":"在 cgo 与 treesitter 标签下，TypeScript 与 Python 走语法树解析；未启用该标签时降级为正则解析。实际解析能力写入 indexed_files 的 parser_id 字段，取值为 go_ast、ts_tree_sitter、ts_regex 等。"}
+{"id":"doc-03","title":"RRF 融合","tags":["检索","融合"],"text":"检索融合走 fulltext、vector、graph 三路 RRF，常数 K 取 60。图路默认权重 0.8，每个符号最多扩展 5 个邻居。"}
+{"id":"doc-04","title":"HTTP rerank","tags":["检索","rerank"],"text":"融合后的 top20 送 HTTP rerank 取 top5。rerank 超时或返回 5xx 时保留融合顺序，并在 metadata 标记 rerank=degraded。"}
+{"id":"doc-05","title":"终端身份","tags":["CLI","终端"],"text":"每次 harness loop 新建一个 session_id，terminal_label 默认取 hostname:cwd 且可配置，二者随任务提交给服务端。"}
+{"id":"doc-06","title":"全局多 Agent 看板","tags":["看板","终端"],"text":"大屏不按 project 过滤，只按 tenant 订阅 SSE。卡片标题优先显示 terminal_label，其次才是 goal 截断。"}
+{"id":"doc-07","title":"事件流与断点续传","tags":["事件","SSE"],"text":"WatchEvents 按 seq 单调递增推送事件。SSE 用 last_seq 查询参数断点续传，先用 ListEvents 补齐缺口，再切到 WatchEvents 实时流。"}
+{"id":"doc-08","title":"检查点与恢复","tags":["检查点","恢复"],"text":"每个阶段结束写入一条 checkpoint，恢复时从最新 seq 重放后续事件。MongoDB 不可用时任务标记 checkpoint_degraded 并继续执行。"}
+{"id":"doc-09","title":"公平调度","tags":["调度","配额"],"text":"调度器按租户权重做 WFQ 分配 slot，单任务独占 slot 数受配额上限约束，超额任务进入等待队列。"}
+{"id":"doc-10","title":"模型选择与回退","tags":["模型","回退"],"text":"模型注册表支持成本优先、质量优先、固定三种策略，可按阶段覆盖。主模型不可用时按回退链切换并记录成本。"}

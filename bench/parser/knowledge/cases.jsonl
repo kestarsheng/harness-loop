@@ -1,0 +1,10 @@
+// bench/parser/knowledge/cases.jsonl —— 固定查询集（6 条，人工标注 related/claims/key_terms）
+// relevant  = 人工判定与该 query 相关的文档 id；
+// claims    = 一条合格答案应当出现的断言 + 支撑它的文档（支撑文档未被召回即计为不忠实）；
+// key_terms = 合格答案必须点到的术语，用于 relevancy（关键词覆盖）。
+{"id":"case-01","query":"增量索引怎么判断文件变更","relevant":["doc-01"],"claims":[{"text":"按文件内容 sha256 hash 判定变更","support":["doc-01"]},{"text":"删除的文件写入 tombstone","support":["doc-01"]}],"key_terms":["sha256","tombstone"]}
+{"id":"case-02","query":"没有 treesitter 标签时 TypeScript 走哪条解析路径","relevant":["doc-02"],"claims":[{"text":"未启用 treesitter 标签时降级为正则解析","support":["doc-02"]},{"text":"解析能力写入 parser_id","support":["doc-02"]}],"key_terms":["正则","parser_id"]}
+{"id":"case-03","query":"RRF 三路融合的权重和图扩展上限","relevant":["doc-03"],"claims":[{"text":"融合包含 fulltext、vector、graph 三路","support":["doc-03"]},{"text":"图路权重 0.8 且每符号最多扩展 5 个邻居","support":["doc-03"]}],"key_terms":["fulltext","0.8"]}
+{"id":"case-04","query":"rerank 超时后检索结果如何处理","relevant":["doc-04"],"claims":[{"text":"top20 送 rerank 取 top5","support":["doc-04"]},{"text":"失败时保留融合顺序并标记 degraded","support":["doc-04"]}],"key_terms":["top5","degraded"]}
+{"id":"case-05","query":"两个终端同时跑怎么区分任务","relevant":["doc-05","doc-06"],"claims":[{"text":"每次 loop 新建 session_id","support":["doc-05"]},{"text":"terminal_label 默认取 hostname:cwd","support":["doc-05"]},{"text":"看板卡片标题优先显示 terminal_label","support":["doc-06"]}],"key_terms":["session_id","terminal_label"]}
+{"id":"case-06","query":"SSE 断线重连后如何补齐事件","relevant":["doc-07"],"claims":[{"text":"SSE 用 last_seq 断点续传","support":["doc-07"]},{"text":"先用 ListEvents 补齐再切 WatchEvents","support":["doc-07"]}],"key_terms":["last_seq","ListEvents"]}
