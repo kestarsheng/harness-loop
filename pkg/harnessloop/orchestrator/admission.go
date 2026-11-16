@@ -16,6 +16,11 @@ package orchestrator
 //   - 占用超过 max_subtask_minutes 的 slot 视为"过了衰减窗口"：它们终将被调度层
 //     超时收口，于是不再计入准入，窗口因此有上界。调度层原有的"超额在跑、靠自然
 //     完成衰减"保持原样，作为兜底。
+//
+// 二次确认（gate 同源）：衰减只是记账口径，不等于闸门真的有空位——慢任务可能
+// 还在真实占着 slot。所以 Admit/Drain 在衰减快判定放行之后，必须再读一次与调度
+// 层共用的同一个 TenantGate：真实可用量为 0 就照旧返回 E_SCHEDULER_LIMIT_EXCEEDED
+// + reason=tenant_slots_full + retry_after_ms，绝不"放行后换个地方排队"。
 
 import (
 	"context"
@@ -203,6 +208,22 @@ type AdmissionStats struct {
 	Queued          int
 	Rejected        int
 	AdmittedByDecay int
+	// DeniedByGate counts the decisions where the decayed accounting said "there
+	// is room" but the shared tenant gate had no free slot left. A non-zero value
+	// means the decay window is no longer a proxy for real capacity: the slow
+	// tasks outlived it while still holding their slots.
+	DeniedByGate int
+}
+
+// poolSnapshot is one reading of the tenant pool, taken while deciding. used /
+// decayed / max come from the decayed accounting; gateAvailable is the gate's
+// real headroom when it was re-read after the fast path, and negative means the
+// gate was not consulted (the decayed accounting already said "full").
+type poolSnapshot struct {
+	used          int
+	decayed       int
+	max           int
+	gateAvailable int
 }
 
 // Admission gates new parent tasks on the tenant pool. It sits above
@@ -279,6 +300,12 @@ func (a *Admission) Fairness() *TenantFairness {
 // slot. Otherwise it returns a decision plus an admission error carrying
 // details.reason=tenant_slots_full: queued (default) or rejected, never both.
 // Calling it twice for the same parent is idempotent.
+//
+// 两段判定（T-P2-16 二次确认）：
+//  1. 快路径看衰减记账（used-decayed < max）：过了窗口的 slot 不再挡新父任务；
+//  2. 慢路径再读同一个 TenantGate 的真实可用量：衰减只是记账口径，慢任务可能
+//     仍真实占着 gate。gate 没空位时必须拒，否则"准入放行"只是把父任务换个地方
+//     排队，首字节延迟照样被别人的尾部钉死。
 func (a *Admission) Admit(ctx context.Context, parentTaskID string) (AdmissionDecision, error) {
 	if parentTaskID == "" {
 		return AdmissionDecision{}, newError(CodeSchedulerLimitExceeded, "parent_task_id is required for admission")
@@ -302,22 +329,50 @@ func (a *Admission) Admit(ctx context.Context, parentTaskID string) (AdmissionDe
 	}
 
 	if used-decayed < max {
-		a.admitted[parentTaskID] = struct{}{}
-		a.order = append(a.order, parentTaskID)
-		a.dropQueuedLocked(parentTaskID)
-		a.stats.Admitted++
-		if decayed > 0 {
-			a.stats.AdmittedByDecay++
+		// 第二确认：TenantActive 读的是 admission 与调度层共用的那个 gate 实例，
+		// 所以"这里读到有空位"与"调度层能立刻拿到 slot"指的是同一件事。
+		liveUsed, liveMax := a.fair.TenantActive()
+		if liveMax-liveUsed > 0 {
+			a.admitted[parentTaskID] = struct{}{}
+			a.order = append(a.order, parentTaskID)
+			a.dropQueuedLocked(parentTaskID)
+			a.stats.Admitted++
+			if decayed > 0 {
+				a.stats.AdmittedByDecay++
+			}
+			decision.Admitted = true
+			decision.QueueDepth = len(a.queue)
+			a.recordLocked(ctx, decision, AdmissionAdmitted, "")
+			return decision, nil
 		}
-		decision.Admitted = true
-		decision.QueueDepth = len(a.queue)
-		a.recordLocked(ctx, decision, AdmissionAdmitted, "")
-		return decision, nil
+		a.stats.DeniedByGate++
+		return a.fullLocked(ctx, parentTaskID, decision, poolSnapshot{
+			used:          liveUsed,
+			decayed:       decayed,
+			max:           liveMax,
+			gateAvailable: 0,
+		})
 	}
 
+	return a.fullLocked(ctx, parentTaskID, decision, poolSnapshot{
+		used:          used,
+		decayed:       decayed,
+		max:           max,
+		gateAvailable: -1,
+	})
+}
+
+// fullLocked is the single "pool is full" exit of Admit: queue or reject, record
+// the decision, and return the shared E_SCHEDULER_LIMIT_EXCEEDED error with
+// details.reason=tenant_slots_full. Both the decayed fast path and the gate
+// second confirmation go through here so the contract cannot drift.
+func (a *Admission) fullLocked(ctx context.Context, parentTaskID string, decision AdmissionDecision, snap poolSnapshot) (AdmissionDecision, error) {
+	decision.SlotsUsed = snap.used
+	decision.SlotsMax = snap.max
+	decision.SlotsDecayed = snap.decayed
 	decision.Queued = a.cfg.QueueWhenFull
 	decision.Reason = AllocDeniedTenantFull
-	decision.RetryAfter = a.fair.RetryAfter(window)
+	decision.RetryAfter = a.fair.RetryAfter(a.cfg.window())
 	decision.Position = len(a.queue) + 1
 	if decision.Queued {
 		a.enqueueLocked(parentTaskID)
@@ -334,22 +389,32 @@ func (a *Admission) Admit(ctx context.Context, parentTaskID string) (AdmissionDe
 	}
 	a.recordLocked(ctx, decision, outcome, decision.Reason)
 
+	detail := fmt.Sprintf("tenant pool full for parent %s: %d/%d slots used (%d decayed, window %dm)",
+		parentTaskID, snap.used, snap.max, snap.decayed, a.cfg.MaxSubtaskMinutes)
+	if snap.gateAvailable >= 0 {
+		detail = fmt.Sprintf("tenant pool full for parent %s: gate has no free slot (%d/%d used, %d decayed, window %dm)",
+			parentTaskID, snap.used, snap.max, snap.decayed, a.cfg.MaxSubtaskMinutes)
+	}
+	details := map[string]any{
+		"reason":              decision.Reason,
+		"parent_task_id":      parentTaskID,
+		"tenant_slots":        snap.max,
+		"slots_used":          snap.used,
+		"slots_decayed":       snap.decayed,
+		"queue_depth":         decision.QueueDepth,
+		"queued":              decision.Queued,
+		"position":            decision.Position,
+		"retry_after_ms":      decision.RetryAfter.Milliseconds(),
+		"max_subtask_minutes": a.cfg.MaxSubtaskMinutes,
+	}
+	if snap.gateAvailable >= 0 {
+		// 只在真的读过 gate 时才暴露这一项，否则"没查"会被误读成"没空位"。
+		details["gate_available"] = snap.gateAvailable
+	}
 	return decision, &AdmissionError{
-		Reason: decision.Reason,
-		Detail: fmt.Sprintf("tenant pool full for parent %s: %d/%d slots used (%d decayed, window %dm)",
-			parentTaskID, used, max, decayed, a.cfg.MaxSubtaskMinutes),
-		Details: map[string]any{
-			"reason":              decision.Reason,
-			"parent_task_id":      parentTaskID,
-			"tenant_slots":        max,
-			"slots_used":          used,
-			"slots_decayed":       decayed,
-			"queue_depth":         decision.QueueDepth,
-			"queued":              decision.Queued,
-			"position":            decision.Position,
-			"retry_after_ms":      decision.RetryAfter.Milliseconds(),
-			"max_subtask_minutes": a.cfg.MaxSubtaskMinutes,
-		},
+		Reason:  decision.Reason,
+		Detail:  detail,
+		Details: details,
 	}
 }
 
@@ -368,6 +433,14 @@ func (a *Admission) Drain(ctx context.Context) []string {
 	// 一个父任务至少需要 1 个 slot 才能推进，所以放行额度 = 有效空位数量：
 	// 空 1 个 slot 就只放 1 个，不做"池子空 1 个、排队 10 个一起进"的挤兑。
 	capacity := max - (used - decayed)
+	// 与 Admit 同一条二次确认：衰减记账放行的额度不能超过 gate 的真实空位，
+	// 否则排队父任务会绕过闸门被"放行"进池子。
+	if liveUsed, liveMax := a.fair.TenantActive(); liveMax-liveUsed < capacity {
+		capacity = liveMax - liveUsed
+	}
+	if capacity < 0 {
+		capacity = 0
+	}
 	var out []string
 	for len(a.queue) > 0 && capacity > 0 {
 		parent := a.queue[0]

@@ -34,6 +34,16 @@ type orchestrationState struct {
 	dagID     string
 }
 
+// tenantPool is the per-tenant orchestration pool. The three pieces must be one
+// object graph: Admission watches the very TenantGate the schedulers take slots
+// from, so "准入说还有空位"和"调度层真能拿到 slot"指的是同一件事——否则准入层
+// 的二次确认读的是另一本账，等于自证清白（T-P2-16 生产化）。
+type tenantPool struct {
+	gate      *orchestrator.TenantGate
+	fairness  *orchestrator.TenantFairness
+	admission *orchestrator.Admission
+}
+
 // OrchestratorBridge wires orchestrator.Planner/Scheduler/Aggregator into the
 // runtime. When the feature flag is off the runtime never calls it and keeps
 // the existing single-agent stage flow.
@@ -42,20 +52,49 @@ type OrchestratorBridge struct {
 	emitter  *orchestrator.PublisherEmitter
 	executor SubtaskExecutor
 
+	quota     orchestrator.QuotaConfig
+	admission orchestrator.AdmissionConfig
+
 	mu    sync.Mutex
 	tasks map[string]*orchestrationState
+	pools map[string]*tenantPool
 }
 
 func NewOrchestratorBridge(enabled bool, emitter *orchestrator.PublisherEmitter, executor SubtaskExecutor) *OrchestratorBridge {
+	quota := orchestrator.DefaultQuotaConfig()
+	admission := orchestrator.AdmissionConfigFromQuota(quota)
+	// 生产桥不排队：父任务在 b 阶段就被拒（E_SCHEDULER_LIMIT_EXCEEDED +
+	// retry_after_ms），比"接单后干等别人的 15 分钟慢任务"更可预期。
+	admission.QueueWhenFull = false
 	return &OrchestratorBridge{
-		enabled:  enabled,
-		emitter:  emitter,
-		executor: executor,
-		tasks:    make(map[string]*orchestrationState),
+		enabled:   enabled,
+		emitter:   emitter,
+		executor:  executor,
+		quota:     quota,
+		admission: admission,
+		tasks:     make(map[string]*orchestrationState),
+		pools:     make(map[string]*tenantPool),
 	}
 }
 
 func (b *OrchestratorBridge) Enabled() bool { return b != nil && b.enabled }
+
+// withQuota resizes the tenant pool before any parent joins it. Pools are built
+// lazily on first use, so this only works while nobody has planned a DAG yet;
+// it exists so the shared-gate behaviour can be exercised without 20 parents.
+func (b *OrchestratorBridge) withQuota(quota orchestrator.QuotaConfig) *OrchestratorBridge {
+	if b == nil {
+		return b
+	}
+	admission := orchestrator.AdmissionConfigFromQuota(quota)
+	admission.QueueWhenFull = false
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.quota = quota
+	b.admission = admission
+	b.pools = make(map[string]*tenantPool)
+	return b
+}
 
 func (b *OrchestratorBridge) SetExecutor(executor SubtaskExecutor) {
 	if b != nil {
@@ -77,6 +116,10 @@ type OrchestratorStageContext struct {
 // PlanBStage validates the DAG emitted by the b stage and enqueues its
 // subtasks. A malformed plan is returned to the caller, which records it in the
 // stage result instead of aborting the run.
+//
+// 共享闸门：scheduler 与 admission 用的是同一个 TenantGate 实例，"准入放行 →
+// 调度层立刻能拿到 slot"这条链才算闭合。准入被拒（租户池真实空位为 0）时不建
+// scheduler、不发 plan_created：拒绝必须发生在接单之前。
 func (b *OrchestratorBridge) PlanBStage(ctx context.Context, ec OrchestratorStageContext, rawPlan []byte) (*orchestrator.PlanResult, error) {
 	if !b.Enabled() {
 		return nil, nil
@@ -84,6 +127,10 @@ func (b *OrchestratorBridge) PlanBStage(ctx context.Context, ec OrchestratorStag
 	rawPlan = extractJSON(rawPlan)
 	if len(rawPlan) == 0 {
 		return nil, fmt.Errorf("orchestrator bridge: b stage output has no DAG plan")
+	}
+	pool, quota := b.poolFor(ec.TenantID)
+	if _, err := pool.admission.Admit(ctx, ec.TaskID); err != nil {
+		return nil, err
 	}
 	taskEmitter := b.taskEmitter(ec)
 	planner := orchestrator.NewPlanner(orchestrator.PlanConfig{MaxDirectChildren: 20, MaxDepth: 2, TolerateRatioMax: 0.5, WorkspaceRoot: ec.WorkspaceRoot}, taskEmitter)
@@ -96,10 +143,18 @@ func (b *OrchestratorBridge) PlanBStage(ctx context.Context, ec OrchestratorStag
 		RawPlan:      rawPlan,
 	})
 	if err != nil {
+		pool.admission.Release(ctx, ec.TaskID)
 		return nil, err
 	}
-	scheduler := orchestrator.NewScheduler(orchestrator.DefaultQuotaConfig(), taskEmitter)
+	scheduler := orchestrator.NewSchedulerWithGate(quota, pool.gate, taskEmitter)
 	if err := scheduler.Enqueue(result.Subtasks); err != nil {
+		pool.admission.Release(ctx, ec.TaskID)
+		return nil, err
+	}
+	// 调度层从同一个租户池取 slot（fairness 内部就是那把 gate），admission 看到
+	// 的占用因此与调度层完全同源。
+	if err := scheduler.AttachFairness(pool.fairness, 0); err != nil {
+		pool.admission.Release(ctx, ec.TaskID)
 		return nil, err
 	}
 	b.mu.Lock()
@@ -162,7 +217,8 @@ func applySubtaskResult(st *subtask.Subtask, res *SubtaskResult) {
 }
 
 // AggregateDStage builds the d-stage aggregation report from the scheduler's
-// latest subtask states.
+// latest subtask states. The parent then leaves the admission pool: its slots
+// are already back with the tenant gate, this only clears the parent's record.
 func (b *OrchestratorBridge) AggregateDStage(ctx context.Context, ec OrchestratorStageContext) (*orchestrator.AggregationReport, error) {
 	if !b.Enabled() {
 		return nil, nil
@@ -171,6 +227,7 @@ func (b *OrchestratorBridge) AggregateDStage(ctx context.Context, ec Orchestrato
 	if state == nil || state.plan == nil {
 		return nil, fmt.Errorf("orchestrator bridge: no DAG was planned for task %s", ec.TaskID)
 	}
+	defer b.releaseAdmission(ec.TenantID, ec.TaskID)
 	latest := make([]*subtask.Subtask, 0, len(state.plan.Subtasks))
 	for _, st := range state.plan.Subtasks {
 		if state.scheduler != nil {
@@ -196,6 +253,40 @@ func (b *OrchestratorBridge) stateFor(taskID string) *orchestrationState {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.tasks[taskID]
+}
+
+// poolFor returns the tenant's shared pool, creating it on first use, together
+// with the quota snapshot it was built from. One pool per tenant is what makes
+// the gate shared: two parents of the same tenant must compete for the same
+// slots instead of each opening a private 20-slot pool.
+func (b *OrchestratorBridge) poolFor(tenantID string) (*tenantPool, orchestrator.QuotaConfig) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if pool, ok := b.pools[tenantID]; ok {
+		return pool, b.quota
+	}
+	// 注意：gate 在这里只创建一次，然后同时交给 fairness 和 admission。
+	gate := orchestrator.NewTenantGate(b.quota.MaxAgentsPerTenant)
+	fairness := orchestrator.NewTenantFairness(orchestrator.FairnessConfigFromQuota(b.quota), gate)
+	pool := &tenantPool{
+		gate:      gate,
+		fairness:  fairness,
+		admission: orchestrator.NewAdmission(fairness, b.admission),
+	}
+	b.pools[tenantID] = pool
+	return pool, b.quota
+}
+
+// releaseAdmission gives the parent's admission back once its d stage is done.
+// Without it a retried parent would hit the idempotent short-circuit in Admit
+// and skip the tenant-pool check entirely.
+func (b *OrchestratorBridge) releaseAdmission(tenantID, taskID string) {
+	b.mu.Lock()
+	pool := b.pools[tenantID]
+	b.mu.Unlock()
+	if pool != nil {
+		pool.admission.Release(context.Background(), taskID)
+	}
 }
 
 func (b *OrchestratorBridge) taskEmitter(ec OrchestratorStageContext) *orchestrator.PublisherEmitter {
