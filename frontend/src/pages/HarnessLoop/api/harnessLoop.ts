@@ -275,17 +275,22 @@ function getData<T>(url: string, config?: AxiosRequestConfig): Promise<T> {
 }
 
 export const harnessLoopApi = {
-  listTasks: (params: ListTasksParams = {}) =>
-    request(
+  listTasks: (params: ListTasksParams = {}) => {
+    // 看板只按 tenant 查询；project_id 仅在调用方显式传入时才发送。
+    const query: Record<string, unknown> = { limit: params.limit ?? 50 };
+    if (params.project_id) {
+      query.project_id = params.project_id;
+    }
+    if (params.status && params.status.length > 0) {
+      query.status = params.status;
+    }
+    return request(
       getData<TaskListResponse>(`${BASE}/tasks`, {
-        params: {
-          project_id: params.project_id,
-          status: params.status,
-          limit: params.limit ?? 50,
-        },
+        params: query,
         paramsSerializer: arrayAwareParams,
       }),
-    ),
+    );
+  },
 
   getTask: (taskId: string) =>
     request(getData<HarnessTaskView>(`${BASE}/tasks/${encodeURIComponent(taskId)}`)),

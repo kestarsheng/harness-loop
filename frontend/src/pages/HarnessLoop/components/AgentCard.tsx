@@ -8,6 +8,7 @@ import {
   isTerminalStatus,
   STAGES,
   statusLabel,
+  taskDisplayTitle,
 } from '../types';
 
 const STAGE_ORDER: Record<StageCode, number> = { a: 0, b: 1, c: 2, d: 3, e: 4 };
@@ -71,12 +72,16 @@ function AgentCardComponent({
   const elapsed = state.startedAtMs ? endedAt - state.startedAtMs : 0;
   const anomalyCount = state.anomalies.length;
   const latestAnomaly = state.anomalies[0];
+  const terminal = isTerminalStatus(state.status);
+  const displayTitle = taskDisplayTitle(state);
+  const fullTitle = (state.terminalLabel || state.goal || state.taskId).trim();
 
   return (
     <div
       role="button"
       tabIndex={0}
-      aria-label={`任务 ${state.taskId}，${statusLabel(state.status)}`}
+      data-terminal={terminal ? 'true' : undefined}
+      aria-label={`任务 ${state.taskId}${fullTitle && fullTitle !== state.taskId ? `（${fullTitle}）` : ''}，${statusLabel(state.status)}${terminal ? '，已结束' : ''}`}
       onClick={() => onSelect(state.taskId)}
       onKeyDown={(event) => {
         if (event.key === 'Enter' || event.key === ' ') {
@@ -99,7 +104,10 @@ function AgentCardComponent({
         boxShadow: 'var(--hlp-shadow, 0 1px 2px rgba(0, 0, 0, 0.35))',
         cursor: 'pointer',
         outline: 'none',
-        transition: 'border-color 120ms ease, background 120ms ease',
+        // 终态卡片灰显，但仍可点选查看详情。
+        opacity: terminal ? 0.55 : 1,
+        filter: terminal ? 'saturate(0.35)' : undefined,
+        transition: 'border-color 120ms ease, background 120ms ease, opacity 120ms ease',
       }}
     >
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -114,9 +122,9 @@ function AgentCardComponent({
             whiteSpace: 'nowrap',
             flex: 1,
           }}
-          title={state.taskId}
+          title={`${fullTitle} · ${state.taskId}`}
         >
-          {state.taskId.slice(0, 12)}
+          {displayTitle}
         </span>
         {anomalyCount > 0 && (
           <Tooltip title={`${anomalyCount} 条异常，点击定位`}>
