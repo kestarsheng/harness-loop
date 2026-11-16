@@ -26,6 +26,7 @@ import (
 
 type Options struct {
 	Server     string
+	KBServer   string
 	Tenant     string
 	Config     string
 	WebBaseURL string
@@ -34,8 +35,9 @@ type Options struct {
 }
 
 const (
-	DefaultServerAddr = "127.0.0.1:50013"
-	DefaultTenant     = "default"
+	DefaultServerAddr   = "127.0.0.1:50013"
+	DefaultKBServerAddr = "127.0.0.1:50002"
+	DefaultTenant       = "default"
 )
 
 var opts Options
@@ -48,6 +50,7 @@ func (e *ExitError) Error() string { return fmt.Sprintf("exit code %d", e.Code) 
 
 type fileConfig struct {
 	Server     string `yaml:"server"`
+	KBServer   string `yaml:"kb_server"`
 	Tenant     string `yaml:"tenant"`
 	WebBaseURL string `yaml:"web_base_url"`
 }
@@ -61,13 +64,14 @@ func NewRootCmd() *cobra.Command {
 	}
 	pf := root.PersistentFlags()
 	pf.StringVar(&opts.Server, "server", "", "harnessloop-service gRPC address (default 127.0.0.1:50013)")
+	pf.StringVar(&opts.KBServer, "kb-server", "", "knowledge-service gRPC address (default 127.0.0.1:50002)")
 	pf.StringVar(&opts.Tenant, "tenant", "", "tenant id (default default)")
 	pf.StringVar(&opts.Config, "config", "", "config file (default ~/.harness/config.yaml)")
 	pf.StringVar(&opts.WebBaseURL, "web-base-url", "", "local web base URL for the fixed monitor board (default http://localhost:5174)")
 	pf.BoolVar(&opts.JSON, "json", false, "emit JSON envelope")
 	pf.BoolVar(&opts.NoColor, "no-color", false, "disable colored output")
 
-	root.AddCommand(newLoopCmd(), newRunCmd(), newStatusCmd(), newAbortCmd(), newResumeCmd(), newLogsCmd(), newVersionCmd())
+	root.AddCommand(newLoopCmd(), newRunCmd(), newStatusCmd(), newAbortCmd(), newResumeCmd(), newLogsCmd(), newKBCmd(), newVersionCmd())
 	return root
 }
 
@@ -120,6 +124,19 @@ func resolveServer(cfg fileConfig) string {
 		return cfg.Server
 	}
 	return DefaultServerAddr
+}
+
+func resolveKBServer(cfg fileConfig) string {
+	if opts.KBServer != "" {
+		return opts.KBServer
+	}
+	if env := os.Getenv("HARNESS_KB_SERVER"); env != "" {
+		return env
+	}
+	if cfg.KBServer != "" {
+		return cfg.KBServer
+	}
+	return DefaultKBServerAddr
 }
 
 func resolveTenant(cfg fileConfig) string {

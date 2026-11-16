@@ -70,9 +70,18 @@ func newRunCmd() *cobra.Command {
 			}
 
 			if !opts.JSON && !noTUI && isatty.IsTerminal(os.Stdout.Fd()) {
+				kbSrc, kbConn := newTUIKBSource(cmd)
+				if kbConn != nil {
+					defer kbConn.Close()
+				}
 				runCtx, cancel := context.WithTimeout(cmd.Context(), timeout)
 				defer cancel()
-				result, tuiErr := tui.Run(runCtx, client, tenant, created.Task, tui.RunOptions{NoColor: opts.NoColor})
+				result, tuiErr := tui.Run(runCtx, client, tenant, created.Task, tui.RunOptions{
+					NoColor:      opts.NoColor,
+					KB:           kbSrc,
+					InitialView:  os.Getenv("HARNESS_TUI_VIEW"),
+					InitialQuery: os.Getenv("HARNESS_TUI_KB_QUERY"),
+				})
 				if tuiErr != nil {
 					if runCtx.Err() == context.DeadlineExceeded {
 						emit(cmd, output.Failure("E_TIMEOUT", "task did not reach a terminal state before --timeout", nil))

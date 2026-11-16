@@ -96,10 +96,17 @@ func newLoopCmd() *cobra.Command {
 				defer cancel()
 			}
 
+			kbSrc, kbConn := newTUIKBSource(cmd)
+			if kbConn != nil {
+				defer kbConn.Close()
+			}
 			result, tuiErr := tui.Run(runCtx, client, tenant, created.Task, tui.RunOptions{
-				NoColor:   opts.NoColor,
-				WebURL:    monitorURL,
-				Hyperlink: hyperlink,
+				NoColor:      opts.NoColor,
+				WebURL:       monitorURL,
+				Hyperlink:    hyperlink,
+				KB:           kbSrc,
+				InitialView:  os.Getenv("HARNESS_TUI_VIEW"),
+				InitialQuery: os.Getenv("HARNESS_TUI_KB_QUERY"),
 			})
 
 			fmt.Fprintf(cmd.OutOrStdout(), "task_id=%s\nmonitor=%s\n", taskID, monitorURL)
