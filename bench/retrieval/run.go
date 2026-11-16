@@ -7,6 +7,7 @@
 //	go run ./bench/retrieval                  # 使用已提交的 queries.jsonl
 //	go run ./bench/retrieval -build           # 从仓库重新自动采样并覆盖 queries.jsonl
 //	go run ./bench/retrieval -k 20 -distractors 60
+//	go run ./bench/retrieval -graph-abc -json # 图扩展种子策略 A/B/C 对照（含稀释度指标）
 //
 // 数据来源与标注口径：
 //   - queries.jsonl 由 -build 从仓库 Go 源码自动采样生成，ground truth 为「文件 + 函数」；
@@ -61,6 +62,7 @@ type hit struct {
 	File      string
 	Symbol    string
 	StartLine int
+	Sources   []string
 }
 
 type modeResult struct {
@@ -87,6 +89,9 @@ func main() {
 		kFlag       = flag.Int("k", 20, "top-K for Recall@K")
 		distractors = flag.Int("distractors", 60, "number of distractor files indexed alongside ground-truth files")
 		fullOnly    = flag.Bool("full-only", false, "index only ground-truth files (fast sanity run)")
+		graphABC    = flag.Bool("graph-abc", false, "run graph seed strategies A/B/C and emit JSON")
+		jsonOut     = flag.Bool("json", false, "emit one JSON line per variant instead of the markdown report")
+		decayStep   = flag.Float64("decay-step", 0.1, "linear seed-rank decay step for variant C")
 	)
 	flag.Parse()
 	if *kFlag <= 0 {
@@ -148,6 +153,13 @@ func main() {
 		stats.files, stats.chunks, stats.edges, stats.duration)
 	fmt.Printf("queries=%d  topK=%d  distractors=%d  labeling=auto-sampled (NOT manually labeled)\n\n",
 		len(queries), *kFlag, *distractors)
+
+	if *graphABC {
+		if err := runGraphABC(ctx, writer, root, queries, *kFlag, *decayStep, *jsonOut); err != nil {
+			fail("graph abc: %v", err)
+		}
+		return
+	}
 
 	results, err := runModes(ctx, writer, db, root, queries, *kFlag)
 	if err != nil {
@@ -544,7 +556,12 @@ func runModes(ctx context.Context, writer *codeindex.CodeWriter, db *pgindex.DB,
 func toHits(root string, hits []codeindex.SearchHit) []hit {
 	out := make([]hit, 0, len(hits))
 	for _, h := range hits {
-		out = append(out, hit{File: relTo(root, h.FilePath), Symbol: h.Symbol, StartLine: h.StartLine})
+		out = append(out, hit{
+			File:      relTo(root, h.FilePath),
+			Symbol:    h.Symbol,
+			StartLine: h.StartLine,
+			Sources:   h.Sources,
+		})
 	}
 	return out
 }
