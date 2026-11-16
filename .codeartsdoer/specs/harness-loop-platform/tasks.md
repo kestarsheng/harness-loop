@@ -680,7 +680,7 @@
 | 目标 | 交接记录结构完整可校验，接收方上下文仅由契约与显式注入构成，禁止共享全量对话。 |
 | 关联需求 | REQ-131、REQ-132、REQ-137、REQ-140；design 4.13.4 |
 | 依赖 | T-P1-17、T-P1-22 |
-| 涉及文件 | [N] `pkg/harnessloop/handoff/contract.go`、[N] `pkg/harnessloop/handoff/validate.go`、[N] `pkg/harnessloop/handoff/transfer.go`、[N] `pkg/harnessloop/handoff/record.go`、[N] `pkg/harnessloop/handoff/contract_test.go` |
+| 涉及文件 | [M] `pkg/harnessloop/orchestrator/handoff_contract.go`、[M] `pkg/harnessloop/orchestrator/handoff_validate.go`、[M] `pkg/harnessloop/orchestrator/handoff_transfer.go`、[M] `pkg/harnessloop/orchestrator/handoff_record.go`、[M] `pkg/harnessloop/orchestrator/handoff_test.go` |
 | 实施要点 | 1) 契约含 `handoff_id`、产物引用（路径+哈希）、五要素摘要、未完成项清单、约束（角色/工具/目录/预算/验收标准）、移交方/接收方；2) 缺五要素或未完成项返 `E_HANDOFF_INCOMPLETE`；3) 接收方输入快照 `injected_from` 不含执行历史；4) 传输复用 a2a-service，不新建传输协议；5) 跨租户/跨项目返 `E_CROSS_TENANT_DENIED` 并审计。 |
 | 验收标准 | `go test ./pkg/harnessloop/handoff/...`：缺未完成项被拒；B 的输入快照不含 A 的原始消息序列；共享会话读取 A 历史被拒并产 `security.violation`；跨租户交接被拒。 |
 | 复杂度 | M |
@@ -996,7 +996,7 @@
 | 目标 | 支持跨阶段 handoff（c→d）、嵌套 DAG（depth=2）与重规划（新 dag_id），旧 DAG 可查。 |
 | 关联需求 | REQ-125、REQ-127、REQ-131、REQ-133；design 4.13.2 / 4.13.4 / 4.13.5 / 8.3 P2-10 |
 | 依赖 | T-P1-18、T-P1-20、T-P1-21 |
-| 涉及文件 | [N] `pkg/harnessloop/orchestrator/replan.go`、[M] `pkg/harnessloop/orchestrator/dag.go`、[M] `pkg/harnessloop/handoff/transfer.go`、[N] `pkg/harnessloop/orchestrator/replan_test.go` |
+| 涉及文件 | [N] `pkg/harnessloop/orchestrator/replan.go`、[M] `pkg/harnessloop/orchestrator/dag.go`、[M] `pkg/harnessloop/orchestrator/handoff_transfer.go`、[N] `pkg/harnessloop/orchestrator/replan_test.go` |
 | 实施要点 | 1) 重规划生成新 `dag_id`，旧 DAG 标记 `superseded` 且可查；2) 嵌套展开到 depth=2，第 3 层拒绝；3) 跨阶段 handoff 契约五要素齐备并校验；4) 汇聚兼容多 DAG 版本；5) 重规划事件携带新旧 `dag_id`。 |
 | 验收标准 | `go test ./pkg/harnessloop/orchestrator/... -run TestReplan`；二层子任务正确展开、三层被拒；旧 DAG 可 `GET`；跨阶段 handoff 缺要素被拒。 |
 | 复杂度 | L |
