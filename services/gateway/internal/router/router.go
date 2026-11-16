@@ -2,6 +2,9 @@
 package router
 
 import (
+	"os"
+	"strings"
+
 	"agent-platform/pkg/config"
 	"agent-platform/services/gateway/internal/handler"
 	"agent-platform/services/gateway/internal/middleware"
@@ -34,6 +37,11 @@ func Setup(engine *gin.Engine, cfg *config.Config) {
 	// API v2 group
 	api := engine.Group("/api/v2")
 	api.Use(middleware.Tenant())
+	// Strict tenant paths are configurable; the default guards only /harness-loop.
+	api.Use(middleware.StrictTenantForPaths(strictTenantPaths()))
+	// Audit covers lifecycle/destructive operations listed in auditRules(). Routes
+	// outside the rule table keep their existing behaviour untouched.
+	api.Use(middleware.Audit(harnessLoopHandler.Audit(), handler.AuditRules()))
 
 	// Chat routes
 	api.POST("/chat", chatHandler.Chat)
@@ -323,7 +331,7 @@ func Setup(engine *gin.Engine, cfg *config.Config) {
 
 	// Harness loop routes (strict tenant: X-Tenant-ID required)
 	harnessLoop := api.Group("/harness-loop")
-	harnessLoop.Use(middleware.StrictTenant())
+
 	harnessLoop.GET("/tasks", harnessLoopHandler.ListTasks)
 	harnessLoop.POST("/tasks", harnessLoopHandler.CreateTask)
 	harnessLoop.GET("/tasks/:id", harnessLoopHandler.GetTask)
@@ -337,6 +345,9 @@ func Setup(engine *gin.Engine, cfg *config.Config) {
 	harnessLoop.GET("/events", harnessLoopHandler.ListEvents)
 	harnessLoop.GET("/checkpoints", harnessLoopHandler.ListCheckpoints)
 	harnessLoop.POST("/checkpoints/restore", harnessLoopHandler.RestoreCheckpoint)
+	// Audit trail: read-only for tenants, deletion is rejected for everyone.
+	harnessLoop.GET("/audit", harnessLoopHandler.ListAudit)
+	harnessLoop.DELETE("/audit", harnessLoopHandler.DeleteAudit)
 
 	// Health check
 	engine.GET("/health", func(c *gin.Context) {
@@ -357,4 +368,24 @@ func Setup(engine *gin.Engine, cfg *config.Config) {
 	engine.GET("/ready", func(c *gin.Context) {
 		c.JSON(200, gin.H{"ready": true})
 	})
+}
+
+// strictTenantPaths resolves the guarded namespaces. GATEWAY_STRICT_TENANT_PATHS
+// overrides the default list (comma separated, "!" marks an exception prefix).
+func strictTenantPaths() []string {
+	raw := os.Getenv("GATEWAY_STRICT_TENANT_PATHS")
+	if strings.TrimSpace(raw) == "" {
+		return middleware.DefaultStrictTenantPaths()
+	}
+	parts := strings.Split(raw, ",")
+	paths := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			paths = append(paths, trimmed)
+		}
+	}
+	if len(paths) == 0 {
+		return middleware.DefaultStrictTenantPaths()
+	}
+	return paths
 }
