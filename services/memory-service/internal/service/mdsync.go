@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -21,6 +23,8 @@ type MDSyncOptions struct {
 	ProjectID    string
 	PollInterval time.Duration
 	Debounce     time.Duration
+	Limits       memoryfile.Limits
+	Sink         memoryfile.EventSink
 }
 
 func DefaultMDSyncOptions() MDSyncOptions {
@@ -41,9 +45,10 @@ type Syncer struct {
 	writer *mempg.MemoryWriter
 	opts   MDSyncOptions
 
-	mu    sync.Mutex
-	files map[string]string
-	hash  map[string]string
+	mu     sync.Mutex
+	files  map[string]string
+	hash   map[string]string
+	stores map[string]*memoryfile.Store
 }
 
 func NewSyncer(writer *mempg.MemoryWriter, opts MDSyncOptions) *Syncer {
@@ -53,7 +58,10 @@ func NewSyncer(writer *mempg.MemoryWriter, opts MDSyncOptions) *Syncer {
 	if opts.Debounce <= 0 {
 		opts.Debounce = 100 * time.Millisecond
 	}
-	return &Syncer{writer: writer, opts: opts, files: map[string]string{}, hash: map[string]string{}}
+	if opts.Limits.MaxTopicsProject <= 0 {
+		opts.Limits = memoryfile.DefaultLimits()
+	}
+	return &Syncer{writer: writer, opts: opts, files: map[string]string{}, hash: map[string]string{}, stores: map[string]*memoryfile.Store{}}
 }
 
 func (s *Syncer) Register(path, scope string) {
@@ -82,9 +90,29 @@ func (s *Syncer) SyncFile(ctx context.Context, path, scope string) (SyncResult, 
 		return SyncResult{}, fmt.Errorf("mdsync: parse %s: %w", path, err)
 	}
 
-	records := make([]mempg.TopicRecord, 0, len(doc.Topics))
-	keys := make([]string, 0, len(doc.Topics))
-	for rank, topic := range doc.Topics {
+	store := memoryfile.NewStore(&memoryfile.Document{SchemaVersion: doc.SchemaVersion, Scope: doc.Scope, TenantID: doc.TenantID, ProjectID: doc.ProjectID, UpdatedAt: doc.UpdatedAt, OrderVersion: doc.OrderVersion}, s.opts.Limits).WithRejectAtLimit()
+	if s.opts.Sink != nil {
+		store.WithSink(s.opts.Sink)
+	}
+	for _, topic := range doc.Topics {
+		if err := store.Insert(topic); err != nil {
+			if errors.Is(err, memoryfile.ErrTooManyTopics) {
+				log.Printf("mdsync: capacity warning: refusing new topic %q in %s", topic.Key, path)
+				continue
+			}
+			return SyncResult{}, fmt.Errorf("mdsync: store topic %s: %w", topic.Key, err)
+		}
+	}
+	// Preserve the source file and its order exactly. The bounded Store governs
+	// runtime inserts and lookup state; sync never renders it back to user md.
+	limited := store.Document()
+	s.mu.Lock()
+	s.stores[path] = store
+	s.mu.Unlock()
+
+	records := make([]mempg.TopicRecord, 0, len(limited.Topics))
+	keys := make([]string, 0, len(limited.Topics))
+	for rank, topic := range limited.Topics {
 		keys = append(keys, topic.Key)
 		records = append(records, mempg.TopicRecord{
 			TenantID:    s.opts.TenantID,
@@ -135,8 +163,14 @@ func (s *Syncer) SyncFile(ctx context.Context, path, scope string) (SyncResult, 
 
 	return SyncResult{
 		Path: path, Scope: scope, Indexed: indexed, Deleted: deleted,
-		Topics: len(doc.Topics), SyncedAt: time.Now().UTC(),
+		Topics: len(limited.Topics), SyncedAt: time.Now().UTC(),
 	}, nil
+}
+
+func (s *Syncer) Store(path string) *memoryfile.Store {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.stores[path]
 }
 
 func (s *Syncer) SyncOnce(ctx context.Context) ([]SyncResult, error) {
