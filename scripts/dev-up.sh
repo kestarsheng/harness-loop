@@ -105,7 +105,7 @@ gen_harnessloop_config() {
     # 只改 feature_flags.file 这一行：其余 harness_loop 配置仍指向仓库文件。
     sed -e "s|^\([[:space:]]*file:[[:space:]]*\)\"pkg/config/harness_loop/features.yaml\"|\1\"${DEMO_FEATURES_REL}\"|" \
       "$out" >"$out.tmp" && mv "$out.tmp" "$out" || return 1
-    c_ok "演示开关：3 条新链路已置为 default: true（$DEMO_FEATURES_REL）"
+    c_ok "演示开关：3 条新链路已置为 default: true（$DEMO_FEATURES_REL）" >&2
   fi
   echo "$out"
 }
