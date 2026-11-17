@@ -2,11 +2,16 @@
 # 一键拉起本地开发栈：PG -> harnessloop-service -> gateway -> vite。
 #
 # 用法：
-#   scripts/dev-up.sh [--install] [--rebuild] [--no-build] [-h]
+#   scripts/dev-up.sh [--demo] [--install] [--rebuild] [--no-build] [-h]
 #
+#   --demo      演示模式：把三条 P2 新链路开关（编排/模型策略/权限层）临时置为
+#               default: true，只写进 .harness/dev/conf 下的临时 features 文件，
+#               不改仓库里的 pkg/config/harness_loop/features.yaml
 #   --install   允许自动执行 npm ci（默认只提示，不自动装依赖）
 #   --rebuild   强制重新编译 Go 服务
 #   --no-build  跳过编译，直接使用 .harness/dev/bin 下已有二进制
+#
+# 环境变量：HLP_DEMO_FLAGS=1 等价于 --demo（便于 CI/脚本里带开关起栈）。
 #
 # 端口（可用环境变量覆盖）：
 #   HLP_PG_PORT=55432  HLP_HARNESSLOOP_PORT=50013  HLP_GATEWAY_PORT=9000  HLP_VITE_PORT=5174
@@ -21,12 +26,14 @@ set -uo pipefail
 INSTALL_DEPS=0
 FORCE_REBUILD=0
 NO_BUILD=0
+DEMO_FLAGS="${HLP_DEMO_FLAGS:-0}"
 STARTED=()
 
-usage() { sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,19p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
+    --demo)     DEMO_FLAGS=1 ;;
     --install)  INSTALL_DEPS=1 ;;
     --rebuild)  FORCE_REBUILD=1 ;;
     --no-build) NO_BUILD=1 ;;
@@ -35,6 +42,11 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
+
+case "$DEMO_FLAGS" in
+  1|true|TRUE|yes) DEMO_FLAGS=1 ;;
+  *)               DEMO_FLAGS=0 ;;
+esac
 
 # ---- 失败收尾 --------------------------------------------------------------
 cleanup_started() {
@@ -69,6 +81,10 @@ launch() { # launch <组件> <workdir> <command...>
 # ---- 配置生成（模板 + 环境变量覆盖） --------------------------------------
 sed_escape() { printf '%s' "$1" | sed 's/[&|\\]/\\&/g'; }
 
+# 演示用的 features 文件：三条 P2 新链路开关 default: true，仓库里有一份可复查的
+# 副本（scripts/dev-features.demo.yaml），仓库自己的 features.yaml 一个字节都不动。
+DEMO_FEATURES_REL="scripts/dev-features.demo.yaml"
+
 # 模板里 policy/models/retry/feature_flags 写的是 "config/harness_loop/*.yaml"，
 # 而仓库实际把它们放在 pkg/config/harness_loop/。这里改成「相对仓库根」的路径：
 # 服务一律以 $ROOT 为工作目录启动，相对路径在 Windows / Linux 上都成立
@@ -83,6 +99,14 @@ gen_harnessloop_config() {
     -e "s|\"config/harness_loop/|\"pkg/config/harness_loop/|g" \
     -e "s|^\([[:space:]]*addr:[[:space:]]*\).*|\1\"\"|" \
     "$tpl" >"$out" || return 1
+
+  if [ "$DEMO_FLAGS" = 1 ]; then
+    [ -f "$ROOT/$DEMO_FEATURES_REL" ] || { c_err "缺少演示开关文件 $DEMO_FEATURES_REL"; return 1; }
+    # 只改 feature_flags.file 这一行：其余 harness_loop 配置仍指向仓库文件。
+    sed -e "s|^\([[:space:]]*file:[[:space:]]*\)\"pkg/config/harness_loop/features.yaml\"|\1\"${DEMO_FEATURES_REL}\"|" \
+      "$out" >"$out.tmp" && mv "$out.tmp" "$out" || return 1
+    c_ok "演示开关：3 条新链路已置为 default: true（$DEMO_FEATURES_REL）"
+  fi
   echo "$out"
 }
 
@@ -152,6 +176,10 @@ step_harnessloop() {
   local name="harnessloop"
   if service_running "$name"; then
     c_ok "$name 已在运行（PID $(pid_of "$name"))，跳过"
+    if [ "$DEMO_FLAGS" = 1 ]; then
+      c_warn "--demo 只在启动时读开关：当前进程用的还是上次的配置"
+      c_dim "  想看到新链路请先 scripts/dev-down.sh 再 scripts/dev-up.sh --demo"
+    fi
     return 0
   fi
   clear_pidfile "$name"
@@ -281,6 +309,15 @@ main() {
   printf '  %-22s %-8s %s\n' "gateway" "$(pid_of gateway)" "127.0.0.1:${GATEWAY_PORT} (/health)"
   printf '  %-22s %-8s %s\n' "vite" "$(pid_of vite)" "127.0.0.1:${VITE_PORT}"
   printf '  %-22s %-8s %s\n' "postgres" "docker" "127.0.0.1:${PG_PORT} (${PG_CONTAINER})"
+  if [ "$DEMO_FLAGS" = 1 ]; then
+    printf '\n'
+    c_ok "演示开关已生效（features=$DEMO_FEATURES_REL）"
+    printf '  %-24s %s\n' "orchestrator" "on  → 多 Agent 编排（DAG / 子任务 / 汇聚）"
+    printf '  %-24s %s\n' "model_strategy" "on  → 模型策略选择 + 阶段覆盖 + 回退链"
+    printf '  %-24s %s\n' "policy_layers" "on  → 四层权限解析 + 审计 + 高危审批"
+    c_dim "  启动日志核对：harnessloop: feature gates (tenant=platform): orchestrator=on ..."
+    c_dim "  看板：$MONITOR_URL（多 Agent / 模型 / 权限三视图）"
+  fi
   printf '\n'
   c_dim "日志：$LOG_DIR    停止：scripts/dev-down.sh [--keep-db]"
 }

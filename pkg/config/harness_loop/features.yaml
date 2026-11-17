@@ -6,3 +6,25 @@ flags:
     rules:
       - tenants: [tenant-a]
         percentage: 100
+
+  # ---- P2 三条新链路开关（默认全关 = 旧行为） ------------------------------
+  # 三个开关各自独立，互不隐含：只开 orchestrator 不会顺带打开模型策略或权限层。
+  # 进程启动时按「本服务所属租户」解析一次（默认 platform），落成 bridge 的
+  # enabled 位；关掉即回到 pkg/agent/engine.go 的单 Agent + 静态模型 + 旧权限路径。
+  # 租户灰度示例（取消注释即生效，改 tenants 列表即可）：
+  #   rules:
+  #     - tenants: [tenant-a]
+  #       enabled: true
+
+  - name: harness.loop.orchestrator.enabled
+    # 新链路：Planner/Scheduler/Aggregator 多 Agent 编排（子任务 DAG + 汇聚）。
+    default: false
+
+  - name: harness.loop.model_strategy.enabled
+    # 新链路：模型策略选择（cost_first/quality_first/balanced + 阶段覆盖 + 回退链）。
+    default: false
+
+  - name: harness.loop.policy_layers.enabled
+    # 新链路：四层权限解析（系统硬限制 → 角色 → 阶段矩阵 → 任务覆盖）+ 审计/审批。
+    # MCP 工具的强制拦截也挂在这一层：工具调用一律过 PolicyBridge，没有独立开关。
+    default: false
