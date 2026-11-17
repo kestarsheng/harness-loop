@@ -20,7 +20,8 @@ package orchestrator
 // 二次确认（gate 同源）：衰减只是记账口径，不等于闸门真的有空位——慢任务可能
 // 还在真实占着 slot。所以 Admit/Drain 在衰减快判定放行之后，必须再读一次与调度
 // 层共用的同一个 TenantGate：真实可用量为 0 就照旧返回 E_SCHEDULER_LIMIT_EXCEEDED
-// + reason=tenant_slots_full + retry_after_ms，绝不"放行后换个地方排队"。
+// + reason=tenant_slots_full（+ 估得出时带 retry_after_ms；估不出就缺省，缺省
+// ≠ 立刻可重试，见 AdmissionError），绝不"放行后换个地方排队"。
 
 import (
 	"context"
@@ -97,6 +98,8 @@ type AdmissionRecord struct {
 	SlotsDecayed int       `json:"slots_decayed"`
 	QueueDepth   int       `json:"queue_depth"`
 	Position     int       `json:"position,omitempty"`
+	// RetryAfterMs 是衰减窗口的估算值；0 表示「估算不出来」，不是「立刻可重试」
+	// （与 AdmissionError.details["retry_after_ms"] 同一套契约，见 AdmissionError）。
 	RetryAfterMs int64     `json:"retry_after_ms,omitempty"`
 	At           time.Time `json:"at"`
 }
@@ -149,6 +152,20 @@ func (m *MemoryAdmissionSink) Find(outcome string) []AdmissionRecord {
 // E_SCHEDULER_LIMIT_EXCEEDED (no new code: the frontend/CLI error dictionary is
 // unchanged) and every discriminator lives in Details, so callers branch on
 // details["reason"] instead of parsing the message.
+//
+// retry_after_ms 契约：
+//   - 有值 = 对"最早那个仍占着 slot 的父任务何时滑出衰减窗口"的估算（毫秒）；
+//   - 缺省 = **无法估算**，不是"立刻可以重试"。不能估算的原因至少有两种：准入层
+//     看不到任何 hold（slot 是被调度层/gate 直接占住的），或衰减窗口配置为 0。
+//     这时按 0 处理会让调用方立刻重试，把拒绝变成热循环。
+//
+// 所以调用方一律用指数退避（1s 起、上限 30s、带抖动）兜底，把 retry_after_ms 当
+// "至少等这么久"的下界而不是精确时刻：
+//
+//	delay := exponentialBackoff(attempt)      // 缺省时的默认路径
+//	if ms, ok := details["retry_after_ms"]; ok { delay = max(delay, ms) }
+//
+// 这条契约只约束本类型；E_SCHEDULER_LIMIT_EXCEEDED 的其它产生点不受影响。
 type AdmissionError struct {
 	Reason  string
 	Detail  string
@@ -404,9 +421,9 @@ func (a *Admission) fullLocked(ctx context.Context, parentTaskID string, decisio
 		"queue_depth":         decision.QueueDepth,
 		"queued":              decision.Queued,
 		"position":            decision.Position,
-		"retry_after_ms":      decision.RetryAfter.Milliseconds(),
 		"max_subtask_minutes": a.cfg.MaxSubtaskMinutes,
 	}
+	setRetryAfter(details, decision.RetryAfter)
 	if snap.gateAvailable >= 0 {
 		// 只在真的读过 gate 时才暴露这一项，否则"没查"会被误读成"没空位"。
 		details["gate_available"] = snap.gateAvailable
@@ -416,6 +433,17 @@ func (a *Admission) fullLocked(ctx context.Context, parentTaskID string, decisio
 		Detail:  detail,
 		Details: details,
 	}
+}
+
+// setRetryAfter writes retry_after_ms only when a real estimate exists.
+//
+// RetryAfter<=0 means "估算不出来"（没有可观测的 hold，或衰减窗口为 0），此时
+// 字段整个不出现。写 0 会被读成"立刻可重试"，调用方一顿重试就把拒绝变成了热循环。
+func setRetryAfter(details map[string]any, d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	details["retry_after_ms"] = d.Milliseconds()
 }
 
 // Drain admits queued parents in FIFO order while the pool still has an

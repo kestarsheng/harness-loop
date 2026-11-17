@@ -4,6 +4,14 @@ import type { HarnessEvent } from '../types';
 import { toNumber } from '../types';
 import { decodeStreamFrame, mergeLastSeq, STREAM_EVENT_NAME } from '../streamProtocol';
 
+// 事件游标语义（与 proto/harnessloop 一致）：
+//   since_seq / next_since_seq 是「租户级游标」——tenant 内 global_seq 的下界（不含），
+//   不是任务内 seq。按 task_ids 子集订阅时，别的任务的事件把号占掉了，两次取样之间
+//   允许跳号。
+//   所以本 hook 只做两件事：按 event_id 去重、把 lastSeq 单调推到最大 seq；
+//   不校验 seq 是否连续，也不为「空档」补拉——空档是子集订阅的正常结果，不是丢事件。
+//   真丢帧的判据是 SSE 断开/重连，走下面的重连退避与轮询降级。
+
 export type StreamStatus = 'connecting' | 'open' | 'reconnecting' | 'degraded' | 'closed';
 
 export interface UseEventStreamOptions {
@@ -97,6 +105,8 @@ export function useEventStream(options: UseEventStreamOptions) {
       }
       pullingRef.current = true;
       try {
+        // fromSeq 是租户级游标：返回的 seq 可能不连续（子集订阅允许跳号），
+        // 这里按 seq 排序合并即可，不做连续性断言。
         const response = await harnessLoopApi.listEvents({
           since_seq: fromSeq,
           limit: GAP_FETCH_LIMIT,

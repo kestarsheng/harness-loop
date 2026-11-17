@@ -1,0 +1,15 @@
+# 演示专用开关文件：scripts/dev-up.sh --demo / HLP_DEMO_FLAGS=1 会把它指给
+# harnessloop-service 的 feature_flags.file。生产配置不要指向它。
+#
+# 三条 P2 新链路开关全开；仓库里的 pkg/config/harness_loop/features.yaml 保持默认
+# 全关，两者的差异就是「开关关闭 / 打开」的行为差。
+version: 1
+flags:
+  - name: harness.loop.fsm.enabled
+    default: true
+  - name: harness.loop.orchestrator.enabled
+    default: true
+  - name: harness.loop.model_strategy.enabled
+    default: true
+  - name: harness.loop.policy_layers.enabled
+    default: true

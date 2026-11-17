@@ -164,6 +164,10 @@ func main() {
 		log.Printf("harnessloop: no feature flag file configured, using harness.enabled=%v", cfg.Harness.Enabled)
 	}
 
+	// 三条 P2 开关在这里解析成 bridge 的 enabled 位：关 = 旧行为，开 = 新链路。
+	gates := resolveFeatureGates(flags)
+	log.Printf("harnessloop: feature gates (tenant=%s): %s", gateTenant, gates.summary())
+
 	var recaller service.MemoryRecaller
 	if cfg.Memory.Addr != "" {
 		if rc, rcErr := service.DialMemoryRecaller(rootCtx, cfg.Memory.Addr, 3*time.Second); rcErr != nil {
@@ -187,7 +191,7 @@ func main() {
 	runtime.HarnessHome = cfg.Memory.HarnessHome
 
 	emitter := orchestrator.NewPublisherEmitter(publisher, orchestrator.EmitContext{TenantID: "platform", ProjectID: "platform"})
-	modelBridge := service.NewModelBridge(flagDefault(flags, config.FlagModelStrategyEnabled), models, "", modelSelectionRepo, emitter)
+	modelBridge := service.NewModelBridge(gates.ModelStrategy, models, "", modelSelectionRepo, emitter)
 	runtime.Models = modelBridge
 	if modelBridge.Enabled() {
 		if hot := modelBridge.StartHotReload(rootCtx, cfg.Models.File, modelregistry.DefaultReloadInterval, "system", service.ModelStageContext{
@@ -197,7 +201,7 @@ func main() {
 		}
 		log.Printf("harnessloop: model strategy bridge enabled")
 	}
-	orchestratorBridge := service.NewOrchestratorBridge(flagDefault(flags, config.FlagOrchestratorEnabled), emitter, subtaskExecutor(agentClient, cfg, metricsHarness, tracing.NewTracer("harnessloop-subtasks")))
+	orchestratorBridge := service.NewOrchestratorBridge(gates.Orchestrator, emitter, subtaskExecutor(agentClient, cfg, metricsHarness, tracing.NewTracer("harnessloop-subtasks")))
 	runtime.Orchestrator = orchestratorBridge
 	if orchestratorBridge.Enabled() {
 		if agentClient != nil {
@@ -211,7 +215,7 @@ func main() {
 	if approvalErr != nil {
 		log.Printf("harnessloop: approval gate unavailable, high-risk calls stay pending: %v", approvalErr)
 	}
-	policyBridge := service.NewPolicyBridge(flagDefault(flags, config.FlagPolicyResolverEnabled), policyEngine, repository.NewAuditRepo(db), emitter, approvalGate)
+	policyBridge := service.NewPolicyBridge(gates.PolicyLayers, policyEngine, repository.NewAuditRepo(db), emitter, approvalGate)
 	if sr, ok := stages.(*service.StageRunner); ok {
 		sr.WithToolGate(policyBridge)
 	}
@@ -328,17 +332,6 @@ func (r modelWindowResolver) ContextWindow(model string) (int, bool) {
 		return 0, false
 	}
 	return m.ContextWindow, true
-}
-
-func flagDefault(flags *config.FlagSet, name string) bool {
-	if flags == nil {
-		return false
-	}
-	flag, ok := flags.Get(name)
-	if !ok {
-		return false
-	}
-	return flag.Default
 }
 
 func buildApprovalGate(cfg config.Config) (service.ToolApprovalGate, error) {
