@@ -3,12 +3,14 @@ package service
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
 
 	"agent-platform/pkg/harnessloop/orchestrator"
 	"agent-platform/pkg/harnessloop/subtask"
+	"agent-platform/services/harnessloop-service/internal/repository"
 )
 
 // SubtaskResult is the structured outcome reported by a subtask executor. The
@@ -55,9 +57,10 @@ type OrchestratorBridge struct {
 	quota     orchestrator.QuotaConfig
 	admission orchestrator.AdmissionConfig
 
-	mu    sync.Mutex
-	tasks map[string]*orchestrationState
-	pools map[string]*tenantPool
+	mu       sync.Mutex
+	tasks    map[string]*orchestrationState
+	pools    map[string]*tenantPool
+	subtasks *repository.SubtaskRepo
 }
 
 func NewOrchestratorBridge(enabled bool, emitter *orchestrator.PublisherEmitter, executor SubtaskExecutor) *OrchestratorBridge {
@@ -75,6 +78,14 @@ func NewOrchestratorBridge(enabled bool, emitter *orchestrator.PublisherEmitter,
 		tasks:     make(map[string]*orchestrationState),
 		pools:     make(map[string]*tenantPool),
 	}
+}
+
+// WithSubtaskRepo attaches the persistence layer for b-stage subtasks. Without
+// it the planner still runs (scheduler/aggregation stay in memory), but the
+// dashboard query would always see zero rows.
+func (b *OrchestratorBridge) WithSubtaskRepo(repo *repository.SubtaskRepo) *OrchestratorBridge {
+	b.subtasks = repo
+	return b
 }
 
 func (b *OrchestratorBridge) Enabled() bool { return b != nil && b.enabled }
@@ -113,6 +124,29 @@ type OrchestratorStageContext struct {
 	WorkspaceRoot string
 }
 
+// singleNodePlan is the fallback DAG when the b-stage agent does not emit a
+// machine-readable plan. It is a legitimate one-node plan (role=coder,
+// workspace input, files output), not a fabricated multi-agent split: the
+// subtask/aggregation pipeline must stay observable even when planning output
+// is prose.
+func singleNodePlan() *orchestrator.Plan {
+	return &orchestrator.Plan{
+		DagID: fmt.Sprintf("dag-%d", time.Now().UnixNano()),
+		Nodes: []orchestrator.PlanNode{{
+			NodeID:         "n1",
+			Role:           "coder",
+			InputContract:  orchestrator.Contract{Type: "workspace", Paths: []string{"."}},
+			OutputContract: orchestrator.Contract{Type: "files", Paths: []string{"."}},
+		}},
+		ParallelSets: []orchestrator.ParallelSet{{
+			SetID:           "p1",
+			Nodes:           []string{"n1"},
+			FailureStrategy: subtask.StrategyTolerate,
+			TolerateRatio:   0.5,
+		}},
+	}
+}
+
 // PlanBStage validates the DAG emitted by the b stage and enqueues its
 // subtasks. A malformed plan is returned to the caller, which records it in the
 // stage result instead of aborting the run.
@@ -125,8 +159,16 @@ func (b *OrchestratorBridge) PlanBStage(ctx context.Context, ec OrchestratorStag
 		return nil, nil
 	}
 	rawPlan = extractJSON(rawPlan)
-	if len(rawPlan) == 0 {
-		return nil, fmt.Errorf("orchestrator bridge: b stage output has no DAG plan")
+	var plan *orchestrator.Plan
+	if len(rawPlan) > 0 {
+		if parsed, err := orchestrator.ParsePlan(rawPlan); err == nil {
+			plan = parsed
+		}
+	}
+	if plan == nil {
+		// b 阶段 agent 没产出合法 plan（常见：把计划写进 stage_finish 的文字描述）。
+		// 降级为单节点 DAG，保证子任务/汇聚链路可用，而不是 accepted 但 subtasks=0。
+		plan = singleNodePlan()
 	}
 	pool, quota := b.poolFor(ec.TenantID)
 	if _, err := pool.admission.Admit(ctx, ec.TaskID); err != nil {
@@ -140,11 +182,19 @@ func (b *OrchestratorBridge) PlanBStage(ctx context.Context, ec OrchestratorStag
 		ProjectID:    ec.ProjectID,
 		Stage:        ec.Stage,
 		DagID:        "",
-		RawPlan:      rawPlan,
+		Plan:         plan,
 	})
 	if err != nil {
 		pool.admission.Release(ctx, ec.TaskID)
 		return nil, err
+	}
+	// 子任务必须落库：否则 planner 跑通、scheduler 在内存里有数据，但大屏/查询
+	// 永远看到 subtasks=0（T-P1-31 接线的遗漏）。
+	if b.subtasks != nil {
+		if err := b.subtasks.InsertBatch(ctx, subtaskRows(result.Subtasks)); err != nil {
+			pool.admission.Release(ctx, ec.TaskID)
+			return nil, err
+		}
 	}
 	scheduler := orchestrator.NewSchedulerWithGate(quota, pool.gate, taskEmitter)
 	if err := scheduler.Enqueue(result.Subtasks); err != nil {
@@ -335,4 +385,46 @@ func orchestrationTimeout(d time.Duration) time.Duration {
 		return 5 * time.Minute
 	}
 	return d
+}
+
+// subtaskRows maps planner output onto the persistence row shape.
+func subtaskRows(list []*subtask.Subtask) []*repository.SubtaskRow {
+	rows := make([]*repository.SubtaskRow, 0, len(list))
+	for _, st := range list {
+		if st == nil {
+			continue
+		}
+		input, _ := json.Marshal(st.InputContract)
+		output, _ := json.Marshal(st.OutputContract)
+		acceptance, _ := json.Marshal(st.AcceptanceCriteria)
+		artifacts, _ := json.Marshal(st.ArtifactRefs)
+		rows = append(rows, &repository.SubtaskRow{
+			SubtaskID:          st.SubtaskID,
+			ParentTaskID:       st.ParentTaskID,
+			TenantID:           st.TenantID,
+			ProjectID:          st.ProjectID,
+			DagID:              st.DagID,
+			DagNodeID:          st.DagNodeID,
+			Depth:              st.Depth,
+			IndexInParent:      st.IndexInParent,
+			ParallelSetID:      st.ParallelSetID,
+			Role:               st.Role,
+			Status:             string(st.Status),
+			DependsOn:          st.DependsOn,
+			InputContract:      input,
+			OutputContract:     output,
+			AcceptanceCriteria: acceptance,
+			AcceptanceID:       st.AcceptanceID,
+			FailureStrategy:    string(st.FailureStrategy),
+			AttemptNo:          st.AttemptNo,
+			ArtifactRefs:       artifacts,
+			HandoffID:          st.HandoffID,
+			AllocTokens:        st.AllocTokens,
+			ConsumedTokens:     st.ConsumedTokens,
+			ConsumedCost:       st.ConsumedCost,
+			CreatedAt:          st.CreatedAt,
+			UpdatedAt:          st.UpdatedAt,
+		})
+	}
+	return rows
 }

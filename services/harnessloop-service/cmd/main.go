@@ -201,7 +201,7 @@ func main() {
 		}
 		log.Printf("harnessloop: model strategy bridge enabled")
 	}
-	orchestratorBridge := service.NewOrchestratorBridge(gates.Orchestrator, emitter, subtaskExecutor(agentClient, cfg, metricsHarness, tracing.NewTracer("harnessloop-subtasks")))
+	orchestratorBridge := service.NewOrchestratorBridge(gates.Orchestrator, emitter, subtaskExecutor(agentClient, cfg, metricsHarness, tracing.NewTracer("harnessloop-subtasks"))).WithSubtaskRepo(subtaskRepo)
 	runtime.Orchestrator = orchestratorBridge
 	if orchestratorBridge.Enabled() {
 		if agentClient != nil {

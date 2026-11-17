@@ -250,7 +250,7 @@ func (r *Runtime) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 			Stage:            string(stage),
 			AttemptID:        attempt.AttemptID,
 			EntryAgent:       in.EntryAgent,
-			Message:          fmt.Sprintf("stage=%s attempt=%d", stage, attemptNo),
+			Message:          stageMessage(stage, attemptNo),
 			Goal:             in.Goal,
 			SuccessCriteria:  "",
 			PolicySnapshot:   in.PolicySnapshot,
@@ -496,11 +496,16 @@ func (r *Runtime) runOrchestration(ctx context.Context, in RunInput, workspaceRo
 	defer cancel()
 	switch stage {
 	case fsm.StagePlan:
-		raw := []byte(res.Content)
+		// StageMode 下 content 是 `[stage_finish] {...}` 协议文本，结构化产物在 summary。
+		raw := []byte(res.FinishArgs.Summary)
 		if len(raw) == 0 {
-			raw = []byte(res.FinishArgs.Summary)
+			raw = []byte(res.Content)
 		}
-		_, _ = r.Orchestrator.PlanBStage(runCtx, ec, raw)
+		if _, err := r.Orchestrator.PlanBStage(runCtx, ec, raw); err != nil {
+			// 设计上 b 阶段规划失败不阻塞父阶段，但绝不静默：
+			// 否则表现为「b accepted 但 subtasks=0」，无法定位。
+			fmt.Printf("[orchestrator] b-stage plan rejected: %v (raw_len=%d raw=%.400s)\n", err, len(raw), string(raw))
+		}
 	case fsm.StageExecute:
 		_, _ = r.Orchestrator.DispatchCStage(runCtx, ec)
 	case fsm.StageVerify:
@@ -920,6 +925,31 @@ func rollbackCategory(v acceptance.Verdict) retry.Category {
 		}
 	}
 	return retry.Runtime
+}
+
+// planStageInstruction asks the b-stage agent for the SubtaskPlan/v1 artifact.
+// 没有这段指令时 agent 只回普通总结，PlanBStage 因 rawPlan 无法解析而静默跳过，
+// 结果就是「b 阶段 accepted 但 subtasks=0」。
+const planStageInstruction = `你是规划阶段（b）。请只输出一个 SubtaskPlan/v1 JSON，不要输出解释文字：
+{"dag_id":"dag-1","nodes":[{"node_id":"n1","role":"coder","input_contract":{"type":"workspace","paths":["."]},"output_contract":{"type":"files","paths":["main.go"]},"acceptance":[{"type":"file_exists","expr":"main.go"}]}],"edges":[],"parallel_sets":[{"set_id":"p1","nodes":["n1"],"failure_strategy":"tolerate","tolerate_ratio":0.5}]}
+约束：nodes 至少 1 个、最多 20 个；深度不超过 2；每个 parallel_set 必须声明 failure_strategy（fail-fast|tolerate|retry）；节点依赖用 edges 表达。`
+
+func stageMessage(stage fsm.Stage, attemptNo int) string {
+	base := fmt.Sprintf("stage=%s attempt=%d", stage, attemptNo)
+	if stage == fsm.StagePlan {
+		return base + "\n\n" + planStageInstruction
+	}
+	return base
+}
+
+// stageGoal appends the b-stage plan instruction to the goal as well: the agent
+// engine injects Goal into the system prompt, and system-level guidance is what
+// the model actually follows (user message alone is often ignored).
+func stageGoal(stage fsm.Stage, goal string) string {
+	if stage != fsm.StagePlan {
+		return goal
+	}
+	return goal + "\n\n" + planStageInstruction
 }
 
 func defaultRollbackTarget(stage fsm.Stage) string {

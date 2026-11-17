@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -111,14 +112,38 @@ func LoadPlanConfig(path string) (PlanConfig, error) {
 
 // ParsePlan decodes a SubtaskPlan/v1 JSON document.
 func ParsePlan(raw []byte) (*Plan, error) {
-	if len(strings.TrimSpace(string(raw))) == 0 {
+	text := strings.TrimSpace(string(raw))
+	if text == "" {
 		return nil, newError(CodeDAGIncomplete, "subtask plan is empty")
 	}
-	var plan Plan
-	if err := json.Unmarshal(raw, &plan); err != nil {
-		return nil, newError(CodeDAGIncomplete, "decode subtask plan: %v", err)
+	plan, err := decodePlanJSON(text)
+	if err != nil {
+		return nil, err
 	}
-	return &plan, nil
+	// dag_id 是平台标识，不该要求模型生成；模型漏给时由平台补齐。
+	if strings.TrimSpace(plan.DagID) == "" {
+		plan.DagID = fmt.Sprintf("dag-%d", time.Now().UnixNano())
+	}
+	return plan, nil
+}
+
+// decodePlanJSON accepts a bare JSON object and, as a fallback, the first
+// brace-delimited object inside surrounding prose or a Markdown code fence.
+// LLMs routinely wrap structured output despite explicit instructions; the
+// wrapper is presentation noise, not a reason to reject the plan.
+func decodePlanJSON(text string) (*Plan, error) {
+	var plan Plan
+	if err := json.Unmarshal([]byte(text), &plan); err == nil {
+		return &plan, nil
+	} else if start, end := strings.Index(text, "{"), strings.LastIndex(text, "}"); start >= 0 && end > start {
+		var wrapped Plan
+		if wrapErr := json.Unmarshal([]byte(text[start:end+1]), &wrapped); wrapErr == nil {
+			return &wrapped, nil
+		}
+	}
+	var probe Plan
+	baseErr := json.Unmarshal([]byte(text), &probe)
+	return nil, newError(CodeDAGIncomplete, "decode subtask plan: %v", baseErr)
 }
 
 // Validate applies the eight rules from design 4.13.2 plus the four
