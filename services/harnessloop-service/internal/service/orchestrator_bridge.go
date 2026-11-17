@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -18,9 +19,58 @@ import (
 // before marking it accepted, so the d-stage aggregator has real data instead
 // of an incomplete plan.
 type SubtaskResult struct {
-	Conclusion   string
-	Artifacts    []subtask.ArtifactRef
-	AcceptanceID string
+	Conclusion     string
+	Artifacts      []subtask.ArtifactRef
+	AcceptanceID   string
+	ConsumedTokens int64
+	ConsumedCost   float64
+	ModelID        string
+	DurationMS     int64
+}
+
+// SubtaskExecError carries the executor's observable failure detail. The bridge
+// forwards it into subtask.failed instead of collapsing everything into a
+// generic "subtask_failed".
+type SubtaskExecError struct {
+	Reason      string
+	ResponseLen int
+	ModelID     string
+	DurationMS  int64
+	AgentStatus string
+	Err         error
+}
+
+func (e *SubtaskExecError) Error() string {
+	if e == nil {
+		return ""
+	}
+	if e.Reason != "" {
+		return e.Reason
+	}
+	if e.Err != nil {
+		return e.Err.Error()
+	}
+	return "subtask execution failed"
+}
+
+func (e *SubtaskExecError) Unwrap() error { return e.Err }
+
+// failureDetail projects the executor error onto the event payload shape.
+func failureDetail(err error) *orchestrator.SubtaskFailureDetail {
+	if err == nil {
+		return nil
+	}
+	var execErr *SubtaskExecError
+	if errors.As(err, &execErr) {
+		return &orchestrator.SubtaskFailureDetail{
+			Error:       firstNonEmpty(execErr.Reason, err.Error()),
+			ResponseLen: execErr.ResponseLen,
+			ModelID:     execErr.ModelID,
+			DurationMS:  execErr.DurationMS,
+			AgentStatus: execErr.AgentStatus,
+		}
+	}
+	return &orchestrator.SubtaskFailureDetail{Error: err.Error()}
 }
 
 // SubtaskExecutor runs one scheduled subtask. The production implementation is
@@ -160,15 +210,27 @@ func (b *OrchestratorBridge) PlanBStage(ctx context.Context, ec OrchestratorStag
 	}
 	rawPlan = extractJSON(rawPlan)
 	var plan *orchestrator.Plan
+	source := orchestrator.PlanSourceModel
+	degradedReason := ""
 	if len(rawPlan) > 0 {
-		if parsed, err := orchestrator.ParsePlan(rawPlan); err == nil {
+		parsed, parseErr := orchestrator.ParsePlan(rawPlan)
+		if parseErr == nil {
 			plan = parsed
+		} else {
+			degradedReason = fmt.Sprintf("plan_parse_failed: %v", parseErr)
 		}
+	} else {
+		degradedReason = "empty_plan_output"
 	}
 	if plan == nil {
 		// b 阶段 agent 没产出合法 plan（常见：把计划写进 stage_finish 的文字描述）。
 		// 降级为单节点 DAG，保证子任务/汇聚链路可用，而不是 accepted 但 subtasks=0。
 		plan = singleNodePlan()
+		source = orchestrator.PlanSourceFallback
+		// 保留既有 stdout 诊断格式（raw 截断），否则降级只留在事件里，排障看
+		// harnessloop 容器日志时无从判断为什么走 fallback。
+		fmt.Printf("[orchestrator] b-stage plan degraded to single-node fallback: %s (raw_len=%d raw=%.400s)\n",
+			degradedReason, len(rawPlan), string(rawPlan))
 	}
 	pool, quota := b.poolFor(ec.TenantID)
 	if _, err := pool.admission.Admit(ctx, ec.TaskID); err != nil {
@@ -177,12 +239,14 @@ func (b *OrchestratorBridge) PlanBStage(ctx context.Context, ec OrchestratorStag
 	taskEmitter := b.taskEmitter(ec)
 	planner := orchestrator.NewPlanner(orchestrator.PlanConfig{MaxDirectChildren: 20, MaxDepth: 2, TolerateRatioMax: 0.5, WorkspaceRoot: ec.WorkspaceRoot}, taskEmitter)
 	result, err := planner.Plan(ctx, orchestrator.PlanRequest{
-		ParentTaskID: ec.TaskID,
-		TenantID:     ec.TenantID,
-		ProjectID:    ec.ProjectID,
-		Stage:        ec.Stage,
-		DagID:        "",
-		Plan:         plan,
+		ParentTaskID:   ec.TaskID,
+		TenantID:       ec.TenantID,
+		ProjectID:      ec.ProjectID,
+		Stage:          ec.Stage,
+		DagID:          "",
+		Plan:           plan,
+		PlanSource:     source,
+		DegradedReason: degradedReason,
 	})
 	if err != nil {
 		pool.admission.Release(ctx, ec.TaskID)
@@ -197,6 +261,9 @@ func (b *OrchestratorBridge) PlanBStage(ctx context.Context, ec OrchestratorStag
 		}
 	}
 	scheduler := orchestrator.NewSchedulerWithGate(quota, pool.gate, taskEmitter)
+	if sink := b.statusSink(); sink != nil {
+		scheduler.WithStatusSink(sink)
+	}
 	if err := scheduler.Enqueue(result.Subtasks); err != nil {
 		pool.admission.Release(ctx, ec.TaskID)
 		return nil, err
@@ -234,7 +301,10 @@ func (b *OrchestratorBridge) DispatchCStage(ctx context.Context, ec Orchestrator
 	for _, st := range running {
 		res, execErr := b.executor.Execute(ctx, ec, st)
 		if execErr != nil {
-			_ = state.scheduler.MarkFailed(ctx, st.SubtaskID, "subtask_failed")
+			if err := state.scheduler.MarkFailedWithDetail(ctx, st.SubtaskID, "subtask_failed", failureDetail(execErr)); err != nil {
+				fmt.Printf("[orchestrator] subtask %s failed and its status could not be written back: %v (cause=%v)\n",
+					st.SubtaskID, err, execErr)
+			}
 			continue
 		}
 		acceptanceID := fmt.Sprintf("acc-%s", st.SubtaskID)
@@ -244,7 +314,9 @@ func (b *OrchestratorBridge) DispatchCStage(ctx context.Context, ec Orchestrator
 				acceptanceID = res.AcceptanceID
 			}
 		}
-		_ = state.scheduler.MarkAccepted(ctx, st.SubtaskID, acceptanceID)
+		if err := state.scheduler.MarkAccepted(ctx, st.SubtaskID, acceptanceID); err != nil {
+			fmt.Printf("[orchestrator] subtask %s accepted in memory but status write-back failed: %v\n", st.SubtaskID, err)
+		}
 	}
 	return running, nil
 }
@@ -258,12 +330,52 @@ func applySubtaskResult(st *subtask.Subtask, res *SubtaskResult) {
 	if len(res.Artifacts) > 0 {
 		st.ArtifactRefs = res.Artifacts
 	}
+	if res.ConsumedTokens > 0 {
+		st.ConsumedTokens = res.ConsumedTokens
+	}
+	if res.ConsumedCost > 0 {
+		st.ConsumedCost = res.ConsumedCost
+	}
 	if res.Conclusion != "" {
 		if st.OutputContract == nil {
 			st.OutputContract = make(map[string]any)
 		}
 		st.OutputContract["conclusion"] = res.Conclusion
 	}
+}
+
+// statusSink adapts the repository to the scheduler's StatusSink port. It is
+// the only place that maps a scheduler transition onto a DB row, so every
+// pending→running→accepted/failed step is persisted with the same fields.
+func (b *OrchestratorBridge) statusSink() orchestrator.StatusSink {
+	if b == nil || b.subtasks == nil {
+		return nil
+	}
+	return &subtaskRepoStatusSink{repo: b.subtasks}
+}
+
+type subtaskRepoStatusSink struct {
+	repo *repository.SubtaskRepo
+}
+
+func (s *subtaskRepoStatusSink) StatusChanged(ctx context.Context, st *subtask.Subtask, from subtask.Status) error {
+	if st == nil {
+		return nil
+	}
+	artifacts, err := json.Marshal(st.ArtifactRefs)
+	if err != nil {
+		return fmt.Errorf("marshal artifact refs: %w", err)
+	}
+	return s.repo.UpdateExecution(ctx, repository.SubtaskExecution{
+		SubtaskID:      st.SubtaskID,
+		FromStatus:     string(from),
+		ToStatus:       string(st.Status),
+		AttemptNo:      st.AttemptNo,
+		ConsumedTokens: st.ConsumedTokens,
+		ConsumedCost:   st.ConsumedCost,
+		ArtifactRefs:   artifacts,
+		AcceptanceID:   st.AcceptanceID,
+	})
 }
 
 // AggregateDStage builds the d-stage aggregation report from the scheduler's

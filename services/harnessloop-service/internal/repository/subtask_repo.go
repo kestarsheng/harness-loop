@@ -3,9 +3,11 @@ package repository
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
+	"agent-platform/pkg/harnessloop/subtask"
 	"agent-platform/pkg/pgindex"
 )
 
@@ -180,4 +182,94 @@ func nullIfEmpty(s string) any {
 		return nil
 	}
 	return s
+}
+
+var (
+	// ErrSubtaskStatusConflict means the row is not in the status the caller
+	// observed; the write is refused instead of rewinding a terminal state.
+	ErrSubtaskStatusConflict = errors.New("subtask_repo: status conflict")
+	// ErrSubtaskTransitionIllegal mirrors the orchestrator state machine for
+	// callers that bypass it.
+	ErrSubtaskTransitionIllegal = errors.New("subtask_repo: illegal status transition")
+)
+
+// SubtaskExecution is the write-back payload of one subtask transition. The
+// executor's consumption numbers and artifacts belong to the same row update as
+// the status: splitting them lets a row say "accepted" with zero evidence.
+type SubtaskExecution struct {
+	SubtaskID      string
+	FromStatus     string
+	ToStatus       string
+	AttemptNo      int
+	ConsumedTokens int64
+	ConsumedCost   float64
+	ArtifactRefs   []byte
+	AcceptanceID   string
+}
+
+// UpdateStatus persists one status change. It is a thin wrapper over
+// UpdateExecution for callers that only move the state machine.
+func (r *SubtaskRepo) UpdateStatus(ctx context.Context, subtaskID, fromStatus, toStatus string) error {
+	return r.UpdateExecution(ctx, SubtaskExecution{
+		SubtaskID:  subtaskID,
+		FromStatus: fromStatus,
+		ToStatus:   toStatus,
+	})
+}
+
+// UpdateExecution persists a subtask transition with its execution outcome.
+//
+// The state machine is enforced twice: in Go for a readable error, and in the
+// UPDATE's WHERE clause (`status = from_status`) so a concurrent writer cannot
+// pass both checks and rewind a terminal row. Requiring from_status also means a
+// zero-row result is reported instead of silently updating the wrong state.
+func (r *SubtaskRepo) UpdateExecution(ctx context.Context, ex SubtaskExecution) error {
+	if ex.SubtaskID == "" {
+		return fmt.Errorf("subtask_repo: subtask_id is required")
+	}
+	from, err := subtask.ParseStatus(ex.FromStatus)
+	if err != nil {
+		return fmt.Errorf("subtask_repo: from_status: %w", err)
+	}
+	to, err := subtask.ParseStatus(ex.ToStatus)
+	if err != nil {
+		return fmt.Errorf("subtask_repo: to_status: %w", err)
+	}
+	if !subtask.AllowedTransition(from, to) {
+		return fmt.Errorf("%w: %s -> %s", ErrSubtaskTransitionIllegal, from, to)
+	}
+	if to == subtask.StatusAccepted && ex.AcceptanceID == "" {
+		return fmt.Errorf("subtask_repo: accepted subtask %s requires acceptance_id", ex.SubtaskID)
+	}
+	artifacts := ex.ArtifactRefs
+	if len(artifacts) == 0 {
+		artifacts = []byte("[]")
+	}
+	tag, err := r.db.Exec(ctx, `UPDATE hlp_task.subtasks SET
+			status = $3,
+			attempt_no = $4,
+			consumed_tokens = $5,
+			consumed_cost = $6,
+			artifact_refs = $7::jsonb,
+			acceptance_id = COALESCE($8, acceptance_id),
+			updated_at = now()
+		WHERE subtask_id = $1 AND status = $2`,
+		ex.SubtaskID, ex.FromStatus, ex.ToStatus, ex.AttemptNo,
+		ex.ConsumedTokens, ex.ConsumedCost, artifacts, nullIfEmpty(ex.AcceptanceID))
+	if err != nil {
+		return fmt.Errorf("subtask_repo: update %s: %w", ex.SubtaskID, err)
+	}
+	if tag.RowsAffected() > 0 {
+		return nil
+	}
+	// Zero rows: either the row is already at to_status (a retried write is a
+	// no-op, not a failure) or a concurrent writer moved it elsewhere.
+	var current string
+	if qerr := r.db.QueryRow(ctx, `SELECT status FROM hlp_task.subtasks WHERE subtask_id = $1`, ex.SubtaskID).Scan(&current); qerr != nil {
+		return fmt.Errorf("subtask_repo: read %s status: %w", ex.SubtaskID, qerr)
+	}
+	if current == ex.ToStatus {
+		return nil
+	}
+	return fmt.Errorf("%w: %s is %q, expected %q", ErrSubtaskStatusConflict, ex.SubtaskID, current, ex.FromStatus)
 }

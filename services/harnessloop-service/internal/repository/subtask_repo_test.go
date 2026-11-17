@@ -2,6 +2,8 @@ package repository
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -23,6 +25,111 @@ func createSubtask(t *testing.T, db *pgxpool.Pool, subtaskID, parentTaskID, tena
 		subtaskID, parentTaskID, tenantID, projectID, dagID, nodeID, index, role, status, dependsOn)
 	if err != nil {
 		t.Fatalf("insert subtask %s: %v", subtaskID, err)
+	}
+}
+
+// TestSubtaskRepoUpdateExecutionPersistsTransitions covers the write-back the
+// scheduler performs at its real transition points: pending→running carries the
+// preliminary usage, running→accepted carries artifacts + acceptance, and
+// terminal rows can never be rewound.
+func TestSubtaskRepoUpdateExecutionPersistsTransitions(t *testing.T) {
+	db, _, task := setupTask(t)
+	repo := NewSubtaskRepo(db)
+	ctx := context.Background()
+	subtaskID := "st-write-" + task.TaskID
+	createSubtask(t, db.Pool(), subtaskID, task.TaskID, task.TenantID, task.ProjectID, "dag-w", "n-w", 0, "coder", "pending", `[]`)
+
+	if err := repo.UpdateExecution(ctx, SubtaskExecution{
+		SubtaskID: subtaskID, FromStatus: "pending", ToStatus: "running",
+		AttemptNo: 1, ConsumedTokens: 256, ConsumedCost: 0.001,
+	}); err != nil {
+		t.Fatalf("pending->running: %v", err)
+	}
+	if err := repo.UpdateExecution(ctx, SubtaskExecution{
+		SubtaskID: subtaskID, FromStatus: "running", ToStatus: "accepted",
+		AttemptNo: 1, ConsumedTokens: 1024, ConsumedCost: 0.25,
+		ArtifactRefs: []byte(`[{"path":"out/result.txt","hash":"sha256:abc","size":12}]`),
+		AcceptanceID: "acc-" + subtaskID,
+	}); err != nil {
+		t.Fatalf("running->accepted: %v", err)
+	}
+
+	rows, err := repo.List(ctx, task.TenantID, task.ProjectID, task.TaskID, 10)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d", len(rows))
+	}
+	row := rows[0]
+	if row.Status != "accepted" || row.AcceptanceID != "acc-"+subtaskID {
+		t.Fatalf("row status/acceptance = %q/%q", row.Status, row.AcceptanceID)
+	}
+	if row.ConsumedTokens != 1024 || row.ConsumedCost != 0.25 || row.AttemptNo != 1 {
+		t.Fatalf("consumption = tokens:%d cost:%v attempt:%d", row.ConsumedTokens, row.ConsumedCost, row.AttemptNo)
+	}
+	if !strings.Contains(string(row.ArtifactRefs), "out/result.txt") {
+		t.Fatalf("artifact refs = %s", row.ArtifactRefs)
+	}
+
+	// No rewind: the state machine rejects accepted→running before touching SQL.
+	if err := repo.UpdateExecution(ctx, SubtaskExecution{SubtaskID: subtaskID, FromStatus: "accepted", ToStatus: "running"}); !errors.Is(err, ErrSubtaskTransitionIllegal) {
+		t.Fatalf("rewind error = %v, want ErrSubtaskTransitionIllegal", err)
+	}
+	// Stale from_status: the row is accepted, so a pending→running write (e.g. a
+	// second replica replaying a queued dispatch) must be refused, not applied.
+	if err := repo.UpdateExecution(ctx, SubtaskExecution{SubtaskID: subtaskID, FromStatus: "pending", ToStatus: "running"}); !errors.Is(err, ErrSubtaskStatusConflict) {
+		t.Fatalf("stale write error = %v, want ErrSubtaskStatusConflict", err)
+	}
+	// Idempotent retry of the same transition is a success, not a conflict.
+	if err := repo.UpdateExecution(ctx, SubtaskExecution{
+		SubtaskID: subtaskID, FromStatus: "running", ToStatus: "accepted",
+		AcceptanceID: "acc-" + subtaskID,
+	}); err != nil {
+		t.Fatalf("idempotent retry: %v", err)
+	}
+}
+
+func TestSubtaskRepoUpdateExecutionFailurePaths(t *testing.T) {
+	db, _, task := setupTask(t)
+	repo := NewSubtaskRepo(db)
+	subtaskID := "st-fail-" + task.TaskID
+	createSubtask(t, db.Pool(), subtaskID, task.TaskID, task.TenantID, task.ProjectID, "dag-f", "n-f", 0, "coder", "running", `[]`)
+
+	// running→failed is a legal terminal write.
+	if err := repo.UpdateExecution(context.Background(), SubtaskExecution{
+		SubtaskID: subtaskID, FromStatus: "running", ToStatus: "failed", AttemptNo: 1, ConsumedTokens: 64,
+	}); err != nil {
+		t.Fatalf("running->failed: %v", err)
+	}
+	rows, err := repo.List(context.Background(), task.TenantID, task.ProjectID, task.TaskID, 5)
+	if err != nil || len(rows) != 1 || rows[0].Status != "failed" {
+		t.Fatalf("rows = %+v err=%v", rows, err)
+	}
+
+	// accepted without an acceptance id violates the DB check; reject it here so
+	// the caller gets the coded error instead of a constraint violation.
+	other := "st-noid-" + task.TaskID
+	createSubtask(t, db.Pool(), other, task.TaskID, task.TenantID, task.ProjectID, "dag-f2", "n-f2", 1, "coder", "running", `[]`)
+	if err := repo.UpdateExecution(context.Background(), SubtaskExecution{SubtaskID: other, FromStatus: "running", ToStatus: "accepted"}); err == nil {
+		t.Fatal("accepted without acceptance_id must be rejected")
+	}
+
+	// A database failure must surface, not be mistaken for a successful write.
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := repo.UpdateStatus(cancelled, other, "running", "failed"); err == nil {
+		t.Fatal("a cancelled context must surface the write failure")
+	}
+	// The row is untouched after the failed write: still running.
+	rows, err = repo.List(context.Background(), task.TenantID, task.ProjectID, task.TaskID, 5)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	for _, row := range rows {
+		if row.SubtaskID == other && row.Status != "running" {
+			t.Fatalf("failed write changed the row: %+v", row)
+		}
 	}
 }
 

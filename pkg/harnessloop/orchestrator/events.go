@@ -48,10 +48,45 @@ type Event struct {
 	ParallelSetID string
 	// OldDagID/NewDagID are set on replanning and supersede events so the
 	// dashboard can draw "旧 DAG → 新 DAG" without a join (T-P2-10 point 5).
-	OldDagID string
-	NewDagID string
-	Payload  map[string]any
+	OldDagID  string
+	NewDagID  string
+	Payload   map[string]any
 	Timestamp time.Time
+}
+
+// SubtaskFailureDetail carries the diagnostic fields a subtask failure must
+// expose. Without them subtask.failed only says "failed", which is useless for
+// triage: the executor already knows the agent status, response size, model and
+// duration, so the event carries them instead of forcing a log dig.
+type SubtaskFailureDetail struct {
+	Error       string
+	ResponseLen int
+	ModelID     string
+	DurationMS  int64
+	AgentStatus string
+}
+
+// Payload renders the detail in the platform payload shape. Empty strings are
+// omitted, but counts are always present: response_len=0 and duration_ms=0 are
+// meaningful facts (empty reply / instant failure), not missing data.
+func (d *SubtaskFailureDetail) Payload() map[string]any {
+	if d == nil {
+		return nil
+	}
+	out := map[string]any{
+		"response_len": d.ResponseLen,
+		"duration_ms":  d.DurationMS,
+	}
+	if d.Error != "" {
+		out["error"] = d.Error
+	}
+	if d.ModelID != "" {
+		out["model_id"] = d.ModelID
+	}
+	if d.AgentStatus != "" {
+		out["agent_status"] = d.AgentStatus
+	}
+	return out
 }
 
 // Emitter is the outbound port for orchestration events. Implementations may
