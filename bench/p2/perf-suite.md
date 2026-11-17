@@ -7,7 +7,7 @@
 
 ## 1. 结论
 
-七类场景（索引两类合并计）逐条对照门槛，**四类达标、三类存在偏差**，偏差均已定位到具体原因，其中一条是既有实现的缺陷而非环境限制。
+七类场景（索引两类合并计）逐条对照门槛，**五类达标、三类存在偏差**（其中第 7 项由「未测」转为「部分达标」），偏差均已定位到具体原因，其中一条是既有实现的缺陷而非环境限制。
 
 | # | 场景 | 门槛 | 实测 | 结论 |
 |---|---|---|---|---|
@@ -17,12 +17,14 @@
 | 4 | 记忆召回 | P95 ≤ 300ms | 未测到端到端 | **偏差**（缺 embedding 服务，见 4.2） |
 | 5 | 阶段验收 | P95 ≤ 10s（程序路径） | **P95 13.58s**（含 `go build`）／**< 1ms**（纯进程内判据） | **偏差 + 归因**（见 4.3） |
 | 6 | 事件端到端 | P95 ≤ 1s | **P95 785ms，200/200 事件全收**（50 任务，T-P2-17 修复后复跑） | PASS（见 4.1） |
-| 7 | 50 卡片大屏 | 单帧 ≤ 16ms，无内存增长 | 服务端数据面已压；**前端帧率未测** | **偏差**（见 4.4） |
+| 7 | 50 卡片大屏 | 单帧 ≤ 16ms，无内存增长 | 静止/轮询刷新 **P95 8.60ms**（>16.7ms 占 0.88%）；滚动换行 **P95 39.32ms**；筛选切换 **P95 88.04ms**；JS 堆 120s **+2.95MB** | **部分达标**（见 4.4） |
 | 8 | 20 并发内存 | RSS ≤ 4GB；单任务 ≤ 256MB | **峰值 40.67MB；单任务增量 0.59MB** | PASS |
 
 一句总结：**索引、检索、内存三类余量充足（一到两个数量级），验收卡在子进程开销上；事件流原先是「漏」不是「慢」（11% 收集率），T-P2-17 换租户级 `global_seq` 游标后复跑 200/200、P95 785ms，已消除。**
 
-> 修订记录：T-P2-17（事件游标语义修复）合入后，本报告复跑了 3.3 的事件场景并重写了 4.1（原「P0 未修复」→「已修复」）。其余章节维持 T-P2-T1 当时的实测，未重新计时。
+> 修订记录：
+> 1. T-P2-17（事件游标语义修复）合入后，本报告复跑了 3.3 的事件场景并重写了 4.1（原「P0 未修复」→「已修复」）。
+> 2. T-P2 质量收口轮补齐了 4.4 的前端帧率实测（原「未测」→「实测」），并同步第 1 节结论表第 7 行；同时修掉 4.4 里「`frontend/` 无 `node_modules`、装依赖超文件域」这条已不成立的原因。其余章节维持 T-P2-T1 当时的实测，未重新计时。
 
 ## 2. 基准环境（可复现的前提）
 
@@ -189,13 +191,50 @@ P95 13.58s > 10s，但同工程下「仅进程内判据」P95 < 1ms。差值全�
 
 本轮不改门槛也不改判据，只把两组数字并列，让后续判断有依据。
 
-### 4.4 大屏前端帧率未测
+### 4.4 大屏前端帧率（DFX-P-08）：已实测
 
-DFX-P-08 要求「50 卡片 × 1s × 10min，主线程单帧 ≤ 16ms」。本轮**只压了服务端数据面**（50 VU SSE + `k6/monitor.js` 的轮询回退路径），前端帧率没有实测。
+DFX-P-08 要求「50 卡片 × 1s × 10min，主线程单帧 ≤ 16ms，无内存增长」。上一版这里只压了服务端数据面、前端帧率**未测**；本轮补齐了渲染面实测，原始数据在 `bench/p2/runtime/board-frames-50.json`。
 
-**原因**：`frontend/` 无 `node_modules`，`npm install` 会在 `frontend/` 下写入依赖目录，超出本任务文件域；且帧率测量需要 headless Chrome 渲染真实页面 10 分钟，属独立工作量。
+**怎么量的**（`bench/p2/scripts/cmd/boardperf`，chromedp 驱动真 Chrome）：
 
-**已交付**：`bench/p2/k6/monitor.js`（50 VU × 1s 轮询，阈值 `p(95)<200ms`、`http_req_failed<1%`）。k6 无原生 SSE 模块（需 xk6-sse 扩展），故 SSE 主路径用 Go 的 `events` 程序测，脚本注释里写明了这个分工，不混口径。
+- 全栈由 `scripts/dev-up.sh --install` 拉起（PG `hlp-pg-test` + harnessloop-service:50013 + gateway:9000 + vite:5174），测的就是 `http://localhost:5174/harness-loop/monitor` 这个真实看板；
+- 卡片数据用 `bench/p2/scripts/seed-board-tasks.sql` 灌 50 条 `hlp_task.task_runs`（幂等），库内当时共 59 条任务、看板全量可见；
+- 页面内用 `requestAnimationFrame` 自采样 120s 帧间隔（14 014 帧），并用 `PerformanceObserver('longtask')` 记长任务；交互用「派发事件 → 等两次 rAF」量到绘制完成；JS 堆在窗口前后各取一次（`--enable-precise-memory-info` + `--expose-gc`）；
+- 视口 1920×1080，`headless=new`，有头 Chrome 未跑（见末尾「未覆盖」）。
+
+**帧间隔（120s，14 014 帧）**
+
+| 指标 | 实测 | 门槛 |
+|---|---|---|
+| P50 | **8.30 ms** | — |
+| **P95** | **8.60 ms** | ≤ 16 ms ✅ |
+| P99 | 16.30 ms | — |
+| Max | 41.70 ms | — |
+| > 16.7 ms 占比 | **0.88 %** | — |
+| 反推刷新率 | ≈ **120 Hz** | — |
+
+**交互延迟（各 20 次）**
+
+| 交互 | P50 | **P95** | Max | 净耗时（减 raf-baseline） |
+|---|---|---|---|---|
+| `raf-baseline`（只等两帧） | 6.65 ms | 11.92 ms | 12.30 ms | — |
+| 状态筛选切换 | 61.65 ms | **88.04 ms** | 90.60 ms | ≈ 76 ms |
+| 滚动虚拟列表一屏 | 22.55 ms | **39.32 ms** | 39.80 ms | ≈ 27 ms |
+
+**内存与长任务**：JS 堆 44.83 MB → 47.78 MB，**120s 增 2.95 MB**（无持续增长迹象，但 2 分钟的窗口不足以证明「10 分钟不涨」）；长任务 6 次 / 316 ms，最大 54 ms，折合 **0.05 次/秒**。
+
+**怎么读这组数**
+
+1. **静止与数据刷新达标**：P95 8.60 ms，14k 帧里只有 0.88 % 超过 16.7 ms。看板每 10s 重拉一次任务列表、SSE 到达时局部更新，这段时间的开销都包含在这个分位数里。
+2. **本机是 120 Hz，门槛其实是宽的**：P50 8.3 ms 反推 120.5 Hz，真实帧预算 8.3 ms。按 60 Hz 的 16 ms 口径判「达标」，但按屏幕预算算 P95 已经贴着上限——报告同时给两个口径，避免数字被误读成「余量一倍」。
+3. **「50 卡片」在 DOM 上不是 50 张**：`AgentCardGrid` 是虚拟列表（`CARD_HEIGHT=148` + 可视区 + 2 行 overscan），首屏只渲染 **12** 张；脚本额外滚遍全表，`aria-label` 去重覆盖 **59/59**，证明 50 张卡都渲染过，只是不是同时。所以上表的帧数据对应的是「12 张同屏 + 滚动换行」的真实成本，不是「50 张同屏」。
+4. **两处超预算，归因明确**：滚动换行 P95 39.32 ms（净 27 ms）——一次换行要挂载 6 张卡、丢弃 6 张卡，React 提交 + antd 卡片内部布局都在这一次帧里；筛选切换 P95 88.04 ms（净 76 ms）——`Segmented` 切换会重建整个 `states` 数组并重渲染可视区。两者都超过 16 ms，**如果 DFX-P-08 的口径包含交互帧，这两项就是不达标**；若只约束「静止展示帧」，则达标。判据边界需要产品侧确认，本报告不替它下结论。
+
+**未覆盖（不要当成已验）**：① 10 分钟长跑只跑了 120s，内存曲线是短窗口；② 1s 节拍的持续更新没有真造——看板自身是 10s 轮询 + SSE 事件驱动，脚本没有合成 1s 心跳，所以「每秒全量重渲染 50 张卡」这一最坏情形未测；③ 只用 headless Chrome，有头 Chrome 的合成器路径可能不同；④ 未测 4K/小屏等其它视口下的列数变化。
+
+**复现**：`scripts/dev-up.sh --install` → `bash bench/p2/scripts/run-board-perf.sh -n 50 -s 120 -i 20`。
+
+**数据面另计**：`bench/p2/k6/monitor.js`（50 VU × 1s 轮询，阈值 `p(95)<200ms`、`http_req_failed<1%`）覆盖的是接口侧；k6 无原生 SSE 模块（需 xk6-sse 扩展），故 SSE 主路径用 Go 的 `events` 程序测，脚本注释里写明了这个分工，不混口径。
 
 ### 4.5 其它限制
 
@@ -220,6 +259,10 @@ bash bench/p2/scripts/run-acceptance.sh -n 20
 bash bench/p2/scripts/run-events.sh -n 5
 bash bench/p2/scripts/run-events.sh -n 50
 bash bench/p2/scripts/run-memload.sh -n 20
+
+# 大屏前端帧率（先起全栈，再量渲染面；与上面的数据面脚本互不依赖）
+scripts/dev-up.sh --install
+bash bench/p2/scripts/run-board-perf.sh -n 50 -s 120 -i 20
 ```
 
 首次跑需要 `bench/p2/scripts/runtime/harnessloop.yaml` 与 `gateway.yaml`（`runtime/` 已 gitignore）：前者填 PG DSN，后者须给 `services.harness_loop: 127.0.0.1:50008` 与 `http_port: 9000`（`NewChatHandler` 用空 target 会直接 panic）。`lib-service.sh` 会从当前源码重建 harnessloop-service / gateway / fakeagent 三个二进制——网关也在被测链路上，用上一轮遗留的 `gateway.exe` 会测到旧游标语义。
@@ -233,6 +276,7 @@ bash bench/p2/scripts/run-memload.sh -n 20
 | `acceptance.json` / `acceptance-light.json` | 验收全量 / 仅进程内（归因用） |
 | `events-5.json` / `events-50.json` | 事件端到端 5 任务 / 50 任务 |
 | `memload-20.json` | 20 并发 RSS 曲线 |
+| `board-frames-50.json` | 大屏帧间隔 / 交互延迟 / JS 堆（`bench/p2/runtime/`） |
 
 脚本自解释：`lib-service.sh` 负责构建二进制、冷启动服务、等端口就绪、收尸；每个场景脚本只描述「测什么、门槛多少」。服务生命周期由脚本自己管——不是洁癖，而是基线内存必须来自刚启动的进程，否则上一轮没回收的堆会把 `per_task` 算小。
 
@@ -244,6 +288,10 @@ bash bench/p2/scripts/run-memload.sh -n 20
 | `bench/p2/k6/monitor.js` | 新增 | 50 VU × 1s 大屏轮询压测（k6） |
 | `bench/p2/scripts/lib-service.sh` | 新增 | 构建/启停/就绪探测公共库 |
 | `bench/p2/scripts/run-all.sh` | 新增 | 七类场景总入口 |
+| `bench/p2/scripts/cmd/boardperf` | 新增 | chromedp 大屏帧率/交互/内存采集器 |
+| `bench/p2/scripts/seed-board-tasks.sql` | 新增 | 50 个看板任务种子（幂等） |
+| `bench/p2/scripts/run-board-perf.sh` | 新增 | 大屏帧率场景入口 |
+| `bench/p2/runtime/board-frames-50.json` | 新增 | 帧率实测原始数据（留档） |
 | `bench/p2/scripts/run-memload.sh` | 新增 | 20 并发内存 |
 | `bench/p2/scripts/run-events.sh` | 新增 | 事件端到端 |
 | `bench/p2/scripts/run-search.sh` | 新增 | 代码检索 |

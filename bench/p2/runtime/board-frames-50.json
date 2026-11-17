@@ -1,0 +1,64 @@
+{
+  "name": "board-frames",
+  "url": "http://localhost:5174/harness-loop/monitor",
+  "expected_cards": 50,
+  "rendered_cards": 12,
+  "sweep_cards": 59,
+  "sample_seconds": 120,
+  "viewport": "1920x1080",
+  "headless": true,
+  "frames": {
+    "samples": 14014,
+    "p50_ms": 8.3,
+    "p95_ms": 8.6,
+    "p99_ms": 16.3,
+    "max_ms": 41.7,
+    "over_16_7_pct": 0.88,
+    "p95_within_16_7": true,
+    "implied_hz": 120.5
+  },
+  "long_tasks": {
+    "count": 6,
+    "total_ms": 316,
+    "max_ms": 54,
+    "per_second": 0.05
+  },
+  "interactions": [
+    {
+      "name": "status-filter",
+      "samples": 20,
+      "p50_ms": 61.65,
+      "p95_ms": 88.04,
+      "max_ms": 90.6
+    },
+    {
+      "name": "grid-scroll",
+      "samples": 20,
+      "p50_ms": 22.55,
+      "p95_ms": 39.32,
+      "max_ms": 39.8
+    },
+    {
+      "name": "raf-baseline",
+      "samples": 20,
+      "p50_ms": 6.65,
+      "p95_ms": 11.92,
+      "max_ms": 12.3
+    }
+  ],
+  "heap": {
+    "before_mb": 44.83,
+    "after_mb": 47.78,
+    "delta_mb": 2.95
+  },
+  "started_at": "2026-11-17T13:45:15+08:00",
+  "hardware": {
+    "cpus": 18,
+    "go_version": "go1.22.12",
+    "os": "windows/amd64"
+  },
+  "passed": true,
+  "notes": [
+    "首屏只渲染 12/50 张卡（AgentCardGrid 是虚拟列表，只画可视区+overscan），帧数据对应实测渲染量"
+  ]
+}

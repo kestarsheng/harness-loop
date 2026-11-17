@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -58,6 +59,12 @@ type CodeWriter struct {
 	batch int
 	// insert 是单条多行 INSERT 的行数上限；0 视为 DefaultInsertBatch。
 	insert int
+
+	// guardMu 保护下面的维度守卫字段；守卫是可选能力，零值即关闭。
+	guardMu       sync.Mutex
+	guard         EmbeddingGuard
+	guardDim      int
+	guardResolved bool
 }
 
 func NewCodeWriter(db *pgdb.DB, parse ParseFunc, embed EmbedFunc, metrics *Metrics) *CodeWriter {
@@ -187,11 +194,20 @@ func (w *CodeWriter) IndexFileWith(ctx context.Context, tenantID, projectID, pat
 
 	var vectors [][]float32
 	if w.embed != nil && len(parsed.Chunks) > 0 {
+		// 维度守卫的写入侧：先比对「模型 vs 索引列」，不通过就不去调 embedding 服务，
+		// 更不会进事务——错误必须停在产生向量之前。
+		if err := w.validateEmbeddingTarget(ctx); err != nil {
+			return result, err
+		}
 		texts := make([]string, 0, len(parsed.Chunks))
 		for _, chunk := range parsed.Chunks {
 			texts = append(texts, chunk.Symbol+"\n"+chunk.Text)
 		}
 		vectors = w.embedTexts(ctx, texts, options.EmbedBatch)
+		// 再核对 embedding 服务真正返回的向量长度；一批里有一条不对就整批不写。
+		if err := w.validateEmbeddingVectors(vectors); err != nil {
+			return result, err
+		}
 	}
 
 	tx, err := w.db.Pool().Begin(ctx)

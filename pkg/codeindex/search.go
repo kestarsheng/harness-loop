@@ -82,6 +82,11 @@ func (w *CodeWriter) Search(ctx context.Context, opts SearchOptions) ([]SearchHi
 	var vectorRows []chunkRow
 	if opts.Embedder != nil && IsSearchableQuery(opts.Query) {
 		if vecs, embedErr := opts.Embedder(ctx, []string{opts.Query}); embedErr == nil && len(vecs) > 0 && len(vecs[0]) > 0 {
+			// 维度守卫的查询侧：查询向量和索引列维度不一致时向量路必然查不到，
+			// 这里直接报错而不是静默退化成 keyword-only。
+			if guardErr := w.validateEmbeddingQuery(vecs[0]); guardErr != nil {
+				return nil, stats, guardErr
+			}
 			vectorRows, err = w.vectorSearch(ctx, opts.TenantID, opts.ProjectID, vecs[0], topK*2)
 			if err != nil {
 				vectorRows = nil
