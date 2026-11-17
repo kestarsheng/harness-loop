@@ -56,14 +56,15 @@ type Event struct {
 }
 
 type Store struct {
-	mu       sync.Mutex
-	doc      *Document
-	limits   Limits
-	evicted  []Eviction
-	warnings []Event
-	now      func() time.Time
-	sink     EventSink
-	path     string
+	mu            sync.Mutex
+	doc           *Document
+	limits        Limits
+	evicted       []Eviction
+	warnings      []Event
+	now           func() time.Time
+	sink          EventSink
+	path          string
+	rejectAtLimit bool
 }
 
 func NewStore(doc *Document, limits Limits) *Store {
@@ -96,6 +97,15 @@ func (s *Store) WithSink(sink EventSink) *Store {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.sink = sink
+	return s
+}
+
+// WithRejectAtLimit configures derived runtime stores to reject new topics
+// instead of evicting existing topics at the project limit.
+func (s *Store) WithRejectAtLimit() *Store {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rejectAtLimit = true
 	return s
 }
 
@@ -224,6 +234,9 @@ func (s *Store) insertLocked(topic Topic) error {
 			s.doc.UpsertTopic(topic, false)
 			return nil
 		}
+		if s.rejectAtLimit {
+			return fmt.Errorf("%w: %d topics (limit %d)", ErrTooManyTopics, len(s.doc.Topics), max)
+		}
 		victim, ok := s.findVictim()
 		if !ok {
 			return fmt.Errorf("%w: %d topics all pinned", ErrMemoryFullPinned, len(s.doc.Topics))
@@ -231,9 +244,6 @@ func (s *Store) insertLocked(topic Topic) error {
 		s.doc.RemoveTopic(victim.Key)
 		ev := Eviction{Key: victim.Key, Reason: "lru"}
 		if s.sink != nil {
-			// Publish immediately and keep the key out of the pending queue so
-			// Writer.Save and manual DrainEvictions cannot publish it again in
-			// the same eviction cycle.
 			s.emitLocked(newEvictionEvent(s.path, s.doc.Scope, ev, s.now()))
 		} else {
 			s.evicted = append(s.evicted, ev)

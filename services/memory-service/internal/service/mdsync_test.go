@@ -4,6 +4,8 @@ package service
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -172,5 +174,43 @@ func TestMarkdownWritesIndependentOfService(t *testing.T) {
 	}
 	if _, err := memoryfile.Parse(raw); err != nil {
 		t.Fatalf("written md must be valid: %v", err)
+	}
+}
+
+func TestMDSyncProjectLimitRejectsNewTopicWithoutDeletingOrRewritingMarkdown(t *testing.T) {
+	writer, syncer, path := setupMD(t)
+	ctx := context.Background()
+	topics := make([]memoryfile.Topic, 0, 31)
+	for i := 1; i <= 31; i++ {
+		key := fmt.Sprintf("topic-%02d", i)
+		topics = append(topics, mdTopic(key, key, "persistent memory body"))
+	}
+	writeDoc(t, path, mdDoc(topics...))
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := syncer.SyncFile(ctx, path, memoryfile.ScopeProject); err != nil {
+		t.Fatalf("sync should index within limit: %v", err)
+	}
+	if store := syncer.Store(path); store == nil || len(store.Document().Topics) != 30 {
+		t.Fatalf("runtime store topics = %v, want 30", store)
+	} else if _, ok := store.Document().TopicByKey("topic-01"); !ok {
+		t.Fatal("first existing topic was evicted")
+	} else if _, ok := store.Document().TopicByKey("topic-31"); ok {
+		t.Fatal("31st topic should be rejected from runtime store")
+	}
+	if count, err := writer.CountTopics(ctx, "tenant-md", "proj-md"); err != nil || count != 30 {
+		t.Fatalf("indexed topic count = %d, err=%v; want 30", count, err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatal("mdsync must not rewrite/truncate user's markdown")
+	}
+	if !errors.Is(syncer.Store(path).Insert(mdTopic("topic-32", "topic-32", "new")), memoryfile.ErrTooManyTopics) {
+		t.Fatal("runtime store insert beyond limit should return ErrTooManyTopics")
 	}
 }
