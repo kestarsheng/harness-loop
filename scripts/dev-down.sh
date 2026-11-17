@@ -26,24 +26,25 @@ while [ $# -gt 0 ]; do
 done
 
 # 停业务进程：顺序与启动相反；端口用于兜底反查 PID
-SERVICES=(vite gateway harnessloop)
+SERVICES=(vite gateway harnessloop agent)
 service_port() {
   case "$1" in
     vite) echo "$VITE_PORT" ;;
     gateway) echo "$GATEWAY_PORT" ;;
     harnessloop) echo "$HARNESSLOOP_PORT" ;;
+    agent) echo "$AGENT_PORT" ;;
   esac
 }
 
 report_ports() {
   local p
-  for p in "$VITE_PORT" "$GATEWAY_PORT" "$HARNESSLOOP_PORT"; do
+  for p in "$VITE_PORT" "$GATEWAY_PORT" "$HARNESSLOOP_PORT" "$AGENT_PORT" "$AGENT_HTTP_PORT"; do
     if port_open_any "$p"; then
       c_err "端口 $p 仍在监听"
       return 1
     fi
   done
-  c_ok "端口已释放：${HARNESSLOOP_PORT} / ${GATEWAY_PORT} / ${VITE_PORT}"
+  c_ok "端口已释放：${AGENT_PORT} / ${AGENT_HTTP_PORT} / ${HARNESSLOOP_PORT} / ${GATEWAY_PORT} / ${VITE_PORT}"
   return 0
 }
 

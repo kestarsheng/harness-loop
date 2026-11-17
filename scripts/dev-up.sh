@@ -23,6 +23,15 @@ set -uo pipefail
 # shellcheck source=./dev-lib.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/dev-lib.sh"
 
+# 本地凭据（.harness/dev/env，已 gitignore）：LLM / embedding key 走环境变量，
+# 不写进仓库文件；缺失时仍可启动，但 agent-service 调用会失败。
+if [ -f "$DEV_DIR/env" ]; then
+  # shellcheck disable=SC1091
+  . "$DEV_DIR/env"
+fi
+
+AGENT_BIN="$BIN_DIR/agent-service${EXE_SUFFIX}"
+
 INSTALL_DEPS=0
 FORCE_REBUILD=0
 NO_BUILD=0
@@ -98,6 +107,7 @@ gen_harnessloop_config() {
     -e "s|^\([[:space:]]*dsn:[[:space:]]*\).*|\1\"$(sed_escape "$PG_DSN")\"|" \
     -e "s|\"config/harness_loop/|\"pkg/config/harness_loop/|g" \
     -e "s|^\([[:space:]]*addr:[[:space:]]*\).*|\1\"\"|" \
+    -e "s|^\([[:space:]]*entry_agent:[[:space:]]*\).*|\1\"main-agent\"|" \
     "$tpl" >"$out" || return 1
 
   if [ "$DEMO_FLAGS" = 1 ]; then
@@ -119,6 +129,31 @@ gen_gateway_config() {
     -e "s|^\([[:space:]]*[a-z0-9_]*:[[:space:]]*\)[a-z0-9-]*-service:|\1127.0.0.1:|" \
     -e "s|^\([[:space:]]*harness_loop:[[:space:]]*\).*|\1127.0.0.1:${HARNESSLOOP_PORT}|" \
     -e "s|^\([[:space:]]*url:[[:space:]]*\)\"\{0,1\}redis://.*|\1\"\"|" \
+    "$tpl" >"$out" || return 1
+  echo "$out"
+}
+
+gen_agent_config() {
+  local tpl="$ROOT/services/agent-service/config.example.yaml"
+  local out="$CONF_DIR/agent.yaml"
+  [ -f "$tpl" ] || { c_err "缺少模板 $tpl"; return 1; }
+  local llm_key="${HARNESS_LLM_API_KEY:-}"
+  local llm_base="${HARNESS_LLM_BASE_URL:-https://llm-gateway.openkylin.top/v1}"
+  local llm_model="${HARNESS_LLM_MODEL:-deepseek-v4.1-flash}"
+  local emb_model="${HARNESS_EMBEDDING_MODEL:-text-embedding-v3}"
+  if [ -z "$llm_key" ]; then
+    c_warn "未设置 HARNESS_LLM_API_KEY（见 .harness/dev/env），agent-service 将无法调用 LLM"
+  fi
+  sed \
+    -e "s|^\([[:space:]]*path:[[:space:]]*\).*agent\.db.*|\1\".harness/dev/agent.db\"|" \
+    -e "s|^\([[:space:]]*grpc_port:[[:space:]]*\).*|\1${AGENT_PORT}|" \
+    -e "s|^\([[:space:]]*url:[[:space:]]*\).*mongodb.*|\1\"mongodb://127.0.0.1:27017\"|" \
+    -e "s|^\([[:space:]]*provider:[[:space:]]*\).*|\1openai|" \
+    -e "s|^\([[:space:]]*api_key:[[:space:]]*\).*|\1\"${llm_key}\"|" \
+    -e "s|^\([[:space:]]*base_url:[[:space:]]*\).*|\1\"${llm_base}\"|" \
+    -e "s|^\([[:space:]]*model:[[:space:]]*\).*|\1\"${llm_model}\"|" \
+    -e "s|^\([[:space:]]*embedding_model:[[:space:]]*\).*|\1\"${emb_model}\"|" \
+    -e "s|^\([[:space:]]*mcp:[[:space:]]*\).*|\1127.0.0.1:50005|" \
     "$tpl" >"$out" || return 1
   echo "$out"
 }
@@ -153,6 +188,8 @@ build_service() { # build_service <name> <bin> <pkg>
 step_pg() {
   if pg_ready; then
     c_ok "PG 已就绪（127.0.0.1:${PG_PORT} / ${PG_DB}）"
+    # dev-down --keep-db 只保留 PG，Mongo 可能已停；这里幂等补齐数据容器。
+    docker compose -f "$COMPOSE_FILE" up -d >"$LOG_DIR/pg-compose.log" 2>&1 || c_warn "数据容器补齐失败（Mongo 可能不可用）"
     return 0
   fi
   command -v docker >/dev/null 2>&1 || { c_err "未找到 docker，无法启动 PG"; return 1; }
@@ -171,7 +208,55 @@ step_pg() {
   return 1
 }
 
-# ---- 步骤 2：harnessloop-service ------------------------------------------
+# ---- 步骤 2：agent-service --------------------------------------------------
+step_agent() {
+  local name="agent"
+  if service_running "$name"; then
+    c_ok "$name 已在运行（PID $(pid_of "$name")），跳过"
+    return 0
+  fi
+  clear_pidfile "$name"
+  if port_open "$AGENT_PORT"; then
+    c_warn "$AGENT_PORT 已被其他进程占用，跳过启动（后续健康检查仍需通过）"
+    return 0
+  fi
+  local conf
+  conf="$(gen_agent_config)" || return 1
+  build_service "$name" "$AGENT_BIN" "./services/agent-service/cmd" || return 1
+  c_step "启动 agent-service（:${AGENT_PORT}，config=$conf）"
+  # 用 export 而非 `env` 前缀：MSYS/Git Bash 下 env 启动原生 exe 时环境变量不总是透传。
+  export CONFIG_PATH="$(win_path "$conf")"
+  export PORT="${AGENT_PORT}"
+  export HTTP_PORT="${AGENT_HTTP_PORT}"
+  export MONGODB_URL="mongodb://127.0.0.1:27017"
+  # agent-service 的 context store 用 STORE_PATH（默认 ./data/... 目录不存在会 CANTOPEN）
+  export STORE_PATH=".harness/dev/agent-contexts.db"
+  if ! launch "$name" "$ROOT" "$AGENT_BIN"; then
+    c_err "agent-service 启动后立即退出"
+    return 1
+  fi
+  if wait_until 40 port_open "$AGENT_PORT"; then
+    record_pid "$name" "$AGENT_PORT" || c_warn "无法反查 $name 的 PID，dev-down 将按端口清理"
+    c_ok "agent-service 监听 127.0.0.1:${AGENT_PORT}（PID $(pid_of "$name"))"
+    seed_agent_models
+    return 0
+  fi
+  c_err "agent-service 40s 内未监听 ${AGENT_PORT}"
+  return 1
+}
+
+# agent 定义存 Mongo；缺 model 字段时 LLM 请求 model 为空，任务会在 a 阶段失败。
+# 幂等：只补缺失字段，不覆盖用户已配置的模型。
+seed_agent_models() {
+  local model="${HARNESS_LLM_MODEL:-deepseek-v4.1-flash}"
+  command -v docker >/dev/null 2>&1 || return 0
+  docker ps --format '{{.Names}}' 2>/dev/null | grep -qx hlp-mongo || return 0
+  docker exec hlp-mongo mongosh --quiet agent_platform \
+    --eval "db.agents.updateMany({model:{\$exists:false}}, {\$set:{model:'${model}'}})" >/dev/null 2>&1 \
+    || c_warn "agent 模型补齐失败（请手动设置 agents.model=${model}）"
+}
+
+# ---- 步骤 3：harnessloop-service ------------------------------------------
 step_harnessloop() {
   local name="harnessloop"
   if service_running "$name"; then
@@ -289,10 +374,11 @@ main() {
   c_step "仓库：$ROOT"
   c_step "产物目录：$DEV_DIR"
 
-  step_pg || fail_step "pg-compose" "步骤 1/4 PostgreSQL 失败"
-  step_harnessloop || fail_step "harnessloop" "步骤 2/4 harnessloop-service 失败"
-  step_gateway || fail_step "gateway" "步骤 3/4 gateway 失败"
-  step_vite || fail_step "vite" "步骤 4/4 vite 失败"
+  step_pg || fail_step "pg-compose" "步骤 1/5 PostgreSQL 失败"
+  step_agent || fail_step "agent" "步骤 2/5 agent-service 失败"
+  step_harnessloop || fail_step "harnessloop" "步骤 3/5 harnessloop-service 失败"
+  step_gateway || fail_step "gateway" "步骤 4/5 gateway 失败"
+  step_vite || fail_step "vite" "步骤 5/5 vite 失败"
 
   local code
   code="$(http_code "$MONITOR_URL" 20)"
@@ -303,8 +389,9 @@ main() {
   fi
 
   printf '\n'
-  c_ok "全部 4 项健康检查通过"
+  c_ok "全部 5 项健康检查通过"
   printf '  %-8s %-6s %s\n' "BOARD" "" "$MONITOR_URL"
+  printf '  %-22s %-8s %s\n' "agent-service" "$(pid_of agent)" "127.0.0.1:${AGENT_PORT}"
   printf '  %-22s %-8s %s\n' "harnessloop-service" "$(pid_of harnessloop)" "127.0.0.1:${HARNESSLOOP_PORT}"
   printf '  %-22s %-8s %s\n' "gateway" "$(pid_of gateway)" "127.0.0.1:${GATEWAY_PORT} (/health)"
   printf '  %-22s %-8s %s\n' "vite" "$(pid_of vite)" "127.0.0.1:${VITE_PORT}"
