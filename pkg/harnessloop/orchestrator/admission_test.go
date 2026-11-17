@@ -8,14 +8,17 @@ package orchestrator
 //   - 慢任务完成后新任务自动放行（Admit 重投与 Drain 两条路径）；
 //   - max_subtask_minutes 作为衰减窗口上界生效，窗口不再无限；
 //   - 衰减记账放行之后还有一次 gate 二次确认：慢任务仍真实占满闸门时必须拒绝
-//     （retry_after_ms 照给），不许"放行后换个地方排队"；
+//     （能估算时带 retry_after_ms；估不出就缺省，缺省 ≠ 立刻可重试），
+//     不许"放行后换个地方排队"；
 //   - 准入拒绝/排队留下结构化记录；
 //   - 调度层"超额在跑、靠自然完成衰减"的兜底保留，且依然不抢占。
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -247,8 +250,10 @@ func TestAdmissionGateConfirmationRejectsDecayedAdmit(t *testing.T) {
 		t.Fatalf("detail pool numbers = %v/%v/%v, want 4/4/4",
 			details["slots_used"], details["tenant_slots"], details["slots_decayed"])
 	}
-	if _, ok := details["retry_after_ms"].(int64); !ok {
-		t.Fatalf("a gate rejection must still carry retry_after_ms, got %v", details["retry_after_ms"])
+	if _, ok := details["retry_after_ms"].(int64); ok {
+		// 这条路径上所有 hold 都已越过衰减窗口，准入层其实估不出时间，于是字段
+		// 整个缺省——缺省 ≠ 立刻可重试，调用方走指数退避（见 AdmissionError 契约）。
+		t.Fatalf("no in-window hold means no estimate: retry_after_ms must be omitted, got %v", details["retry_after_ms"])
 	}
 	if decision.Admitted || decision.Queued || decision.Position != 0 {
 		t.Fatalf("decision = %+v, want an outright rejection", decision)
@@ -427,4 +432,78 @@ func TestAdmissionKeepsSchedulerOverflowDecay(t *testing.T) {
 	if used, max := fair.TenantActive(); used != 4 || max != 4 {
 		t.Fatalf("tenant usage = %d/%d, want 4/4", used, max)
 	}
+}
+
+// TestAdmissionRetryAfterContract 守住 retry_after_ms 的两种状态：
+//   - 能估算（还有 hold 在衰减窗口内）→ 给正数，且与 decision.RetryAfter 一致；
+//   - 估不出来（没有可观测的 hold，或衰减窗口为 0）→ 字段整个缺省。
+//
+// 第二种场合以前发 int64(0)，读起来就是"立刻可以重试"，调用方一顿重试就把拒绝变成
+// 热循环。缺省 ≠ 立刻可重试：调用方必须回落到指数退避。
+func TestAdmissionRetryAfterContract(t *testing.T) {
+	t.Run("estimated", func(t *testing.T) {
+		ctx := context.Background()
+		clock := &testClock{at: time.Date(2026, 11, 16, 10, 0, 0, 0, time.UTC)}
+		cfg, fair, _, _ := admissionFixture(t, 4, 4, clock)
+		policy := AdmissionConfigFromQuota(cfg)
+		policy.QueueWhenFull = false
+		admission := NewAdmission(fair, policy).WithSink(NewMemoryAdmissionSink())
+		admission.SetClock(clock.Now)
+
+		clock.Advance(40 * time.Second) // hold 还在窗口内 → 估得出剩余时间
+		decision, err := admission.Admit(ctx, "parent-new")
+		if AdmissionReason(err) != AllocDeniedTenantFull {
+			t.Fatalf("precondition: pool must be full, got %v", err)
+		}
+		ms, ok := AdmissionDetails(err)["retry_after_ms"].(int64)
+		if !ok || ms <= 0 {
+			t.Fatalf("an in-window hold yields a positive estimate, got %v", AdmissionDetails(err)["retry_after_ms"])
+		}
+		if decision.RetryAfter <= 0 || ms != decision.RetryAfter.Milliseconds() {
+			t.Fatalf("details and decision must agree: ms=%d decision=%s", ms, decision.RetryAfter)
+		}
+		window := time.Duration(admission.Config().MaxSubtaskMinutes) * time.Minute
+		if decision.RetryAfter > window {
+			t.Fatalf("estimate %s must not exceed the decay window %s", decision.RetryAfter, window)
+		}
+	})
+
+	t.Run("unknown", func(t *testing.T) {
+		ctx := context.Background()
+		clock := &testClock{at: time.Date(2026, 11, 16, 10, 0, 0, 0, time.UTC)}
+		cfg, fair, _, _ := admissionFixture(t, 4, 4, clock)
+		sink := NewMemoryAdmissionSink()
+		policy := AdmissionConfigFromQuota(cfg)
+		policy.QueueWhenFull = false
+		admission := NewAdmission(fair, policy).WithSink(sink)
+		admission.SetClock(clock.Now)
+
+		clock.Advance(16 * time.Minute) // 全部越过窗口：没有任何可估算的 hold
+		decision, err := admission.Admit(ctx, "parent-new")
+		if AdmissionReason(err) != AllocDeniedTenantFull {
+			t.Fatalf("precondition: pool must be full, got %v", err)
+		}
+		details := AdmissionDetails(err)
+		if value, ok := details["retry_after_ms"]; ok {
+			t.Fatalf("an unestimable retry must omit the field, got %v", value)
+		}
+		if _, ok := details["reason"]; !ok {
+			t.Fatalf("omitting retry_after_ms must not strip the reason: %v", details)
+		}
+		if decision.RetryAfter != 0 {
+			t.Fatalf("decision.RetryAfter = %s, want 0 (unknown)", decision.RetryAfter)
+		}
+
+		records := sink.Find(AdmissionRejected)
+		if len(records) != 1 || records[0].RetryAfterMs != 0 {
+			t.Fatalf("record = %+v, want RetryAfterMs=0 (unknown)", records)
+		}
+		raw, marshalErr := json.Marshal(records[0])
+		if marshalErr != nil {
+			t.Fatalf("marshal record: %v", marshalErr)
+		}
+		if strings.Contains(string(raw), "retry_after_ms") {
+			t.Fatalf("an unknown retry must not appear in the record JSON: %s", raw)
+		}
+	})
 }

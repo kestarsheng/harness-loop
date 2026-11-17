@@ -19,6 +19,8 @@ scripts/dev-up.sh                 # 依次拉起 4 项，末尾打印看板地�
 scripts/dev-up.sh --install       # node_modules 缺失时自动 npm ci
 scripts/dev-up.sh --rebuild       # 强制重新编译 Go 服务
 scripts/dev-up.sh --no-build      # 跳过编译，直接用已有二进制
+scripts/dev-up.sh --demo          # 演示：打开三条 P2 新链路开关（编排/模型策略/权限层）
+HLP_DEMO_FLAGS=1 scripts/dev-up.sh # 同上，环境变量写法
 
 scripts/dev-down.sh               # 按 PID 停业务进程，然后停数据容器
 scripts/dev-down.sh --keep-db     # 只停业务进程，保留 PG / Mongo
@@ -26,6 +28,23 @@ scripts/dev-down.sh --keep-db     # 只停业务进程，保留 PG / Mongo
 
 退出码：`0` 全部就绪；非 `0` 表示某一步失败，失败时脚本会打印该步日志尾部，并把本次
 已启动的进程回滚掉（不会留下半截栈）。
+
+### `--demo`：一键看到新链路
+
+`--demo` 把 harnessloop-service 的 `feature_flags.file` 指向
+`scripts/dev-features.demo.yaml`（三条开关 `default: true`），仓库自己的
+`pkg/config/harness_loop/features.yaml` 保持默认全关，不被改写。开关只在进程启动时
+读一次，所以已经跑着栈的话要先 `scripts/dev-down.sh` 再 `--demo` 起。
+
+开关没有 HTTP 开关接口，验证方式是看启动日志与看板：
+
+```bash
+grep 'feature gates' .harness/dev/logs/harnessloop.log
+# harnessloop: feature gates (tenant=platform): orchestrator=on model_strategy=on policy_layers=on
+```
+
+随后看板的「多 Agent / 模型 / 权限」三块从空态变为有数据；不给 `--demo` 时这行日志是
+三个 `off`，行为回到单 Agent + 静态模型 + 旧权限判定。
 
 ## 步骤与端口
 

@@ -14,11 +14,31 @@ const FlagFSMEnabled = "harness.loop.fsm.enabled"
 // T-P1-31 feature switches. All three default to false: when a flag is absent
 // or disabled the runtime keeps the pre-existing single-agent, static-model and
 // policy.Engine paths.
+//
+// 命名对齐 P2 任务书：模型/权限两项用下划线分段（model_strategy、policy_layers），
+// 与 design.md 里的 model.strategy / policy.resolver 拼法不同；旧拼法保留在
+// FlagAliases 里，老 flag 文件不会因为改名而静默变成 false。
 const (
-	FlagOrchestratorEnabled   = "harness.loop.orchestrator.enabled"
-	FlagModelStrategyEnabled  = "harness.loop.model.strategy.enabled"
-	FlagPolicyResolverEnabled = "harness.loop.policy.resolver.enabled"
+	FlagOrchestratorEnabled  = "harness.loop.orchestrator.enabled"
+	FlagModelStrategyEnabled = "harness.loop.model_strategy.enabled"
+	FlagPolicyLayersEnabled  = "harness.loop.policy_layers.enabled"
 )
+
+// FlagAliases maps a canonical flag name to the legacy names still accepted when
+// reading. Order matters: the canonical name wins when both are present.
+var FlagAliases = map[string][]string{
+	FlagModelStrategyEnabled: {"harness.loop.model.strategy.enabled"},
+	FlagPolicyLayersEnabled:  {"harness.loop.policy.resolver.enabled"},
+}
+
+// FlagNames returns the canonical name followed by its legacy aliases. Callers
+// pass the result to EvaluateFirst so a renamed flag keeps working.
+func FlagNames(name string) []string {
+	out := make([]string, 0, 1+len(FlagAliases[name]))
+	out = append(out, name)
+	out = append(out, FlagAliases[name]...)
+	return out
+}
 
 type FlagContext struct {
 	TenantID  string `json:"tenant_id"`
@@ -141,6 +161,37 @@ func (s *FlagSet) Evaluate(name string, ctx FlagContext) bool {
 
 func (s *FlagSet) EvaluateFSM(ctx FlagContext) bool {
 	return s.Evaluate(FlagFSMEnabled, ctx)
+}
+
+// EvaluateFirst returns the verdict of the first name that exists in the flag
+// file, together with the name it came from ("" when none is declared).
+//
+// 用途：进程启动时把一条开关解析成一个布尔位（bridge 的 enabled）。三个新链路
+// 开关的 enabled 位是「本服务所属租户」的解析结果——默认 platform；租户规则因此
+// 在启动时生效。请求级租户差异不在本层解决（bridge 是进程级单例）。
+func (s *FlagSet) EvaluateFirst(ctx FlagContext, names []string) (bool, string) {
+	if s == nil {
+		return false, ""
+	}
+	for _, name := range names {
+		if _, ok := s.Get(name); ok {
+			return s.Evaluate(name, ctx), name
+		}
+	}
+	return false, ""
+}
+
+// Declared reports whether the flag file declares name (canonical or alias).
+func (s *FlagSet) Declared(names []string) bool {
+	if s == nil {
+		return false
+	}
+	for _, name := range names {
+		if _, ok := s.Get(name); ok {
+			return true
+		}
+	}
+	return false
 }
 
 func matchesList(list []string, value string) bool {

@@ -1308,7 +1308,9 @@ type ListEventsRequest struct {
 	Stage     string `protobuf:"bytes,3,opt,name=stage,proto3" json:"stage,omitempty"`
 	EventType string `protobuf:"bytes,4,opt,name=event_type,json=eventType,proto3" json:"event_type,omitempty"`
 	Severity  string `protobuf:"bytes,5,opt,name=severity,proto3" json:"severity,omitempty"`
-	// since_seq 是 global_seq 下界（不含），不是任务内 seq。
+	// since_seq 是「租户级游标」：它是 tenant 内 global_seq 的下界（不含），不是任务内 seq。
+	// 按 task_ids / task_id 子集订阅时，其他任务的事件会被过滤掉，游标因此允许跳号——
+	// 客户端只把它当"下一次从哪继续"，不能用「seq 不连续」判定事件丢失。
 	SinceSeq int64 `protobuf:"varint,6,opt,name=since_seq,json=sinceSeq,proto3" json:"since_seq,omitempty"`
 	Limit    int32 `protobuf:"varint,7,opt,name=limit,proto3" json:"limit,omitempty"`
 }
@@ -1401,6 +1403,8 @@ type ListEventsResponse struct {
 
 	Events []*HarnessEvent `protobuf:"bytes,1,rep,name=events,proto3" json:"events,omitempty"`
 	// next_since_seq 是本次返回的最大 global_seq，可直接作为下一次 since_seq。
+	// 同样是租户级游标：本次若按 task_id 过滤（子集订阅），返回的 seq 天然不连续；
+	// 没有新事件时原样回显 since_seq（不是 0，调用方不要把它当"从头再来"）。
 	NextSinceSeq int64 `protobuf:"varint,2,opt,name=next_since_seq,json=nextSinceSeq,proto3" json:"next_since_seq,omitempty"`
 }
 
@@ -1456,8 +1460,10 @@ type WatchEventsRequest struct {
 	unknownFields protoimpl.UnknownFields
 
 	TenantId string `protobuf:"bytes,1,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`
-	// since_seq 是 global_seq 下界（不含）；新任务的事件与老任务共用同一条序列，
-	// 因此不会再被「新任务 seq 从 1 开始」整段滤掉。
+	// since_seq 是租户级游标：tenant 内 global_seq 的下界（不含），不是任务内 seq。
+	// 新任务的事件与老任务共用同一条序列，因此不会再被「新任务 seq 从 1 开始」整段滤掉。
+	// task_ids 是子集订阅：只推这些任务的事件，游标上留下的空档由别的任务占用，
+	// 允许跳号（前端重连只按 next_since_seq 续拉，不补空档）。
 	SinceSeq int64    `protobuf:"varint,2,opt,name=since_seq,json=sinceSeq,proto3" json:"since_seq,omitempty"`
 	TaskIds  []string `protobuf:"bytes,3,rep,name=task_ids,json=taskIds,proto3" json:"task_ids,omitempty"`
 }
