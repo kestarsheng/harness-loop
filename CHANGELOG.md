@@ -6,11 +6,12 @@
 
 ### Changed
 
-- 记忆事件出口：memory-service 新增 `internal/events`（EventSink 契约 + 默认 `NoopSink` + 白名单校验），**暂不落库**——mdsync 只做 md→PG 派生索引，全链路从不构造 `memoryfile.Store`，没有真实的 LRU 提升/淘汰生产方；写 `hlp_event.events` 还需要解决 `task_id NOT NULL` 的语义缺口。
+- 记忆事件出口：memory-service 新增 `internal/events`（EventSink 契约 + 默认 `NoopSink` + 白名单校验），**暂不落库**。二次复核确认三件事：①tenant/project 语义成立（`MDSyncOptions` 与 `hlp_mem.memory_topics` 同键）；②`hlp_event.events` 与本服务同库同 DSN（`ddl/003_event.sql` 就在启动时的 `pgindex.Migrate` 里），但平台 `event.(*Event).Validate` 强制要求 `task_id`，而记忆提升/淘汰没有任务上下文，且 `UNIQUE(task_id, seq)` 不含 `tenant_id`，占位 `task_id` 会让各租户自增的 `global_seq` 相互撞号；③更根本的是没有生产方——mdsync 只调 `memoryfile.Parse`，从不构造 `memoryfile.Store`，`order_rank` 只按 md 顺序写入、recall 纯读不回写，故不存在真实的 LRU 提升/淘汰。
+- 记忆事件测试：新增 `TestTypesAreRegisteredInPlatformWhitelist`（直接问 `pkg/harnessloop/event.IsKnownType`，白名单改名/删项即红）与 `TestCapacityWarningIsNotAPlatformEventType`（守住「容量告警不进白名单」的结论）。
 
 ### Removed
 
-- `memoryfile.EventCapacityWarn`：该事件名不在平台白名单且没有发送方，改为 `lru.go` 内部常量 `capacityWarningType`（内部预留，不接入事件流）。
+- `memoryfile.EventCapacityWarn`：该事件名不在平台白名单且没有发送方，改为 `lru.go` 内部常量 `capacityWarningType`（内部预留，不接入事件流）。未改动 `pkg/harnessloop/event/types.go`。
 
 ## [0.2.0-p1] - 2026-11-13
 
