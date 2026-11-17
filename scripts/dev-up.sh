@@ -31,6 +31,8 @@ if [ -f "$DEV_DIR/env" ]; then
 fi
 
 AGENT_BIN="$BIN_DIR/agent-service${EXE_SUFFIX}"
+MCP_BIN="$BIN_DIR/mcp-service${EXE_SUFFIX}"
+HARNESS_SVC_BIN="$BIN_DIR/harness-service${EXE_SUFFIX}"
 
 INSTALL_DEPS=0
 FORCE_REBUILD=0
@@ -153,7 +155,8 @@ gen_agent_config() {
     -e "s|^\([[:space:]]*base_url:[[:space:]]*\).*|\1\"${llm_base}\"|" \
     -e "s|^\([[:space:]]*model:[[:space:]]*\).*|\1\"${llm_model}\"|" \
     -e "s|^\([[:space:]]*embedding_model:[[:space:]]*\).*|\1\"${emb_model}\"|" \
-    -e "s|^\([[:space:]]*mcp:[[:space:]]*\).*|\1127.0.0.1:50005|" \
+    -e "s|^\([[:space:]]*mcp:[[:space:]]*\).*|\1127.0.0.1:${MCP_PORT}|" \
+    -e "s|^\([[:space:]]*harness:[[:space:]]*\).*|\1127.0.0.1:${HARNESS_SVC_PORT}|" \
     "$tpl" >"$out" || return 1
   echo "$out"
 }
@@ -208,7 +211,124 @@ step_pg() {
   return 1
 }
 
-# ---- 步骤 2：agent-service --------------------------------------------------
+gen_mcp_config() {
+  local tpl="$ROOT/services/mcp-service/config.example.yaml"
+  local out="$CONF_DIR/mcp.yaml"
+  [ -f "$tpl" ] || { c_err "缺少模板 $tpl"; return 1; }
+  sed \
+    -e "s|^\([[:space:]]*grpc_port:[[:space:]]*\).*|\1${MCP_PORT}|" \
+    -e "s|^\([[:space:]]*provider:[[:space:]]*\).*|\1openai|" \
+    -e "s|^\([[:space:]]*api_key:[[:space:]]*\).*|\1\"${HARNESS_LLM_API_KEY:-}\"|" \
+    -e "s|^\([[:space:]]*base_url:[[:space:]]*\).*|\1\"${HARNESS_LLM_BASE_URL:-https://llm-gateway.openkylin.top/v1}\"|" \
+    -e "s|^\([[:space:]]*model:[[:space:]]*\).*|\1\"${HARNESS_LLM_MODEL:-deepseek-v4.1-flash}\"|" \
+    -e "s|^\([[:space:]]*embedding_model:[[:space:]]*\).*|\1\"${HARNESS_EMBEDDING_MODEL:-text-embedding-v3}\"|" \
+    -e "s|^\([[:space:]]*knowledge:[[:space:]]*\).*|\1127.0.0.1:50002|" \
+    -e "s|^\([[:space:]]*gateway:[[:space:]]*\).*|\1127.0.0.1:${GATEWAY_PORT}|" \
+    -e "s|^\([[:space:]]*url:[[:space:]]*\).*redis://.*|\1\"redis://127.0.0.1:${REDIS_PORT}\"|" \
+    "$tpl" >"$out" || return 1
+  echo "$out"
+}
+
+gen_harness_svc_config() {
+  local tpl="$ROOT/services/harness-service/config.example.yaml"
+  local out="$CONF_DIR/harness-service.yaml"
+  [ -f "$tpl" ] || { c_err "缺少模板 $tpl"; return 1; }
+  sed \
+    -e "s|^\([[:space:]]*grpc_port:[[:space:]]*\).*|\1${HARNESS_SVC_PORT}|" \
+    -e "s|^\([[:space:]]*path:[[:space:]]*\).*harness\.db.*|\1./.harness/dev/harness.db|" \
+    -e "s|^\([[:space:]]*provider:[[:space:]]*\).*|\1openai|" \
+    -e "s|^\([[:space:]]*api_key:[[:space:]]*\).*|\1\"${HARNESS_LLM_API_KEY:-}\"|" \
+    -e "s|^\([[:space:]]*base_url:[[:space:]]*\).*|\1\"${HARNESS_LLM_BASE_URL:-https://llm-gateway.openkylin.top/v1}\"|" \
+    -e "s|^\([[:space:]]*model:[[:space:]]*\).*|\1\"${HARNESS_LLM_MODEL:-deepseek-v4.1-flash}\"|" \
+    -e "s|^\([[:space:]]*agent:[[:space:]]*\).*|\1127.0.0.1:${AGENT_PORT}|" \
+    -e "s|^\([[:space:]]*url:[[:space:]]*\).*redis://.*|\1\"redis://127.0.0.1:${REDIS_PORT}\"|" \
+    "$tpl" >"$out" || return 1
+  echo "$out"
+}
+
+# ---- 步骤 2：redis --------------------------------------------------------
+step_redis() {
+  if port_open "$REDIS_PORT"; then
+    c_ok "redis 已就绪（127.0.0.1:${REDIS_PORT}）"
+    return 0
+  fi
+  command -v docker >/dev/null 2>&1 || { c_err "未找到 docker，无法启动 redis"; return 1; }
+  c_step "启动 redis 容器（:${REDIS_PORT}）"
+  docker rm -f "$REDIS_CONTAINER" >/dev/null 2>&1 || true
+  if ! docker run -d --name "$REDIS_CONTAINER" -p "${REDIS_PORT}:6379" redis:7-alpine >"$LOG_DIR/redis.log" 2>&1; then
+    c_err "redis 启动失败"
+    tail_log redis 20
+    return 1
+  fi
+  if wait_until 30 port_open "$REDIS_PORT"; then
+    c_ok "redis 就绪（127.0.0.1:${REDIS_PORT}）"
+    return 0
+  fi
+  c_err "redis 30s 内未就绪"
+  return 1
+}
+
+# ---- 步骤 3：mcp-service ---------------------------------------------------
+step_mcp() {
+  local name="mcp"
+  if service_running "$name"; then
+    c_ok "$name 已在运行（PID $(pid_of "$name")），跳过"
+    return 0
+  fi
+  clear_pidfile "$name"
+  if port_open "$MCP_PORT"; then
+    c_warn "$MCP_PORT 已被其他进程占用，跳过启动（后续健康检查仍需通过）"
+    return 0
+  fi
+  local conf
+  conf="$(gen_mcp_config)" || return 1
+  build_service "$name" "$MCP_BIN" "./services/mcp-service/cmd" || return 1
+  c_step "启动 mcp-service（:${MCP_PORT}，config=$conf）"
+  export CONFIG_PATH="$(win_path "$conf")"
+  if ! launch "$name" "$ROOT" "$MCP_BIN"; then
+    c_err "mcp-service 启动后立即退出"
+    return 1
+  fi
+  if wait_until 40 port_open "$MCP_PORT"; then
+    record_pid "$name" "$MCP_PORT" || c_warn "无法反查 $name 的 PID，dev-down 将按端口清理"
+    c_ok "mcp-service 监听 127.0.0.1:${MCP_PORT}（PID $(pid_of "$name"))"
+    return 0
+  fi
+  c_err "mcp-service 40s 内未监听 ${MCP_PORT}"
+  return 1
+}
+
+# ---- 步骤 4：harness-service -----------------------------------------------
+step_harness_svc() {
+  local name="harness-svc"
+  if service_running "$name"; then
+    c_ok "$name 已在运行（PID $(pid_of "$name")），跳过"
+    return 0
+  fi
+  clear_pidfile "$name"
+  if port_open "$HARNESS_SVC_PORT"; then
+    c_warn "$HARNESS_SVC_PORT 已被其他进程占用，跳过启动（后续健康检查仍需通过）"
+    return 0
+  fi
+  local conf
+  conf="$(gen_harness_svc_config)" || return 1
+  build_service "$name" "$HARNESS_SVC_BIN" "./services/harness-service/cmd" || return 1
+  c_step "启动 harness-service（:${HARNESS_SVC_PORT}，config=$conf）"
+  export CONFIG_PATH="$(win_path "$conf")"
+  if ! launch "$name" "$ROOT" "$HARNESS_SVC_BIN"; then
+    c_err "harness-service 启动后立即退出"
+    return 1
+  fi
+  if wait_until 40 port_open "$HARNESS_SVC_PORT"; then
+    record_pid "$name" "$HARNESS_SVC_PORT" || c_warn "无法反查 $name 的 PID，dev-down 将按端口清理"
+    c_ok "harness-service 监听 127.0.0.1:${HARNESS_SVC_PORT}（PID $(pid_of "$name"))"
+    return 0
+  fi
+  c_err "harness-service 40s 内未监听 ${HARNESS_SVC_PORT}"
+  return 1
+}
+
+# ---- 步骤 5：agent-service --------------------------------------------------
 step_agent() {
   local name="agent"
   if service_running "$name"; then
@@ -374,11 +494,14 @@ main() {
   c_step "仓库：$ROOT"
   c_step "产物目录：$DEV_DIR"
 
-  step_pg || fail_step "pg-compose" "步骤 1/5 PostgreSQL 失败"
-  step_agent || fail_step "agent" "步骤 2/5 agent-service 失败"
-  step_harnessloop || fail_step "harnessloop" "步骤 3/5 harnessloop-service 失败"
-  step_gateway || fail_step "gateway" "步骤 4/5 gateway 失败"
-  step_vite || fail_step "vite" "步骤 5/5 vite 失败"
+  step_pg || fail_step "pg-compose" "步骤 1/8 PostgreSQL 失败"
+  step_redis || fail_step "redis" "步骤 2/8 redis 失败"
+  step_mcp || fail_step "mcp" "步骤 3/8 mcp-service 失败"
+  step_harness_svc || fail_step "harness-svc" "步骤 4/8 harness-service 失败"
+  step_agent || fail_step "agent" "步骤 5/8 agent-service 失败"
+  step_harnessloop || fail_step "harnessloop" "步骤 6/8 harnessloop-service 失败"
+  step_gateway || fail_step "gateway" "步骤 7/8 gateway 失败"
+  step_vite || fail_step "vite" "步骤 8/8 vite 失败"
 
   local code
   code="$(http_code "$MONITOR_URL" 20)"
@@ -389,13 +512,16 @@ main() {
   fi
 
   printf '\n'
-  c_ok "全部 5 项健康检查通过"
+  c_ok "全部 8 项健康检查通过"
   printf '  %-8s %-6s %s\n' "BOARD" "" "$MONITOR_URL"
   printf '  %-22s %-8s %s\n' "agent-service" "$(pid_of agent)" "127.0.0.1:${AGENT_PORT}"
+  printf '  %-22s %-8s %s\n' "mcp-service" "$(pid_of mcp)" "127.0.0.1:${MCP_PORT}"
+  printf '  %-22s %-8s %s\n' "harness-service" "$(pid_of harness-svc)" "127.0.0.1:${HARNESS_SVC_PORT}"
   printf '  %-22s %-8s %s\n' "harnessloop-service" "$(pid_of harnessloop)" "127.0.0.1:${HARNESSLOOP_PORT}"
   printf '  %-22s %-8s %s\n' "gateway" "$(pid_of gateway)" "127.0.0.1:${GATEWAY_PORT} (/health)"
   printf '  %-22s %-8s %s\n' "vite" "$(pid_of vite)" "127.0.0.1:${VITE_PORT}"
   printf '  %-22s %-8s %s\n' "postgres" "docker" "127.0.0.1:${PG_PORT} (${PG_CONTAINER})"
+  printf '  %-22s %-8s %s\n' "redis" "docker" "127.0.0.1:${REDIS_PORT} (${REDIS_CONTAINER})"
   if [ "$DEMO_FLAGS" = 1 ]; then
     printf '\n'
     c_ok "演示开关已生效（features=$DEMO_FEATURES_REL）"

@@ -26,25 +26,27 @@ while [ $# -gt 0 ]; do
 done
 
 # 停业务进程：顺序与启动相反；端口用于兜底反查 PID
-SERVICES=(vite gateway harnessloop agent)
+SERVICES=(vite gateway harnessloop agent harness-svc mcp)
 service_port() {
   case "$1" in
     vite) echo "$VITE_PORT" ;;
     gateway) echo "$GATEWAY_PORT" ;;
     harnessloop) echo "$HARNESSLOOP_PORT" ;;
     agent) echo "$AGENT_PORT" ;;
+    harness-svc) echo "$HARNESS_SVC_PORT" ;;
+    mcp) echo "$MCP_PORT" ;;
   esac
 }
 
 report_ports() {
   local p
-  for p in "$VITE_PORT" "$GATEWAY_PORT" "$HARNESSLOOP_PORT" "$AGENT_PORT" "$AGENT_HTTP_PORT"; do
+  for p in "$VITE_PORT" "$GATEWAY_PORT" "$HARNESSLOOP_PORT" "$AGENT_PORT" "$AGENT_HTTP_PORT" "$HARNESS_SVC_PORT" "$MCP_PORT"; do
     if port_open_any "$p"; then
       c_err "端口 $p 仍在监听"
       return 1
     fi
   done
-  c_ok "端口已释放：${AGENT_PORT} / ${AGENT_HTTP_PORT} / ${HARNESSLOOP_PORT} / ${GATEWAY_PORT} / ${VITE_PORT}"
+  c_ok "端口已释放：${AGENT_PORT} / ${AGENT_HTTP_PORT} / ${MCP_PORT} / ${HARNESS_SVC_PORT} / ${HARNESSLOOP_PORT} / ${GATEWAY_PORT} / ${VITE_PORT}"
   return 0
 }
 
@@ -77,6 +79,11 @@ main() {
   done
 
   report_ports || rc=1
+
+  # redis 是开发辅助容器（无卷），无论 --keep-db 都清掉，避免残留占用端口。
+  if command -v docker >/dev/null 2>&1 && docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$REDIS_CONTAINER"; then
+    docker rm -f "$REDIS_CONTAINER" >/dev/null 2>&1 && c_ok "redis 容器已移除（$REDIS_CONTAINER）"
+  fi
 
   if [ "$KEEP_DB" = 1 ]; then
     c_ok "保留数据容器（--keep-db）"
