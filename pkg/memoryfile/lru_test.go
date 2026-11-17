@@ -20,27 +20,33 @@ func newProjectStore() *Store {
 	return NewStore(doc, DefaultLimits())
 }
 
-func TestLRUEvictsOldestAtLimit(t *testing.T) {
-	s := newProjectStore()
+func TestProjectLimitRejectsWithoutEvicting(t *testing.T) {
+	s := newProjectStore().WithRejectAtLimit()
 	for i := 1; i <= 31; i++ {
 		key := fmt.Sprintf("t%02d", i)
-		if err := s.Insert(topicFor(key, CategoryProjectFact, "body", false)); err != nil {
+		err := s.Insert(topicFor(key, CategoryProjectFact, "body", false))
+		if i <= 30 && err != nil {
 			t.Fatalf("insert %s: %v", key, err)
+		}
+		if i == 31 && !errors.Is(err, ErrTooManyTopics) {
+			t.Fatalf("insert over limit error = %v, want ErrTooManyTopics", err)
 		}
 	}
 	doc := s.Document()
 	if len(doc.Topics) != 30 {
 		t.Fatalf("topics = %d, want 30", len(doc.Topics))
 	}
-	if _, ok := doc.TopicByKey("t01"); ok {
-		t.Fatal("oldest topic t01 must be evicted")
+	if _, ok := doc.TopicByKey("t01"); !ok {
+		t.Fatal("existing topic t01 must not be evicted")
 	}
-	if doc.Order[0] != "t31" {
-		t.Fatalf("newest topic must be at head, got %s", doc.Order[0])
+	if _, ok := doc.TopicByKey("t31"); ok {
+		t.Fatal("over-limit topic t31 must not be inserted")
 	}
-	evictions := s.DrainEvictions()
-	if len(evictions) != 1 || evictions[0].Key != "t01" {
-		t.Fatalf("evictions = %+v", evictions)
+	if evictions := s.DrainEvictions(); len(evictions) != 0 {
+		t.Fatalf("rejection must not queue evictions: %+v", evictions)
+	}
+	if warnings := s.DrainWarnings(); len(warnings) != 0 {
+		t.Fatalf("project hard limit must not emit capacity warnings: %+v", warnings)
 	}
 }
 
