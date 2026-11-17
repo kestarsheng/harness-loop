@@ -159,22 +159,27 @@ npm run build        # production build
 
 ### 本地一键起停（dev-up / dev-down）
 
-只想跑「PG + harnessloop-service + gateway + 前端」，不整套 compose 时用这两个脚本：
+本地完整开发栈 **14 项**：PG / Mongo / Qdrant / Redis + 9 个微服务 + vite。
 
 ```bash
-scripts/dev-up.sh          # PG(55432) -> harnessloop(50013) -> gateway(9000) -> vite(5174)
-scripts/dev-down.sh        # 按 PID 停业务进程，并停掉数据容器
-scripts/dev-down.sh --keep-db   # 只停业务进程，保留 PG / Mongo
+scripts/dev-up.sh --demo   # 14 项：数据容器 -> 9 个服务 -> vite，末尾打印健康表
+scripts/dev-down.sh        # 停 9 个服务 + vite + redis，再停 PG/Mongo/Qdrant
+scripts/dev-down.sh --keep-db   # 只停业务进程，保留 PG / Mongo / Qdrant
 ```
 
-成功后会打印看板地址 <http://localhost:5174/harness-loop/monitor> 与各组件 PID。
+端口矩阵：gateway 9000、chat 50001、knowledge 50002、memory 50003、a2a 50004、
+mcp 50005、agent 50006（HTTP 50009）、harness 50007、harnessloop 50013、
+PG 55432、Mongo 27017、Redis 56379、Qdrant 6333、vite 5174。
+
+成功后会打印 14 项健康表与看板地址 <http://localhost:5174/harness-loop/monitor>。
 二进制、日志、PID、生成的临时配置均在 `.harness/dev/`（已 gitignore），不污染仓库。
+启停项与端口以 [`scripts/dev-stack.json`](./scripts/dev-stack.json) 为唯一声明源。
 
 - `scripts/dev-up.sh --install`：`frontend/node_modules` 缺失时自动 `npm ci`（默认只提示）
 - `scripts/dev-up.sh --rebuild`：强制重新编译 Go 服务
 - 前端 API 自动指向本地网关（`VITE_API_URL=http://localhost:9000`），不需要改 `vite.config.ts`
-- 端口可用环境变量覆盖：`HLP_PG_PORT` / `HLP_HARNESSLOOP_PORT` / `HLP_GATEWAY_PORT` / `HLP_VITE_PORT`
-- Windows：`scripts/dev-up.ps1` 是对 bash 脚本的薄包装
+- 端口可用 `HLP_*` 环境变量覆盖（`HLP_AGENT_PORT` / `HLP_QDRANT_PORT` / `HLP_VITE_PORT` 等）
+- Windows：`scripts/dev-up.ps1 -Demo` 是对 bash 脚本的薄包装
 
 细节见 [`docs/dev.md`](./docs/dev.md)。
 

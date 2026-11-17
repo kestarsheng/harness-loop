@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 一键拉起本地开发栈：PG -> harnessloop-service -> gateway -> vite。
+# 一键拉起本地开发栈（14 项）：PG/Mongo/Qdrant/Redis -> 9 个微服务 -> vite。
 #
 # 用法：
 #   scripts/dev-up.sh [--demo] [--install] [--rebuild] [--no-build] [-h]
@@ -13,8 +13,10 @@
 #
 # 环境变量：HLP_DEMO_FLAGS=1 等价于 --demo（便于 CI/脚本里带开关起栈）。
 #
-# 端口（可用环境变量覆盖）：
-#   HLP_PG_PORT=55432  HLP_HARNESSLOOP_PORT=50013  HLP_GATEWAY_PORT=9000  HLP_VITE_PORT=5174
+# 端口矩阵（可用 HLP_* 环境变量覆盖，见 scripts/dev-stack.json）：
+#   gateway 9000  chat 50001  knowledge 50002  memory 50003  a2a 50004
+#   mcp 50005  agent 50006 (HTTP 50009)  harness 50007  harnessloop 50013
+#   PG 55432  Mongo 27017  Redis 56379  Qdrant 6333  vite 5174
 #
 # 产物：.harness/dev/{bin,logs,run,conf}（.harness/* 已在 .gitignore 中忽略）
 
@@ -24,7 +26,7 @@ set -uo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/dev-lib.sh"
 
 # 本地凭据（.harness/dev/env，已 gitignore）：LLM / embedding key 走环境变量，
-# 不写进仓库文件；缺失时仍可启动，但 agent-service 调用会失败。
+# 不写进仓库文件；缺失时仍可启动，但 LLM / embedding 调用会失败。
 if [ -f "$DEV_DIR/env" ]; then
   # shellcheck disable=SC1091
   . "$DEV_DIR/env"
@@ -33,6 +35,10 @@ fi
 AGENT_BIN="$BIN_DIR/agent-service${EXE_SUFFIX}"
 MCP_BIN="$BIN_DIR/mcp-service${EXE_SUFFIX}"
 HARNESS_SVC_BIN="$BIN_DIR/harness-service${EXE_SUFFIX}"
+CHAT_BIN="$BIN_DIR/chat-service${EXE_SUFFIX}"
+KNOWLEDGE_BIN="$BIN_DIR/knowledge-service${EXE_SUFFIX}"
+MEMORY_BIN="$BIN_DIR/memory-service${EXE_SUFFIX}"
+A2A_BIN="$BIN_DIR/a2a-service${EXE_SUFFIX}"
 
 INSTALL_DEPS=0
 FORCE_REBUILD=0
@@ -40,7 +46,7 @@ NO_BUILD=0
 DEMO_FLAGS="${HLP_DEMO_FLAGS:-0}"
 STARTED=()
 
-usage() { sed -n '2,19p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,21p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -63,9 +69,14 @@ esac
 cleanup_started() {
   [ ${#STARTED[@]} -eq 0 ] && return 0
   c_warn "回滚本次已启动的进程：${STARTED[*]}"
-  local n pid
+  local n pid port
   for n in "${STARTED[@]}"; do
     pid="$(pid_of "$n")"
+    if ! pid_alive "$pid"; then
+      # 启动后还没走到 record_pid 就失败的场景：按端口反查，避免留下半截栈。
+      port="$(service_port_of "$n")"
+      [ -n "$port" ] && pid="$(listener_pid "$port")"
+    fi
     if pid_alive "$pid"; then stop_pid "$pid" 5; fi
     clear_pidfile "$n"
   done
@@ -92,6 +103,22 @@ launch() { # launch <组件> <workdir> <command...>
 # ---- 配置生成（模板 + 环境变量覆盖） --------------------------------------
 sed_escape() { printf '%s' "$1" | sed 's/[&|\\]/\\&/g'; }
 
+# LLM 与 embedding 是两条独立凭据（.harness/dev/env 里可分别配置）。
+LLM_KEY="${HARNESS_LLM_API_KEY:-}"
+LLM_BASE="${HARNESS_LLM_BASE_URL:-https://llm-gateway.openkylin.top/v1}"
+LLM_MODEL="${HARNESS_LLM_MODEL:-deepseek-v4.1-flash}"
+EMB_KEY="${HARNESS_EMBEDDING_API_KEY:-$LLM_KEY}"
+EMB_BASE="${HARNESS_EMBEDDING_BASE_URL:-$LLM_BASE}"
+EMB_MODEL="${HARNESS_EMBEDDING_MODEL:-text-embedding-v3}"
+
+# OpenAI 兼容网关与 DashScope 都吃 /v1；按 base_url 选 provider。
+provider_for() { case "$1" in *dashscope*) printf 'dashscope' ;; *) printf 'openai' ;; esac; }
+
+# 把模板里所有 `*-service:port` 改写成 127.0.0.1，输出到 stdout。
+localize_services() { # localize_services <yaml>
+  sed -e "s|^\([[:space:]]*[a-z0-9_]*:[[:space:]]*\)[a-z0-9-]*-service:|\1127.0.0.1:|" "$1"
+}
+
 # 演示用的 features 文件：三条 P2 新链路开关 default: true，仓库里有一份可复查的
 # 副本（scripts/dev-features.demo.yaml），仓库自己的 features.yaml 一个字节都不动。
 DEMO_FEATURES_REL="scripts/dev-features.demo.yaml"
@@ -108,7 +135,7 @@ gen_harnessloop_config() {
     -e "s|^\([[:space:]]*address:[[:space:]]*\).*|\1\"127.0.0.1:${HARNESSLOOP_PORT}\"|" \
     -e "s|^\([[:space:]]*dsn:[[:space:]]*\).*|\1\"$(sed_escape "$PG_DSN")\"|" \
     -e "s|\"config/harness_loop/|\"pkg/config/harness_loop/|g" \
-    -e "s|^\([[:space:]]*addr:[[:space:]]*\).*|\1\"\"|" \
+    -e "s|^\([[:space:]]*target:[[:space:]]*\).*|\1\"127.0.0.1:${AGENT_PORT}\"|" \
     -e "s|^\([[:space:]]*entry_agent:[[:space:]]*\).*|\1\"main-agent\"|" \
     "$tpl" >"$out" || return 1
 
@@ -130,7 +157,11 @@ gen_gateway_config() {
     -e "s|^\([[:space:]]*http_port:[[:space:]]*\).*|\1${GATEWAY_PORT}|" \
     -e "s|^\([[:space:]]*[a-z0-9_]*:[[:space:]]*\)[a-z0-9-]*-service:|\1127.0.0.1:|" \
     -e "s|^\([[:space:]]*harness_loop:[[:space:]]*\).*|\1127.0.0.1:${HARNESSLOOP_PORT}|" \
-    -e "s|^\([[:space:]]*url:[[:space:]]*\)\"\{0,1\}redis://.*|\1\"\"|" \
+    -e "s|^\([[:space:]]*provider:[[:space:]]*\).*|\1$(provider_for "$LLM_BASE")|" \
+    -e "s|^\([[:space:]]*api_key:[[:space:]]*\).*|\1\"$(sed_escape "$LLM_KEY")\"|" \
+    -e "s|^\([[:space:]]*base_url:[[:space:]]*\).*|\1\"$(sed_escape "$LLM_BASE")\"|" \
+    -e "s|^\([[:space:]]*model:[[:space:]]*\).*|\1\"$(sed_escape "$LLM_MODEL")\"|" \
+    -e "s|^\([[:space:]]*url:[[:space:]]*\).*redis://.*|\1\"redis://127.0.0.1:${REDIS_PORT}\"|" \
     "$tpl" >"$out" || return 1
   echo "$out"
 }
@@ -139,25 +170,98 @@ gen_agent_config() {
   local tpl="$ROOT/services/agent-service/config.example.yaml"
   local out="$CONF_DIR/agent.yaml"
   [ -f "$tpl" ] || { c_err "缺少模板 $tpl"; return 1; }
-  local llm_key="${HARNESS_LLM_API_KEY:-}"
-  local llm_base="${HARNESS_LLM_BASE_URL:-https://llm-gateway.openkylin.top/v1}"
-  local llm_model="${HARNESS_LLM_MODEL:-deepseek-v4.1-flash}"
-  local emb_model="${HARNESS_EMBEDDING_MODEL:-text-embedding-v3}"
-  if [ -z "$llm_key" ]; then
+  if [ -z "$LLM_KEY" ]; then
     c_warn "未设置 HARNESS_LLM_API_KEY（见 .harness/dev/env），agent-service 将无法调用 LLM"
   fi
   sed \
     -e "s|^\([[:space:]]*path:[[:space:]]*\).*agent\.db.*|\1\".harness/dev/agent.db\"|" \
     -e "s|^\([[:space:]]*grpc_port:[[:space:]]*\).*|\1${AGENT_PORT}|" \
-    -e "s|^\([[:space:]]*url:[[:space:]]*\).*mongodb.*|\1\"mongodb://127.0.0.1:27017\"|" \
-    -e "s|^\([[:space:]]*provider:[[:space:]]*\).*|\1openai|" \
-    -e "s|^\([[:space:]]*api_key:[[:space:]]*\).*|\1\"${llm_key}\"|" \
-    -e "s|^\([[:space:]]*base_url:[[:space:]]*\).*|\1\"${llm_base}\"|" \
-    -e "s|^\([[:space:]]*model:[[:space:]]*\).*|\1\"${llm_model}\"|" \
-    -e "s|^\([[:space:]]*embedding_model:[[:space:]]*\).*|\1\"${emb_model}\"|" \
+    -e "s|^\([[:space:]]*url:[[:space:]]*\).*mongodb.*|\1\"mongodb://127.0.0.1:${MONGO_PORT}\"|" \
+    -e "s|^\([[:space:]]*provider:[[:space:]]*\).*|\1$(provider_for "$LLM_BASE")|" \
+    -e "s|^\([[:space:]]*api_key:[[:space:]]*\).*|\1\"$(sed_escape "$LLM_KEY")\"|" \
+    -e "s|^\([[:space:]]*base_url:[[:space:]]*\).*|\1\"$(sed_escape "$LLM_BASE")\"|" \
+    -e "s|^\([[:space:]]*model:[[:space:]]*\).*|\1\"$(sed_escape "$LLM_MODEL")\"|" \
+    -e "s|^\([[:space:]]*embedding_model:[[:space:]]*\).*|\1\"$(sed_escape "$EMB_MODEL")\"|" \
     -e "s|^\([[:space:]]*mcp:[[:space:]]*\).*|\1127.0.0.1:${MCP_PORT}|" \
     -e "s|^\([[:space:]]*harness:[[:space:]]*\).*|\1127.0.0.1:${HARNESS_SVC_PORT}|" \
     "$tpl" >"$out" || return 1
+  echo "$out"
+}
+
+# ---- chat-service ----------------------------------------------------------
+gen_chat_config() {
+  local tpl="$ROOT/services/chat-service/config.example.yaml"
+  local out="$CONF_DIR/chat.yaml"
+  [ -f "$tpl" ] || { c_err "缺少模板 $tpl"; return 1; }
+  sed \
+    -e "s|^\([[:space:]]*grpc_port:[[:space:]]*\).*|\1${CHAT_PORT}|" \
+    -e "s|^\([[:space:]]*path:[[:space:]]*\).*chat\.db.*|\1\".harness/dev/chat.db\"|" \
+    -e "s|^\([[:space:]]*provider:[[:space:]]*\).*|\1$(provider_for "$LLM_BASE")|" \
+    -e "s|^\([[:space:]]*api_key:[[:space:]]*\).*|\1\"$(sed_escape "$LLM_KEY")\"|" \
+    -e "s|^\([[:space:]]*base_url:[[:space:]]*\).*|\1\"$(sed_escape "$LLM_BASE")\"|" \
+    -e "s|^\([[:space:]]*model:[[:space:]]*\).*|\1\"$(sed_escape "$LLM_MODEL")\"|" \
+    -e "s|^\([[:space:]]*embedding_model:[[:space:]]*\).*|\1\"$(sed_escape "$EMB_MODEL")\"|" \
+    -e "s|^\([[:space:]]*url:[[:space:]]*\).*qdrant.*|\1\"http://127.0.0.1:${QDRANT_PORT}\"|" \
+    -e "s|^\([[:space:]]*url:[[:space:]]*\).*redis://.*|\1\"redis://127.0.0.1:${REDIS_PORT}\"|" \
+    "$tpl" >"$out" || { return 1; }
+  localize_services "$out" >"$out.tmp" && mv "$out.tmp" "$out" || return 1
+  echo "$out"
+}
+
+# ---- knowledge-service -----------------------------------------------------
+gen_knowledge_config() {
+  local tpl="$ROOT/services/knowledge-service/config.example.yaml"
+  local out="$CONF_DIR/knowledge.yaml"
+  [ -f "$tpl" ] || { c_err "缺少模板 $tpl"; return 1; }
+  sed \
+    -e "s|^\([[:space:]]*grpc_port:[[:space:]]*\).*|\1${KNOWLEDGE_PORT}|" \
+    -e "s|^\([[:space:]]*path:[[:space:]]*\).*knowledge\.db.*|\1\".harness/dev/knowledge.db\"|" \
+    -e "s|^\([[:space:]]*provider:[[:space:]]*\).*|\1$(provider_for "$EMB_BASE")|" \
+    -e "s|^\([[:space:]]*api_key:[[:space:]]*\).*|\1\"$(sed_escape "$EMB_KEY")\"|" \
+    -e "s|^\([[:space:]]*base_url:[[:space:]]*\).*|\1\"$(sed_escape "$EMB_BASE")\"|" \
+    -e "s|^\([[:space:]]*model:[[:space:]]*\).*|\1\"$(sed_escape "$LLM_MODEL")\"|" \
+    -e "s|^\([[:space:]]*embedding_model:[[:space:]]*\).*|\1\"$(sed_escape "$EMB_MODEL")\"|" \
+    -e "s|^\([[:space:]]*url:[[:space:]]*\).*qdrant.*|\1\"http://127.0.0.1:${QDRANT_PORT}\"|" \
+    -e "s|^\([[:space:]]*url:[[:space:]]*\).*mongodb.*|\1\"mongodb://127.0.0.1:${MONGO_PORT}\"|" \
+    -e "s|^\([[:space:]]*url:[[:space:]]*\).*redis://.*|\1\"redis://127.0.0.1:${REDIS_PORT}\"|" \
+    "$tpl" >"$out" || return 1
+  echo "$out"
+}
+
+# ---- memory-service --------------------------------------------------------
+gen_memory_config() {
+  local tpl="$ROOT/services/memory-service/config.example.yaml"
+  local out="$CONF_DIR/memory.yaml"
+  [ -f "$tpl" ] || { c_err "缺少模板 $tpl"; return 1; }
+  sed \
+    -e "s|^\([[:space:]]*grpc_port:[[:space:]]*\).*|\1${MEMORY_PORT}|" \
+    -e "s|^\([[:space:]]*path:[[:space:]]*\).*memory\.db.*|\1\".harness/dev/memory.db\"|" \
+    -e "s|^\([[:space:]]*provider:[[:space:]]*\).*|\1$(provider_for "$EMB_BASE")|" \
+    -e "s|^\([[:space:]]*api_key:[[:space:]]*\).*|\1\"$(sed_escape "$EMB_KEY")\"|" \
+    -e "s|^\([[:space:]]*base_url:[[:space:]]*\).*|\1\"$(sed_escape "$EMB_BASE")\"|" \
+    -e "s|^\([[:space:]]*model:[[:space:]]*\).*|\1\"$(sed_escape "$LLM_MODEL")\"|" \
+    -e "s|^\([[:space:]]*embedding_model:[[:space:]]*\).*|\1\"$(sed_escape "$EMB_MODEL")\"|" \
+    -e "s|^\([[:space:]]*url:[[:space:]]*\).*qdrant.*|\1\"http://127.0.0.1:${QDRANT_PORT}\"|" \
+    -e "s|^\([[:space:]]*url:[[:space:]]*\).*redis://.*|\1\"redis://127.0.0.1:${REDIS_PORT}\"|" \
+    "$tpl" >"$out" || return 1
+  echo "$out"
+}
+
+# ---- a2a-service -----------------------------------------------------------
+gen_a2a_config() {
+  local tpl="$ROOT/services/a2a-service/config.example.yaml"
+  local out="$CONF_DIR/a2a.yaml"
+  [ -f "$tpl" ] || { c_err "缺少模板 $tpl"; return 1; }
+  sed \
+    -e "s|^\([[:space:]]*grpc_port:[[:space:]]*\).*|\1${A2A_PORT}|" \
+    -e "s|^\([[:space:]]*http_port:[[:space:]]*\).*|\1${A2A_HTTP_PORT}|" \
+    -e "s|^\([[:space:]]*path:[[:space:]]*\).*a2a\.db.*|\1\".harness/dev/a2a.db\"|" \
+    -e "s|^\([[:space:]]*provider:[[:space:]]*\).*|\1$(provider_for "$LLM_BASE")|" \
+    -e "s|^\([[:space:]]*api_key:[[:space:]]*\).*|\1\"$(sed_escape "$LLM_KEY")\"|" \
+    -e "s|^\([[:space:]]*base_url:[[:space:]]*\).*|\1\"$(sed_escape "$LLM_BASE")\"|" \
+    -e "s|^\([[:space:]]*model:[[:space:]]*\).*|\1\"$(sed_escape "$LLM_MODEL")\"|" \
+    "$tpl" >"$out" || return 1
+  localize_services "$out" >"$out.tmp" && mv "$out.tmp" "$out" || return 1
   echo "$out"
 }
 
@@ -187,28 +291,27 @@ build_service() { # build_service <name> <bin> <pkg>
   c_ok "$name 编译完成"
 }
 
-# ---- 步骤 1：PostgreSQL ----------------------------------------------------
-step_pg() {
-  if pg_ready; then
-    c_ok "PG 已就绪（127.0.0.1:${PG_PORT} / ${PG_DB}）"
-    # dev-down --keep-db 只保留 PG，Mongo 可能已停；这里幂等补齐数据容器。
-    docker compose -f "$COMPOSE_FILE" up -d >"$LOG_DIR/pg-compose.log" 2>&1 || c_warn "数据容器补齐失败（Mongo 可能不可用）"
-    return 0
-  fi
-  command -v docker >/dev/null 2>&1 || { c_err "未找到 docker，无法启动 PG"; return 1; }
-  c_step "启动 PG 容器（docker compose -f docker/docker-compose.data.yaml up -d）"
-  if ! docker compose -f "$COMPOSE_FILE" up -d >"$LOG_DIR/pg-compose.log" 2>&1; then
+# ---- 步骤 1：数据容器（PG / Mongo / Qdrant） --------------------------------
+step_data() {
+  command -v docker >/dev/null 2>&1 || {
+    if pg_ready && mongo_ready && qdrant_ready; then
+      c_ok "PG / Mongo / Qdrant 已就绪（无 docker CLI，跳过容器编排）"
+      return 0
+    fi
+    c_err "未找到 docker，无法启动数据容器"; return 1
+  }
+  c_step "启动数据容器（docker compose -f docker/docker-compose.data.yaml up -d）"
+  if ! docker compose -f "$COMPOSE_FILE" up -d >"$LOG_DIR/data-compose.log" 2>&1; then
     c_err "docker compose up 失败"
-    sed 's/^/    /' "$LOG_DIR/pg-compose.log" >&2
+    sed 's/^/    /' "$LOG_DIR/data-compose.log" >&2
     return 1
   fi
-  if wait_until 90 pg_ready; then
-    c_ok "PG 就绪（127.0.0.1:${PG_PORT} / ${PG_DB}）"
-    return 0
-  fi
-  c_err "PG 90s 内未就绪"
-  compose_logs_tail
-  return 1
+  wait_until 90 pg_ready || { c_err "PG 90s 内未就绪"; compose_logs_tail; return 1; }
+  c_ok "PG 就绪（127.0.0.1:${PG_PORT} / ${PG_DB}）"
+  wait_until 60 mongo_ready || { c_err "Mongo 60s 内未就绪（:${MONGO_PORT}）"; compose_logs_tail; return 1; }
+  c_ok "Mongo 就绪（127.0.0.1:${MONGO_PORT} / ${MONGO_CONTAINER}）"
+  wait_until 90 qdrant_ready || { c_err "Qdrant 90s 内未就绪（:${QDRANT_PORT}）"; compose_logs_tail; return 1; }
+  c_ok "Qdrant 就绪（http://127.0.0.1:${QDRANT_PORT} / ${QDRANT_CONTAINER}）"
 }
 
 gen_mcp_config() {
@@ -217,12 +320,12 @@ gen_mcp_config() {
   [ -f "$tpl" ] || { c_err "缺少模板 $tpl"; return 1; }
   sed \
     -e "s|^\([[:space:]]*grpc_port:[[:space:]]*\).*|\1${MCP_PORT}|" \
-    -e "s|^\([[:space:]]*provider:[[:space:]]*\).*|\1openai|" \
-    -e "s|^\([[:space:]]*api_key:[[:space:]]*\).*|\1\"${HARNESS_LLM_API_KEY:-}\"|" \
-    -e "s|^\([[:space:]]*base_url:[[:space:]]*\).*|\1\"${HARNESS_LLM_BASE_URL:-https://llm-gateway.openkylin.top/v1}\"|" \
-    -e "s|^\([[:space:]]*model:[[:space:]]*\).*|\1\"${HARNESS_LLM_MODEL:-deepseek-v4.1-flash}\"|" \
-    -e "s|^\([[:space:]]*embedding_model:[[:space:]]*\).*|\1\"${HARNESS_EMBEDDING_MODEL:-text-embedding-v3}\"|" \
-    -e "s|^\([[:space:]]*knowledge:[[:space:]]*\).*|\1127.0.0.1:50002|" \
+    -e "s|^\([[:space:]]*provider:[[:space:]]*\).*|\1$(provider_for "$LLM_BASE")|" \
+    -e "s|^\([[:space:]]*api_key:[[:space:]]*\).*|\1\"$(sed_escape "$LLM_KEY")\"|" \
+    -e "s|^\([[:space:]]*base_url:[[:space:]]*\).*|\1\"$(sed_escape "$LLM_BASE")\"|" \
+    -e "s|^\([[:space:]]*model:[[:space:]]*\).*|\1\"$(sed_escape "$LLM_MODEL")\"|" \
+    -e "s|^\([[:space:]]*embedding_model:[[:space:]]*\).*|\1\"$(sed_escape "$EMB_MODEL")\"|" \
+    -e "s|^\([[:space:]]*knowledge:[[:space:]]*\).*|\1127.0.0.1:${KNOWLEDGE_PORT}|" \
     -e "s|^\([[:space:]]*gateway:[[:space:]]*\).*|\1127.0.0.1:${GATEWAY_PORT}|" \
     -e "s|^\([[:space:]]*url:[[:space:]]*\).*redis://.*|\1\"redis://127.0.0.1:${REDIS_PORT}\"|" \
     "$tpl" >"$out" || return 1
@@ -236,10 +339,10 @@ gen_harness_svc_config() {
   sed \
     -e "s|^\([[:space:]]*grpc_port:[[:space:]]*\).*|\1${HARNESS_SVC_PORT}|" \
     -e "s|^\([[:space:]]*path:[[:space:]]*\).*harness\.db.*|\1./.harness/dev/harness.db|" \
-    -e "s|^\([[:space:]]*provider:[[:space:]]*\).*|\1openai|" \
-    -e "s|^\([[:space:]]*api_key:[[:space:]]*\).*|\1\"${HARNESS_LLM_API_KEY:-}\"|" \
-    -e "s|^\([[:space:]]*base_url:[[:space:]]*\).*|\1\"${HARNESS_LLM_BASE_URL:-https://llm-gateway.openkylin.top/v1}\"|" \
-    -e "s|^\([[:space:]]*model:[[:space:]]*\).*|\1\"${HARNESS_LLM_MODEL:-deepseek-v4.1-flash}\"|" \
+    -e "s|^\([[:space:]]*provider:[[:space:]]*\).*|\1$(provider_for "$LLM_BASE")|" \
+    -e "s|^\([[:space:]]*api_key:[[:space:]]*\).*|\1\"$(sed_escape "$LLM_KEY")\"|" \
+    -e "s|^\([[:space:]]*base_url:[[:space:]]*\).*|\1\"$(sed_escape "$LLM_BASE")\"|" \
+    -e "s|^\([[:space:]]*model:[[:space:]]*\).*|\1\"$(sed_escape "$LLM_MODEL")\"|" \
     -e "s|^\([[:space:]]*agent:[[:space:]]*\).*|\1127.0.0.1:${AGENT_PORT}|" \
     -e "s|^\([[:space:]]*url:[[:space:]]*\).*redis://.*|\1\"redis://127.0.0.1:${REDIS_PORT}\"|" \
     "$tpl" >"$out" || return 1
@@ -266,6 +369,65 @@ step_redis() {
   fi
   c_err "redis 30s 内未就绪"
   return 1
+}
+
+# gRPC 服务的通用启停骨架：端口就绪即算健康（这些服务没有 HTTP /health）。
+start_grpc() { # start_grpc <name> <bin> <pkg> <port> <conf_func> [label]
+  local name="$1" bin="$2" pkg="$3" port="$4" conf_fn="$5" label="${6:-$1}"
+  if service_running "$name"; then
+    c_ok "$name 已在运行（PID $(pid_of "$name")），跳过"
+    return 0
+  fi
+  clear_pidfile "$name"
+  if port_open "$port"; then
+    c_warn "$port 已被其他进程占用，跳过启动 $name（后续健康检查仍需通过）"
+    return 0
+  fi
+  local conf
+  conf="$("$conf_fn")" || return 1
+  build_service "$name" "$bin" "$pkg" || return 1
+  c_step "启动 $label（:${port}，config=$conf）"
+  export CONFIG_PATH="$(win_path "$conf")"
+  if ! launch "$name" "$ROOT" "$bin"; then
+    c_err "$label 启动后立即退出"
+    return 1
+  fi
+  if wait_until 60 port_open "$port"; then
+    record_pid "$name" "$port" || c_warn "无法反查 $name 的 PID，dev-down 将按端口清理"
+    c_ok "$label 监听 127.0.0.1:${port}（PID $(pid_of "$name"))"
+    return 0
+  fi
+  c_err "$label 60s 内未监听 ${port}"
+  return 1
+}
+
+# ---- 步骤 3：memory-service -------------------------------------------------
+# 需要 PG 派生索引（HARNESS_MEM_PG_DSN）+ Redis + embedding；tenant 用 tenant-devfull 隔离。
+step_memory() {
+  export HARNESS_MEM_PG_DSN="$PG_DSN"
+  export HARNESS_MEM_TENANT="${HLP_TENANT:-tenant-devfull}"
+  export HARNESS_MEM_PROJECT="${HLP_PROJECT:-default}"
+  start_grpc memory "$MEMORY_BIN" "./services/memory-service/cmd" "$MEMORY_PORT" gen_memory_config "memory-service"
+}
+
+# ---- 步骤 4：knowledge-service ----------------------------------------------
+step_knowledge() {
+  start_grpc knowledge "$KNOWLEDGE_BIN" "./services/knowledge-service/cmd" "$KNOWLEDGE_PORT" gen_knowledge_config "knowledge-service"
+}
+
+# ---- 步骤 5：chat-service ---------------------------------------------------
+step_chat() {
+  export MCP_SERVICE_ADDR="127.0.0.1:${MCP_PORT}"
+  start_grpc chat "$CHAT_BIN" "./services/chat-service/cmd" "$CHAT_PORT" gen_chat_config "chat-service"
+}
+
+# ---- 步骤 6：a2a-service ----------------------------------------------------
+step_a2a() {
+  export AGENT_SERVICE_ADDR="127.0.0.1:${AGENT_PORT}"
+  start_grpc a2a "$A2A_BIN" "./services/a2a-service/cmd" "$A2A_PORT" gen_a2a_config "a2a-service" || return 1
+  # A2A 另起 HTTP 端点（:50014），不影响 14 项健康口径，但 dev-down 需要一并释放。
+  wait_until 30 port_open "$A2A_HTTP_PORT" \
+    || c_warn "a2a-service HTTP 端点 ${A2A_HTTP_PORT} 未就绪（agent card / tasks 不可用）"
 }
 
 # ---- 步骤 3：mcp-service ---------------------------------------------------
@@ -396,6 +558,10 @@ step_harnessloop() {
   conf="$(gen_harnessloop_config)" || return 1
   build_service "$name" "$HARNESSLOOP_BIN" "./services/harnessloop-service/cmd" || return 1
   c_step "启动 harnessloop-service（:${HARNESSLOOP_PORT}，config=$conf）"
+  # 子任务执行器与 a 阶段共用 agent-service 流式契约；memory/approval 指向本机端口。
+  export HARNESSLOOP_AGENT_TARGET="127.0.0.1:${AGENT_PORT}"
+  export HARNESSLOOP_MEMORY_ADDR="127.0.0.1:${MEMORY_PORT}"
+  export HARNESSLOOP_APPROVAL_ADDR="http://127.0.0.1:${AGENT_HTTP_PORT}"
   if ! launch "$name" "$ROOT" "$HARNESSLOOP_BIN" -config "$(win_path "$conf")"; then
     c_err "harnessloop-service 启动后立即退出"
     return 1
@@ -494,34 +660,26 @@ main() {
   c_step "仓库：$ROOT"
   c_step "产物目录：$DEV_DIR"
 
-  step_pg || fail_step "pg-compose" "步骤 1/8 PostgreSQL 失败"
-  step_redis || fail_step "redis" "步骤 2/8 redis 失败"
-  step_mcp || fail_step "mcp" "步骤 3/8 mcp-service 失败"
-  step_harness_svc || fail_step "harness-svc" "步骤 4/8 harness-service 失败"
-  step_agent || fail_step "agent" "步骤 5/8 agent-service 失败"
-  step_harnessloop || fail_step "harnessloop" "步骤 6/8 harnessloop-service 失败"
-  step_gateway || fail_step "gateway" "步骤 7/8 gateway 失败"
-  step_vite || fail_step "vite" "步骤 8/8 vite 失败"
+  step_data || fail_step "data-compose" "步骤 1/12 数据容器（PG/Mongo/Qdrant）失败"
+  step_redis || fail_step "redis" "步骤 2/12 redis 失败"
+  step_memory || fail_step "memory" "步骤 3/12 memory-service 失败"
+  step_knowledge || fail_step "knowledge" "步骤 4/12 knowledge-service 失败"
+  step_chat || fail_step "chat" "步骤 5/12 chat-service 失败"
+  step_a2a || fail_step "a2a" "步骤 6/12 a2a-service 失败"
+  step_mcp || fail_step "mcp" "步骤 7/12 mcp-service 失败"
+  step_harness_svc || fail_step "harness-svc" "步骤 8/12 harness-service 失败"
+  step_agent || fail_step "agent" "步骤 9/12 agent-service 失败"
+  step_harnessloop || fail_step "harnessloop" "步骤 10/12 harnessloop-service 失败"
+  step_gateway || fail_step "gateway" "步骤 11/12 gateway 失败"
+  step_vite || fail_step "vite" "步骤 12/12 vite 失败"
 
-  local code
-  code="$(http_code "$MONITOR_URL" 20)"
-  if [ "$code" != "200" ]; then
-    c_err "看板地址返回 ${code:-超时}：$MONITOR_URL"
-    tail_log "vite" 20
+  if ! health_gate; then
+    cleanup_started
+    c_err "启动未通过 14 项健康检查，已回滚本次进程"
     exit 1
   fi
+  verify_monitor
 
-  printf '\n'
-  c_ok "全部 8 项健康检查通过"
-  printf '  %-8s %-6s %s\n' "BOARD" "" "$MONITOR_URL"
-  printf '  %-22s %-8s %s\n' "agent-service" "$(pid_of agent)" "127.0.0.1:${AGENT_PORT}"
-  printf '  %-22s %-8s %s\n' "mcp-service" "$(pid_of mcp)" "127.0.0.1:${MCP_PORT}"
-  printf '  %-22s %-8s %s\n' "harness-service" "$(pid_of harness-svc)" "127.0.0.1:${HARNESS_SVC_PORT}"
-  printf '  %-22s %-8s %s\n' "harnessloop-service" "$(pid_of harnessloop)" "127.0.0.1:${HARNESSLOOP_PORT}"
-  printf '  %-22s %-8s %s\n' "gateway" "$(pid_of gateway)" "127.0.0.1:${GATEWAY_PORT} (/health)"
-  printf '  %-22s %-8s %s\n' "vite" "$(pid_of vite)" "127.0.0.1:${VITE_PORT}"
-  printf '  %-22s %-8s %s\n' "postgres" "docker" "127.0.0.1:${PG_PORT} (${PG_CONTAINER})"
-  printf '  %-22s %-8s %s\n' "redis" "docker" "127.0.0.1:${REDIS_PORT} (${REDIS_CONTAINER})"
   if [ "$DEMO_FLAGS" = 1 ]; then
     printf '\n'
     c_ok "演示开关已生效（features=$DEMO_FEATURES_REL）"
@@ -533,6 +691,61 @@ main() {
   fi
   printf '\n'
   c_dim "日志：$LOG_DIR    停止：scripts/dev-down.sh [--keep-db]"
+}
+
+# ---- 14 项健康口径（与 scripts/dev-stack.json 逐项对应） --------------------
+health_gate() {
+  local fail=0
+  h() { # h <状态> <名称> <端口> <说明>
+    printf '  %-5s %-18s %-6s %s\n' "$1" "$2" "$3" "$4"
+  }
+  check_port() { # check_port <name> <port>
+    if port_open "$2"; then h OK "$1" "$2" "端口可连"; else h FAIL "$1" "$2" "端口不可连"; fail=1; fi
+  }
+
+  printf '\n'
+  c_step "14 项健康检查"
+  if pg_ready; then h OK postgres "$PG_PORT" "pg_isready（${PG_CONTAINER}）"; else h FAIL postgres "$PG_PORT" "pg_isready 失败"; fail=1; fi
+  if mongo_ready; then h OK mongo "$MONGO_PORT" "端口可连（${MONGO_CONTAINER}）"; else h FAIL mongo "$MONGO_PORT" "端口不可连"; fail=1; fi
+  if port_open "$REDIS_PORT"; then h OK redis "$REDIS_PORT" "端口可连（${REDIS_CONTAINER}）"; else h FAIL redis "$REDIS_PORT" "端口不可连"; fail=1; fi
+  if qdrant_ready; then h OK qdrant "$QDRANT_PORT" "GET /healthz 200"; else h FAIL qdrant "$QDRANT_PORT" "HTTP 探活失败"; fail=1; fi
+  check_port chat "$CHAT_PORT"
+  check_port knowledge "$KNOWLEDGE_PORT"
+  check_port memory "$MEMORY_PORT"
+  check_port a2a "$A2A_PORT"
+  check_port mcp "$MCP_PORT"
+  check_port harness-service "$HARNESS_SVC_PORT"
+  check_port agent "$AGENT_PORT"
+  check_port harnessloop "$HARNESSLOOP_PORT"
+  if http_is_200 "http://127.0.0.1:${GATEWAY_PORT}/health"; then
+    h OK gateway "$GATEWAY_PORT" "GET /health 200"
+  else
+    h FAIL gateway "$GATEWAY_PORT" "GET /health 非 200"; fail=1
+  fi
+  if http_is_200 "${VITE_BASE}/" 30; then
+    h OK vite "$VITE_PORT" "GET / 200"
+  else
+    h FAIL vite "$VITE_PORT" "GET / 非 200"; fail=1
+  fi
+
+  if [ "$fail" = 0 ]; then
+    printf '\n'
+    c_ok "全部 14 项健康检查通过"
+    return 0
+  fi
+  c_err "健康检查存在失败项（见上表）"
+  return 1
+}
+
+verify_monitor() {
+  local code
+  code="$(http_code "$MONITOR_URL" 20)"
+  if [ "$code" != "200" ]; then
+    c_err "看板地址返回 ${code:-超时}：$MONITOR_URL"
+    tail_log "vite" 20
+    exit 1
+  fi
+  printf '  %-5s %-18s %-6s %s\n' "OK" "board" "" "$MONITOR_URL"
 }
 
 main "$@"
