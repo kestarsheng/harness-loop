@@ -9,14 +9,17 @@ import (
 // the platform whitelist in pkg/harnessloop/event/types.go: the file layer owns
 // no event-name namespace of its own, and a name that is not whitelisted is
 // silently dropped at the publisher boundary (see G23: EventPromoted).
+//
+// memory.capacity_warning is deliberately NOT in this block: it is not in the
+// platform whitelist and has no sender, so it stays an internal Store warning
+// (see capacityWarningType in lru.go) instead of a published event name.
 const (
-	EventWritten      = "memory.written"
-	EventMerged       = "memory.merged"
-	EventEvicted      = "memory.evicted"
-	EventPromoted     = "memory.promoted"
-	EventCorrupted    = "memory.corrupted"
-	EventResync       = "memory.resync"
-	EventCapacityWarn = "memory.capacity_warning"
+	EventWritten   = "memory.written"
+	EventMerged    = "memory.merged"
+	EventEvicted   = "memory.evicted"
+	EventPromoted  = "memory.promoted"
+	EventCorrupted = "memory.corrupted"
+	EventResync    = "memory.resync"
 )
 
 var (
