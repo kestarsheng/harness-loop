@@ -7,7 +7,7 @@
 | 状态 | 待评审 |
 | 上游文档 | `spec.md` v1.1（170 条 REQ + 38 条 DFX）、`design.md` v1.2（12 章，5 项锁定决策） |
 | 代码基线 | `agent-platform` @ `4a05ccb`，Go 1.22 |
-| 任务规模 | 76 个任务（P0 27 / P1 35 / P2 14） |
+| 任务规模 | 87 个任务（P0 27 / P1 36 / P2 24） |
 | 已锁定决策 | A 方案记忆事实源、PG 仅承载索引与事件（D2）、RAG 复用 Go knowledge-service（D3）、runtime 复用 `pkg/llm` + cobra/Bubble Tea（D4）、新增 :50008（D6/D14）、自研模板摘要唯一通道（D13）、多 Agent 8/20/20/2（U13-A）、审批一期留 agent-service（U17-A）、阶段模型默认继承（U18-A）、子任务验收复用父验收器（U19-A） |
 
 > 阅读约定：每个任务给出「目标 → 关联需求 → 设计章节 → 依赖 → 文件 → 实施要点 → 验收标准 → 复杂度」。`[N]` 表示新增文件，`[M]` 表示改造存量文件。验收标准优先给出可直接执行的命令或断言。本文件不含实现代码。
@@ -1145,7 +1145,31 @@
 | 验收标准 | 50 并发任务下事件收集率 **100%**（复跑 `bench/p2/scripts/run-events.sh` 的 50 任务场景）；`last_seq` 补拉不重不漏；跨任务事件不因新任务 seq 回绕被丢弃；大屏 50 卡片状态不再冻结；`go test ./services/harnessloop-service/... ./services/gateway/...` 全绿；容器 `-race`；`go build ./...`、depcheck 0。 |
 | 复杂度 | M |
 
-> P2 合计：实施 17 个 + 测试 5 个 = **22 个任务**。
+### T-P2-18 子任务执行与状态闭环
+
+| 字段 | 内容 |
+|---|---|
+| 目标 | 让子任务从「数据库有行」变成「真正执行、状态可查、失败可定位」，并让模型 plan 与平台 fallback 可区分。 |
+| 关联需求 | REQ-128、REQ-139、REQ-141；design 4.13 / 9.9 / 8.4 |
+| 依赖 | T-P1-31、T-P2-16（d3f8148 已接线但执行与状态未闭环） |
+| 涉及文件 | [M] `services/harnessloop-service/internal/repository/subtask_repo.go`、[M] `services/harnessloop-service/internal/service/{orchestrator_bridge,subtask_executor,runtime}.go`、[M] `pkg/harnessloop/orchestrator/{scheduler,events}.go`、必要时 [M] `pkg/harnessloop/event/types.go` |
+| 实施要点 | 1) `SubtaskRepo` 新增 `UpdateStatus`/`UpdateExecution`，状态机 `pending→running→accepted/failed`，禁止回退；在 scheduler 的 Start/Finish/Fail 与 executor 真实流转点回写，保证 DB 与事件一致；2) 定位并修复 c 阶段 agent 调用 `tokens=0`（对照 a 阶段成功调用的 stage_mode/messages/model/tenant/tools 参数），禁止跳过执行或直接标 accepted；3) `subtask.failed` 补 `error`、`response_len`、`model_id`、`duration_ms`、`agent_status`；4) `plan_created` 补 `source=model|fallback` 与 `degraded_reason`；5) 测试覆盖状态回写成功/失败、fallback 标识、失败详情、executor 请求参数。 |
+| 验收标准 | 真实任务下 `hlp_task.subtasks.status` 与事件序列一致；单节点子任务 `accepted`，失败时原因可读；`plan_created.source` 可区分模型 plan 与 fallback；`go test ./pkg/harnessloop/orchestrator/... ./services/harnessloop-service/... -count=1` 全绿；`go build -p 1 ./...`、depcheck 0；补齐 d3f8148 五个文件零测试的缺口。 |
+| 复杂度 | M |
+
+### T-P2-19 dev-up 全量九服务与启停契约
+
+| 字段 | 内容 |
+|---|---|
+| 目标 | `dev-up`/`dev-down` 覆盖除 `desktop`、`mcp-demo-server` 外的 9 个微服务与全部基础设施，并产出供 `harness-cli` 自举复用的声明式契约。 |
+| 关联需求 | REQ-097~113、DFX-M-05；design 7.1 / 7.2 |
+| 依赖 | T-P2-16 |
+| 涉及文件 | [M] `scripts/dev-up.sh`、[M] `scripts/dev-down.sh`、[M] `scripts/dev-lib.sh`、[N] `scripts/dev-stack.json`、[M] `docker/docker-compose.data.yaml`、[M] `docs/dev.md`、[M] `README.md`、[M] `services/*/config.example.yaml`（仅补模板字段） |
+| 实施要点 | 1) 统一端口矩阵：gateway 9000、chat 50001、knowledge 50002、memory 50003、a2a 50004、mcp 50005、agent 50006（HTTP 50009）、harness 50007、harnessloop 50013、PG 55432、Mongo 27017、Redis 56379、Qdrant 6333、vite 5174；**agent 必须从当前 50002 改回 50006**，同步 harnessloop 的 subtask executor 与 harness-service 的 agent 指向；2) `docker-compose.data.yaml` 增 Qdrant（具名卷 `qdrant-data`，首次可启动）；3) 新增 chat/knowledge/memory/a2a 四个 step 与配置生成（LLM/embedding、Qdrant、Mongo、PG、Redis）；4) `dev-down` 同步清理新增服务与 Qdrant，`--keep-db` 保留 PG/Mongo/Qdrant；5) 新增 `scripts/dev-stack.json`（name/kind/port/command/config_template/health/required），作为 T-P2-21 自举的唯一数据源；6) 文档更新为 14 项。 |
+| 验收标准 | `dev-down.sh` 后 `dev-up.sh --demo` **14 项健康全绿**；9 个微服务端口均可连；`harnessloop.log` 不再出现 `memory recall disabled`；Qdrant 6333 可访问且 knowledge 上传后集合存在；`dev-stack.json` 可解析且与脚本实际启动项逐项一致；不得留半截栈。 |
+| 复杂度 | M |
+
+> P2 合计：实施 19 个 + 测试 5 个 = **24 个任务**。
 
 ---
 
