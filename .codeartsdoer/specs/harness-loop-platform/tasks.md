@@ -7,7 +7,7 @@
 | 状态 | 待评审 |
 | 上游文档 | `spec.md` v1.1（170 条 REQ + 38 条 DFX）、`design.md` v1.2（12 章，5 项锁定决策） |
 | 代码基线 | `agent-platform` @ `4a05ccb`，Go 1.22 |
-| 任务规模 | 94 个任务（P0 27 / P1 36 / P2 31） |
+| 任务规模 | 95 个任务（P0 27 / P1 36 / P2 32） |
 | 已锁定决策 | A 方案记忆事实源、PG 仅承载索引与事件（D2）、RAG 复用 Go knowledge-service（D3）、runtime 复用 `pkg/llm` + cobra/Bubble Tea（D4）、新增 :50008（D6/D14）、自研模板摘要唯一通道（D13）、多 Agent 8/20/20/2（U13-A）、审批一期留 agent-service（U17-A）、阶段模型默认继承（U18-A）、子任务验收复用父验收器（U19-A） |
 
 > 阅读约定：每个任务给出「目标 → 关联需求 → 设计章节 → 依赖 → 文件 → 实施要点 → 验收标准 → 复杂度」。`[N]` 表示新增文件，`[M]` 表示改造存量文件。验收标准优先给出可直接执行的命令或断言。本文件不含实现代码。
@@ -1253,7 +1253,19 @@
 | 验收标准 | 上述 4 条演示全过；`go build -p 1 ./...`、`go test ./services/... ./internal/cli/...`、depcheck 0；tag 已推。 |
 | 复杂度 | S（0.5 天） |
 
-> P2 合计：实施 26 个 + 测试 5 个 = **31 个任务**。
+### T-P2-27 真实 token 计量（流式 usage）
+
+| 字段 | 内容 |
+|---|---|
+| 目标 | 让流式调用的真实 usage 从网关一路透传到 `consumed_tokens`；估算只作兜底并显式标记来源，不再把估算值当实际值。 |
+| 关联需求 | REQ-096、REQ-045、DFX-M-01；design 4.2 / 4.14 |
+| 依赖 | T-P2-24（openai-go 已合入） |
+| 涉及文件 | [M] `pkg/llm/{client,openai_adapter}.go`、[M] `pkg/agent/engine_stream.go`、[M] `services/agent-service/internal/service/agent_service.go`、[M] `services/harnessloop-service/internal/service/subtask_executor.go`、必要时 [M] `proto/agent/**` |
+| 实施要点 | 1) `buildChatParams` 增 `stream_options.include_usage=true`；2) `chatStream` 不再跳过 `len(choices)==0` 的帧，解析其中的 `usage` 并通过 `ChatStreamChunk` 新字段回传；3) 聚合层把 usage 写入 `ChatResponse.TotalTokens/PromptTokens`，`engine_stream` 的 `Step.TokensUsed` 取真实值；4) `SubtaskExecutor` 优先用真实值，为 0 才估算，并在 DB/事件标 `token_source=actual\|estimate`；5) 若网关不支持 `include_usage`，先实测确认并如实报告，禁止静默把估算值当 actual。 |
+| 验收标准 | 真实流式任务下 `consumed_tokens` 等于网关返回的 usage，`token_source=actual`；估算分支未被触发；`go test ./pkg/llm/... ./services/agent-service/... ./services/harnessloop-service/...` 全绿；一次真实任务 a~e completed。 |
+| 复杂度 | M（1 天） |
+
+> P2 合计：实施 27 个 + 测试 5 个 = **32 个任务**。
 
 ---
 
