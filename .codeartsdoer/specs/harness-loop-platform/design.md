@@ -3,14 +3,14 @@
 | 项 | 内容 |
 |---|---|
 | 文档编号 | DES-HLP-001 |
-| 版本 | **v1.3**（2026-11-11 增量更正：长期记忆不参与 LRU） |
+| 版本 | **v1.4**（2026-11-17 增量：CLI 会话与看板生命周期、runtime 迁 openai-go） |
 | 状态 | 设计已定稿（U1/U3/U13/U17/U18/U19 已由用户确认） |
 | 输入需求 | `.codeartsdoer/specs/harness-loop-platform/spec.md`（**SPEC-HLP-001 v1.2，1433 行，170 条 REQ + 38 条 DFX**） |
 | 代码基线 | `agent-platform` @ `4a05ccb`（2026-08-03），Go 1.22 + gRPC + React 19 |
 | 本文档范围 | 技术设计与代码规划（HOW），不含实现代码；DDL / proto / JSON Schema 草案除外 |
 | 交付物位置 | `D:\Desktop\生涯\老公毕业论文\design.md`（仓库父目录，不在 `agent-platform` 内） |
-| 修订记录 | **v1.3（2026-11-11 修订）**：依据 spec v1.2 与 2026-11-11 用户更正，纠正"长期记忆参与 30 主题 LRU"的表述——**仅项目级记忆 `project.md` 执行 30 主题上限、LRU 淘汰、读取/更新提升到队首、pinned 不淘汰；长期记忆 `global.md` 不参与 LRU、不重排、不淘汰，仅软上限 50 + `memory.capacity_warning` 告警，主题顺序为稳定写入顺序**。同步修订文档头、1.x、2.1（新增 D17）、2.3 Q10、3.1、4.6.1~4.6.8、4.7.1/4.7.3/4.7.4、4.12.2、5.6、6.2、9.6、11.1（R17/R25）、11.2（U3 关闭）、12.1/12.2/12.3；未改动 A 方案、PG 索引、压缩 C 方案、RAG 用 Go 等已确认决策。<br>**v1.2（2026-11-10）**：用户确认 5 项 P1 决策——U1-A（遗忘只降权不删 md）、U13-A（8/20/20/2 + 并行集均分预算）、U17-A（审批留 agent-service + 薄代理，二期转共享存储）、U18-A（阶段模型默认继承任务级）、U19-A（子任务复用父验收器 + 确定性优先分流）；11.2 表相应标为已确认，P1 范围锁定。<br>**v1.1（2026-11-10）**：① 4.5 上下文压缩改为 **C 方案**（自研模板摘要为唯一通道，引擎仅预留），改写 4.5.1~4.5.8 并新增 4.5.9 答辩口径；② 新增 **4.13 多 Agent 协作层**（REQ-123~141）；③ 新增 **4.14 模型选择**（REQ-142~155）；④ 新增 **4.15 工具权限与工作目录沙箱**（REQ-156~170）；⑤ 联动修订 2.1（新增 ADR **D13~D16**）、三章（组件图/清单/端口）、4.1.5、五章（5.1.2~5.1.5 新表）、六章（proto/REST/错误码）、七章（组件与图表）、八章（目录/P0-P2 切片/门槛）、九章（9.9~9.11 新测试集）、十章（指标/告警/Trace）、十一章（R19~R24、U13~U20）、十二章（术语/映射/自检）。 |
-| 修订纪律 | 既有已确认决策**未改动**：A 方案 md 事实源（D1）、memory-service 内部实现不改（D1-C）、PG 仅索引层（D2）、RAG 用 Go knowledge-service（D3）、CLI 用 cobra+Bubble Tea（D4）、harnessloop-service :50008（D6）、压缩 C 方案（D13）。所有修订处均以"（2026-11-10 修订/新增）"或"（2026-11-11 修订）"标注。 |
+| 修订记录 | **v1.3（2026-11-11 修订）**：依据 spec v1.2 与 2026-11-11 用户更正，纠正"长期记忆参与 30 主题 LRU"的表述——**仅项目级记忆 `project.md` 执行 30 主题上限、LRU 淘汰、读取/更新提升到队首、pinned 不淘汰；长期记忆 `global.md` 不参与 LRU、不重排、不淘汰，仅软上限 50 + `memory.capacity_warning` 告警，主题顺序为稳定写入顺序**。同步修订文档头、1.x、2.1（新增 D17）、2.3 Q10、3.1、4.6.1~4.6.8、4.7.1/4.7.3/4.7.4、4.12.2、5.6、6.2、9.6、11.1（R17/R25）、11.2（U3 关闭）、12.1/12.2/12.3；未改动 A 方案、PG 索引、压缩 C 方案、RAG 用 Go 等已确认决策。<br>**v1.4（2026-11-17 修订）**：依据 spec v1.3（REQ-171~178）与用户 2026-11-17 拍板：① 新增 **4.11.7 CLI 会话与看板生命周期**——`/harness loop start`（看板，与 agent 解耦）、`/harness loop`（常驻会话，连续输入、每条触发一次 a~e）、`/harness loop exit`（只结束当前会话）、多终端隔离、任务终态不退出会话、`loop` 按需拉起后端；共享看板的 URL/端口与停止方式**标为待定**（REQ-178），不在本次设计定稿。② 修订 **D4**：runtime 底层 SDK 迁移 `github.com/openai/openai-go`，`pkg/llm` 对外接口与装饰器链保持不变；RAG 仍用 Go knowledge-service（D3 不变）。未改动 A 方案、PG 索引、压缩 C 方案、CLI 用 cobra + Bubble Tea 等结论。<br>**v1.2（2026-11-10）**：用户确认 5 项 P1 决策——U1-A（遗忘只降权不删 md）、U13-A（8/20/20/2 + 并行集均分预算）、U17-A（审批留 agent-service + 薄代理，二期转共享存储）、U18-A（阶段模型默认继承任务级）、U19-A（子任务复用父验收器 + 确定性优先分流）；11.2 表相应标为已确认，P1 范围锁定。<br>**v1.1（2026-11-10）**：① 4.5 上下文压缩改为 **C 方案**（自研模板摘要为唯一通道，引擎仅预留），改写 4.5.1~4.5.8 并新增 4.5.9 答辩口径；② 新增 **4.13 多 Agent 协作层**（REQ-123~141）；③ 新增 **4.14 模型选择**（REQ-142~155）；④ 新增 **4.15 工具权限与工作目录沙箱**（REQ-156~170）；⑤ 联动修订 2.1（新增 ADR **D13~D16**）、三章（组件图/清单/端口）、4.1.5、五章（5.1.2~5.1.5 新表）、六章（proto/REST/错误码）、七章（组件与图表）、八章（目录/P0-P2 切片/门槛）、九章（9.9~9.11 新测试集）、十章（指标/告警/Trace）、十一章（R19~R24、U13~U20）、十二章（术语/映射/自检）。 |
+| 修订纪律 | 既有已确认决策**未改动**：A 方案 md 事实源（D1）、memory-service 内部实现不改（D1-C）、PG 仅索引层（D2）、RAG 用 Go knowledge-service（D3）、CLI 用 cobra+Bubble Tea、runtime 底层 SDK 迁 openai-go（D4，2026-11-17 修订）、harnessloop-service :50008（D6）、压缩 C 方案（D13）。所有修订处均以"（2026-11-10 修订/新增）""（2026-11-11 修订）""（2026-11-17 修订）"标注。 |
 
 > 阅读约定：本文所有"现状"结论均标注了仓库内真实文件路径；未在仓库中出现的文件一律标注为"新增"。REQ 编号与 `spec.md` 一一对应。
 
@@ -149,7 +149,7 @@
 | D1 | 记忆事实源 = 工作区 markdown；memory-service 降级为只读索引/检索层 | B：memory-service 为主、md 为导出；C：双向双写 | 用户已拍板；REQ-047/048/061 要求 md 为唯一事实源；双向双写会产生无法收敛的冲突 | 新增 `pkg/memoryfile`；memory-service 新增 `mdsync` 与 `memory.source` 开关；新增 PG 记忆索引 | 写放大、最终一致窗口、多人并发编辑 |
 | D2 | PG+pgvector 仅承载"记忆索引 + 代码索引 + Harness 事件"，Qdrant 保留 RAG 文档向量与 legacy 记忆向量 | 替换 Qdrant；或 PG 只做关系表、向量仍留 Qdrant | 用户已拍板；双库并存符合 DFX-C-03；Qdrant 现有 collection 不做数据迁移 | 新增 3 个 schema；新增连接池与迁移；运维多一个有状态依赖 | 职责重叠导致误写；PG 成为新单点 |
 | D3 | RAG/知识广场沿用 Go `knowledge-service`，不引入 Python+langchain | Python + langchain sidecar | 用户已拍板；现有解析/切分/BM25/Qdrant 链路已具备，重写成本高且会产生两套文档库 | 在 knowledge-service 内补 RRF 稳定排序、reranker、引用、状态机、kb 隔离 | reranker 质量弱于 cross-encoder |
-| D4 | runtime 复用 Go + `pkg/llm`；CLI 用 cobra + Bubble Tea，位于仓库内 `cmd/harness-cli` | 引入 openai-go；CLI 独立 module | 用户已拍板"不强制 openai-go"；现有 client 已等价（含 FinishReason/Embed/装饰器）；独立 module 会为复用 pb 引入 `replace` 补丁 | 新增 `pkg/harnessloop`、`services/harnessloop-service`、`cmd/harness-cli` | CLI 与 runtime 版本耦合 |
+| D4 | runtime 用 Go；LLM 底层 SDK 迁移 `github.com/openai/openai-go`（2026-11-17 用户拍板）；CLI 用 cobra + Bubble Tea，位于仓库内 `cmd/harness-cli` | 保留自研 `pkg/llm` 直连 HTTP；CLI 独立 module | 用户 2026-11-17 明确要求换 openai-go；`pkg/llm` 对外接口（Chat/ChatStream/Embed）、装饰器链与错误语义保持不变，只替换底层实现；RAG 仍用 Go（D3） | 新增 `openai-go` 依赖；`pkg/llm` 内部适配层；新增 `pkg/harnessloop`、`services/harnessloop-service`、`cmd/harness-cli` | SDK 流式/取消/重试语义需对齐；两套错误码需在 `pkg/llm` 归一 |
 | D5 | 新增大屏独立页面 `/harness-loop/monitor`，复用 Ant Design + ECharts + TanStack Query | 改造现有 Observability/Harness Dashboard | 用户已拍板；现有页面是统计卡 + 回放，交互模型不同，改造会污染现有信息架构 | 新增 `frontend/src/pages/HarnessLoop/`；新增 SSE 客户端 | 前端包体增大 |
 | D6 | 新增独立服务 `harnessloop-service`（:50008），阶段内执行**委托** agent-service | 把 FSM 塞进 agent-service | 隔离 FSM 生命周期与现有 Agent 执行；独立伸缩与开关；agent-service 单文件已 981 行 | 新增服务、Dockerfile、compose 条目、网关代理 | 多一跳网络与一个部署单元 |
 | D7 | FSM 检查点写 MongoDB（新 collection `harness_loop_checkpoints`），事件与索引写 PG | 检查点也写 PG | 复用 `checkpoint.CheckpointStore` 接口与 MongoDB 基建；检查点是大 blob，不宜与向量索引争 PG 缓冲 | 跨库各司其职；恢复以检查点为准、事件按 seq 校验 | 跨库一致性需显式校验（见 4.4） |
@@ -230,11 +230,12 @@
 
 ### D4 runtime 与 CLI 技术选型
 
-**复用 `pkg/llm` 的理由（不引入 openai-go）**：
-1. `llm.Client` 已是 OpenAI 兼容（`client.go:27-32`），支持 Chat/ChatStream/Embed/EmbedBatch，覆盖执行、验收、摘要、embedding 四类调用。
-2. `FinishReason` 已解析（`client.go:83`），满足 REQ-024。
-3. 已有装饰器链（compression / metrics），FSM 可直接叠加预算与指标装饰器，无需重写。
-4. 引入 openai-go 会产生两套客户端与两套错误语义，破坏 DFX-M-01 的统一指标。
+**迁移 `openai-go` 的边界（2026-11-17 修订）**：
+1. 对外接口不变：`llm.Client` 的 Chat/ChatStream/Embed/EmbedBatch 签名保留，执行、验收、摘要、embedding 四类调用方零改动（REQ-177）。
+2. `FinishReason`、tool_call 聚合、超时/取消与错误分类仍在 `pkg/llm` 内归一化，不向调用方暴露 SDK 类型。
+3. 装饰器链（compression / metrics）保留，DFX-M-01 指标不分裂。
+4. `pkg/llm` 内部新增 openai-go 适配层；现有 mock 与测试保留，另补适配层单测与一次真实 LLM 端到端回归。
+5. RAG 不随之迁移：knowledge-service 仍走 Go 实现（D3）。
 
 **CLI 形态**：`cmd/harness-cli`（根 module）+ `internal/cli/{cmd,tui}`（cobra 命令树 + bubbletea 视图）。不建独立 module 的原因：需要复用 `pkg/pb` 与 `pkg/client`，独立 module 只能通过 `replace ../..` 或复制 proto 代码，二者都会破坏可发布性。用户给出的"`cmd/harness-cli` 或 `cli/`"两个位置中，选择前者。
 
@@ -1916,7 +1917,33 @@ CLI 读写分离：`status/logs` 走独立 unary/stream 调用，不占任务执
 - 无网络（LLM 不可达）：任务立即 `network` 异常重试 3 次后 failed，不无限挂起。
 - 本地 runtime：`harnessloop-service --local --workspace <path>`，监听 `127.0.0.1:50008`，默认只允许本机连接。
 
+### 4.11.7 CLI 会话与看板生命周期（REQ-171~178，2026-11-17 新增）
+
+**命令面（字面命令，在终端直接输入）**：
+
+| 命令 | 作用 | 生命周期 | 停止 |
+|---|---|---|---|
+| `/harness loop start` | 启动或复用 Web 看板服务 | 与 agent 解耦；无 agent 时也可访问；多终端共享同一看板 | **待定**（显式停止或手动终止，见下） |
+| `/harness loop` | 在当前终端启动常驻 agent 会话 | 每终端一个独立会话；输入文字发送即创建一次 a~e 任务 | `/harness loop exit` 只结束当前 |
+| `/harness loop exit` | 结束当前终端会话 | 不影响其他终端会话与共享看板 | — |
+
+**行为契约（不涉及实现方式）**：
+1. `loop start` 成功后终端打印可访问的本地 URL（不带域名、不带 project 参数）；无 agent 时打开该 URL 显示空态而非 404。
+2. 停止看板后原 URL 不可访问（连接失败或 404），不得继续返回旧数据。
+3. 第二个终端执行同一命令：单实例方案打印同一 URL 且不重复起进程；端口递增方案打印各自 URL。两种方案都不得由「关闭任一终端」触发停止。
+4. 实现层（进程模型、端口分配、shell 如何识别 `/harness`）均待定；契约只约束上述可观测行为，后续定稿不得改变这些行为。
+
+**会话模型**：一个终端 = 一个常驻会话；单条任务到达终态后回到输入框（REQ-174），可连续提交；任务仍按 `session_id` + `terminal_label` 归属（REQ-175）。
+
+**进程模型**：看板服务与会话进程分离——看板由首个 `loop start` 拉起、后续终端复用；agent 会话随终端存在。`loop start` 只保证看板可访问，`loop` 在需要时按需拉起后端（REQ-176）。
+
+**待定项（REQ-178）**：共享看板的 URL/端口策略与停止方式尚未定稿。候选：① 单实例共享同一 URL，停止需显式动作（关闭任一终端不得停看板）；② 若共享无法保证「关一个不影响其他」，则端口递增、每终端独立 URL，停止只停当前。在定稿前，实现不得采用「关闭任一终端即停止看板」。
+
+**与既有实现的关系**：现有 `internal/cli/cmd/loop.go` 为「一次任务、终态即退出」，`internal/cli/tui` 在 `terminal` 时 `tea.Quit`；本节要求改造为常驻会话（终态回输入框），并新增看板生命周期入口。任务拆分见 `tasks.md`（待登记）。
+
 ## 4.12 监控大屏与事件协议
+
+> 看板服务的启动/共享/停止语义见 4.11.7（REQ-171/178）；共享 URL 与端口策略待定，本节只定义事件协议与页面视图。
 
 ### 4.12.1 事件 schema（REQ-103）
 

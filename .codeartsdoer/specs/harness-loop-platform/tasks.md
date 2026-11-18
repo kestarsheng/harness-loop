@@ -7,7 +7,7 @@
 | 状态 | 待评审 |
 | 上游文档 | `spec.md` v1.1（170 条 REQ + 38 条 DFX）、`design.md` v1.2（12 章，5 项锁定决策） |
 | 代码基线 | `agent-platform` @ `4a05ccb`，Go 1.22 |
-| 任务规模 | 87 个任务（P0 27 / P1 36 / P2 24） |
+| 任务规模 | 94 个任务（P0 27 / P1 36 / P2 31） |
 | 已锁定决策 | A 方案记忆事实源、PG 仅承载索引与事件（D2）、RAG 复用 Go knowledge-service（D3）、runtime 复用 `pkg/llm` + cobra/Bubble Tea（D4）、新增 :50008（D6/D14）、自研模板摘要唯一通道（D13）、多 Agent 8/20/20/2（U13-A）、审批一期留 agent-service（U17-A）、阶段模型默认继承（U18-A）、子任务验收复用父验收器（U19-A） |
 
 > 阅读约定：每个任务给出「目标 → 关联需求 → 设计章节 → 依赖 → 文件 → 实施要点 → 验收标准 → 复杂度」。`[N]` 表示新增文件，`[M]` 表示改造存量文件。验收标准优先给出可直接执行的命令或断言。本文件不含实现代码。
@@ -1169,7 +1169,91 @@
 | 验收标准 | `dev-down.sh` 后 `dev-up.sh --demo` **14 项健康全绿**；9 个微服务端口均可连；`harnessloop.log` 不再出现 `memory recall disabled`；Qdrant 6333 可访问且 knowledge 上传后集合存在；`dev-stack.json` 可解析且与脚本实际启动项逐项一致；不得留半截栈。 |
 | 复杂度 | M |
 
-> P2 合计：实施 19 个 + 测试 5 个 = **24 个任务**。
+### T-P2-20 会话式 TUI 与命令面（最高优先）
+
+| 字段 | 内容 |
+|---|---|
+| 目标 | 把 `loop` 从「一次任务、终态即退出」改成常驻会话：可连续输入、终态回输入框、`/harness loop exit` 只结束当前终端；斜杠命令与执行层只有一份。 |
+| 关联需求 | REQ-172、REQ-173、REQ-174、REQ-175；design 4.11.7 |
+| 依赖 | T-P2-12 |
+| 涉及文件 | [M] `internal/cli/cmd/loop.go`、[M] `internal/cli/tui/{app,model}.go`、[M] `internal/cli/tui/views/*`、[M] `internal/cli/cmd/root.go`（仅注册） |
+| 实施要点 | 1) 任务到达终态后不再 `tea.Quit`，回到输入框并保留结果；`--exit-on-complete` 恢复旧行为；2) 同一会话连续提交产生多个任务，`session_id`/`terminal_label` 不变；3) `exit`/`/harness loop exit` 只结束当前进程；4) 命令分发集中到一处，终端与 TUI 斜杠命令复用；5) 不新增依赖，输入框沿用现有实现。 |
+| 验收标准 | 同一终端连续提交两条输入 → 两个任务且阶段完整；任务终态后界面仍可输入；两终端各开一个会话，其中一个 exit → 另一个与大屏不受影响；`go test ./internal/cli/...` 全绿。 |
+| 复杂度 | M（1~1.5 天） |
+
+### T-P2-21 一条命令拉起后端（Go devstack）
+
+| 字段 | 内容 |
+|---|---|
+| 目标 | `/harness loop` 检测 127.0.0.1:50013，未起则按 `scripts/dev-stack.json` 自动拉起 14 项并等待健康，冷启动一条命令进 TUI。 |
+| 关联需求 | REQ-176；design 4.11.7 |
+| 依赖 | T-P2-19（`dev-stack.json` 已定稿） |
+| 涉及文件 | [N] `internal/devstack/{stack,process,health,config}.go`、[M] `internal/cli/cmd/root.go`、[N] `scripts/verify-stack.sh` |
+| 实施要点 | 1) 以 `dev-stack.json` 为唯一数据源（脚本与 Go 共用），禁止第二份服务清单；2) 已存在实例则复用，不重复起；3) 进程 pid/日志落 `.harness/dev`，Windows 用端口反查 + taskkill；4) 失败回滚本次已起进程；5) 与 T-P2-20 文件域隔离：本任务只碰 `internal/devstack/**` 与 `root.go`，不改 `tui/**`。 |
+| 验收标准 | 干净状态执行 `harness loop` → 14 项就绪并进 TUI；再执行一次 <2s 复用；杀进程后重跑可恢复；失败不留半截栈。 |
+| 复杂度 | M（1~2 天，可与 T-P2-20 并行） |
+
+### T-P2-22 看板 start/stop 生命周期
+
+| 字段 | 内容 |
+|---|---|
+| 目标 | `/harness loop start` 启动或复用看板并打印本地 URL；`/harness loop stop` 停止后原 URL 不可访问；关闭任一终端不影响其他终端与看板。 |
+| 关联需求 | REQ-171、REQ-178；design 4.11.7 行为契约 |
+| 依赖 | T-P2-21；URL 共享方案待定（先实现单实例固定 URL，`PortStrategy` 接口预留递增分支） |
+| 涉及文件 | [N] `internal/devstack/board.go`、[M] `internal/cli/cmd/loop.go`、[M] `scripts/dev-stack.json`（board 项） |
+| 实施要点 | 1) 看板作为后台常驻项，首个 start 拉起、后续复用；2) 打印的 URL 不带域名与 project 参数；3) stop 只停看板，不影响 agent 会话；4) 行为契约四条逐条可测；5) 待定项以接口隔离，定稿后只换实现。 |
+| 验收标准 | 无 agent 时打开 URL 为空态；第二终端 start 打印同一 URL 且不重复起；关任一终端 URL 仍 200；`stop` 后 URL 连接失败/404。 |
+| 复杂度 | S（0.5~1 天） |
+
+### T-P2-23 多节点 plan（3 节点）
+
+| 字段 | 内容 |
+|---|---|
+| 目标 | b 阶段一次拆出 3 个节点并真正分发；验收 `node_count>=3`、`edge_count>0`、`accepted>=3`。 |
+| 关联需求 | REQ-123~141；design 4.13 |
+| 依赖 | T-P2-18 |
+| 涉及文件 | [M] `services/harnessloop-service/internal/service/runtime.go`（提示词常量）、[M] `pkg/config/harness_loop/models.yaml`（阶段模型覆盖） |
+| 实施要点 | 1) 提示词改为 3 节点示例 + 明确拆分判据，不再给单节点示例；2) b 阶段指定 `qwen3.7-max`；3) 多节点才算合格，fallback 单节点只能算降级；4) 与 T-P2-24 无文件交集，可并行。 |
+| 验收标准 | 真实任务 `subtask_count>=3`、`edge_count>0`、事件含多个 `subtask.started` 且 `accepted>=3`；DB 状态与事件一致。 |
+| 复杂度 | S（0.5 天） |
+
+### T-P2-24 runtime 迁 openai-go
+
+| 字段 | 内容 |
+|---|---|
+| 目标 | `pkg/llm` 底层换成 `github.com/openai/openai-go`，对外接口与装饰器链不变。 |
+| 关联需求 | REQ-096、REQ-177；design D4（2026-11-17 修订） |
+| 依赖 | 无（可与 T-P2-20/21/23 并行） |
+| 涉及文件 | [M] `pkg/llm/**`、[M] `go.mod`/`go.sum` |
+| 实施要点 | 1) 保留 `Client` 的 Chat/ChatStream/Embed/EmbedBatch 签名；2) FinishReason、tool_call 聚合、超时/取消、错误分类在适配层归一；3) 现有 mock/测试保留，另补适配层单测；4) 不做 RAG 迁移。 |
+| 验收标准 | `go test ./pkg/llm/...` 全绿；真实 LLM 五阶段回归一次 completed；`go build -p 1 ./...`、depcheck 0。 |
+| 复杂度 | M（1~2 天） |
+
+### T-P2-25 权限审计真实验证
+
+| 字段 | 内容 |
+|---|---|
+| 目标 | 用触发 `read_file`/`run_command` 的任务验证 policy 决策、审批与审计一一对应。 |
+| 关联需求 | REQ-156~170；design 9.11 |
+| 依赖 | T-P2-18（执行器修好后才可能触发工具） |
+| 涉及文件 | [N] `bench/p2/policy-audit-e2e.md`、[N] `services/harnessloop-service/internal/service/policy_e2e_test.go` |
+| 实施要点 | 1) 任务目标必须诱导工具调用；2) 断言 `audit>0` 且与工具调用逐条对应；3) 越权/高危各一条负向；4) 不改业务代码，仅补测试与报告。 |
+| 验收标准 | `audit` 条数等于工具调用次数；越权被拒且留痕；报告留档。 |
+| 复杂度 | S（0.5 天） |
+
+### T-P2-26 收口与发布
+
+| 字段 | 内容 |
+|---|---|
+| 目标 | 两终端演示闭环 + 全量验证 + CHANGELOG + `v0.3.0-p2`。 |
+| 关联需求 | design 8.4；全部 P2 任务 |
+| 依赖 | T-P2-18~25 |
+| 涉及文件 | [M] `CHANGELOG.md`、[M] `docs/dev.md`、发布 tag |
+| 实施要点 | 1) 冷启动 `harness loop` → 14 项 → TUI；2) 第二终端 → 同一看板两张卡；3) `exit`/`stop` 隔离验证；4) 全量 build/test/depcheck；5) 合 main 打 tag。 |
+| 验收标准 | 上述 4 条演示全过；`go build -p 1 ./...`、`go test ./services/... ./internal/cli/...`、depcheck 0；tag 已推。 |
+| 复杂度 | S（0.5 天） |
+
+> P2 合计：实施 26 个 + 测试 5 个 = **31 个任务**。
 
 ---
 
