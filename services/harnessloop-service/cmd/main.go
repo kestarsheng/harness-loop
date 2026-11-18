@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -49,23 +51,47 @@ func (s eventSink) Append(ctx context.Context, events []*event.Event) error {
 }
 
 func main() {
+	// 启动期日志同时写 stdout 与 stderr（T-P2-35/T-P2-36）。日志默认只走 stderr：
+	// 由 dev-up.sh、devstack.Ensure 或容器 supervisor 拉起时，只捕获 stdout 的一方
+	// 会把"启动失败"看成一秒退出、什么也没打印——所谓"静默 exit(1)"就是这么来的。
+	// 双写让任何一侧的抓取者都拿得到原因，且不改变日志格式。
+	log.SetOutput(io.MultiWriter(os.Stdout, os.Stderr))
+
 	var (
 		configPath = flag.String("config", "config.yaml", "path to config file")
 		local      = flag.Bool("local", false, "bind to 127.0.0.1 only")
 	)
 	flag.Parse()
 
-	cfg, err := config.Load(*configPath)
+	os.Exit(run(*configPath, *local))
+}
+
+// run is the whole startup, split out of main so every failure returns a
+// category-coded exit status instead of calling log.Fatalf (T-P2-35 item 2: a
+// wrapper must be able to tell panic / config / database / listen apart).
+func run(configPath string, local bool) (code int) {
+	reporter := newExitReporter(exitStatePath())
+	defer func() {
+		rec := recover()
+		if rec == nil {
+			return
+		}
+		pe := service.NewPanicError("main", rec)
+		log.Printf("harnessloop: recovered panic during startup\n%s", pe.Detail())
+		code = reporter.Fail(catPanic, pe)
+	}()
+
+	cfg, err := config.Load(configPath)
 	if err != nil {
-		log.Fatalf("harnessloop: load config: %v", err)
+		return reporter.Fail(catConfigLoad, err)
 	}
-	if *local {
-		cfg.Server.Address = "127.0.0.1:50008"
+	if local {
+		cfg.SetLocalOnly()
 	} else if addr := os.Getenv("HARNESSLOOP_ADDRESS"); addr != "" {
 		cfg.Server.Address = addr
 	}
 	if err := cfg.Validate(); err != nil {
-		log.Fatalf("harnessloop: invalid config: %v", err)
+		return reporter.Fail(catConfigInvalid, err)
 	}
 
 	rootCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -88,7 +114,12 @@ func main() {
 		metricsAddr = ":9108"
 	}
 	if metricsAddr != "off" {
-		if srv := metricsHarness.Reg.Serve(metricsAddr); srv != nil {
+		// Registry.Serve swallows ListenAndServe's error inside its goroutine, so a
+		// busy metrics port is invisible today. Probe it first and say so out loud
+		// (T-P2-35: 端口冲突必须可判，而不是静默丢一个监听)。
+		if probeErr := probeListen(metricsAddr); probeErr != nil {
+			log.Printf("harnessloop: metrics %s unavailable (%v); /metrics stays dark", metricsAddr, probeErr)
+		} else if srv := metricsHarness.Reg.Serve(metricsAddr); srv != nil {
 			defer func() {
 				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 				defer cancel()
@@ -106,12 +137,12 @@ func main() {
 		SlowQueryThreshold: time.Duration(cfg.Postgres.SlowQueryMs) * time.Millisecond,
 	})
 	if err != nil {
-		log.Fatalf("harnessloop: connect postgres: %v", err)
+		return reporter.Fail(catDatabase, err)
 	}
 	defer db.Close()
 
 	if err := db.Migrate(rootCtx); err != nil {
-		log.Fatalf("harnessloop: migrate: %v", err)
+		return reporter.Fail(catMigration, err)
 	}
 
 	taskRepo := repository.NewTaskRepo(db)
@@ -132,7 +163,7 @@ func main() {
 
 	policyEngine, err := buildPolicy(cfg)
 	if err != nil {
-		log.Fatalf("harnessloop: load policy: %v", err)
+		return reporter.Fail(catPolicy, err)
 	}
 
 	models, err := modelregistry.Load(cfg.Models.File)
@@ -239,25 +270,53 @@ func main() {
 		} else {
 			runtime.CompactionDir = filepath.Join(os.TempDir(), "harness", "tmp")
 		}
-		if baseURL := os.Getenv("HARNESSLOOP_LLM_BASE_URL"); baseURL != "" {
+		// HARNESSLOOP_LLM_* 是可选的三件套：校验放在 config 层，缺哪一项就点名
+		// 哪一项，并且降级为"不开摘要器"而不是让启动失败（T-P2-36）。
+		llmEnv, llmEnvErr := config.LoadLLMEnv(os.Getenv)
+		switch {
+		case llmEnvErr != nil:
+			log.Printf("harnessloop: compaction summarizer disabled: %v", llmEnvErr)
+		case llmEnv.Configured():
 			llmClient, llmErr := llm.NewClient(llm.Config{
 				Provider: "openai",
-				APIKey:   os.Getenv("HARNESSLOOP_LLM_API_KEY"),
-				BaseURL:  baseURL,
-				Model:    os.Getenv("HARNESSLOOP_LLM_MODEL"),
+				APIKey:   llmEnv.APIKey,
+				BaseURL:  llmEnv.BaseURL,
+				Model:    llmEnv.Model,
 			})
 			if llmErr != nil {
 				log.Printf("harnessloop: compaction summarizer disabled: %v", llmErr)
 			} else {
-				runtime.CompactionSummarizer = compaction.NewTemplateSummarizer(compaction.LLMCompleter{Client: llmClient, Model: os.Getenv("HARNESSLOOP_LLM_MODEL")})
-				log.Printf("harnessloop: compaction summarizer enabled (%s)", baseURL)
+				runtime.CompactionSummarizer = compaction.NewTemplateSummarizer(compaction.LLMCompleter{Client: llmClient, Model: llmEnv.Model})
+				log.Printf("harnessloop: compaction summarizer enabled (%s, model=%s)", llmEnv.BaseURL, llmEnv.Model)
 			}
-		} else {
-			log.Printf("harnessloop: compaction summarizer not configured, degradation path L1 will be used")
+		default:
+			log.Printf("harnessloop: compaction summarizer not configured (HARNESSLOOP_LLM_* unset), degradation path L1 will be used")
 		}
 		log.Printf("harnessloop: compaction trigger enabled (ratio=%.2f fallback=%d)", compactionCfg.ThresholdRatio, compactionCfg.FallbackWindow)
 	}
 	log.Printf("harnessloop: acceptance verifier is program-only in P0 (no model verifier wired yet)")
+
+	// 启动自检：在开监听之前把"能配但一定跑不通"的组合挡下来（T-P2-35 item 5）。
+	// 致命项拒绝启动；警告项逐条打出来，不让"开关亮着但什么都不做"沉底。
+	findings := service.StartupSelfCheck(service.SelfCheckInput{
+		ListenAddress:       cfg.ListenAddress(),
+		AgentTarget:         cfg.Agent.Target,
+		MetricsAddress:      metricsAddr,
+		OrchestratorEnabled: orchestratorBridge.Enabled(),
+		SubtaskExecutor:     agentClient != nil,
+		SubtaskRepo:         subtaskRepo != nil,
+		StageRunner:         stages != nil,
+		PolicyLayersEnabled: policyBridge.Enabled(),
+		ApprovalGate:        approvalGate != nil,
+		MemoryRecall:        recaller != nil,
+	})
+	for _, f := range findings {
+		log.Printf("harnessloop: %s", f)
+	}
+	log.Printf("harnessloop: %s", service.FormatFindings(findings))
+	if fatal := service.FatalFindings(findings); len(fatal) > 0 {
+		return reporter.Fail(catSelfCheck, errors.New(service.FormatFindings(fatal)))
+	}
 
 	h := handler.New(handler.Deps{
 		Config:          cfg,
@@ -279,7 +338,7 @@ func main() {
 
 	lis, err := net.Listen("tcp", cfg.ListenAddress())
 	if err != nil {
-		log.Fatalf("harnessloop: listen %s: %v", cfg.ListenAddress(), err)
+		return reporter.Fail(catListen, fmt.Errorf("listen %s: %w", cfg.ListenAddress(), err))
 	}
 
 	indexRegistry := parser.NewRegistry()
@@ -289,7 +348,12 @@ func main() {
 	indexService := service.NewIndexService(codeWriter)
 	indexHandler := handler.NewCodeIndexHandler(indexService)
 
-	server := grpc.NewServer()
+	// 一个请求里的 panic 只能死一个请求（T-P2-35）。编排开启后 handler 路径上
+	// 多了规划/调度/汇聚，没有这层拦截，任何一次 nil map 都会带走整个进程。
+	server := grpc.NewServer(
+		grpc.ChainUnaryInterceptor(recoveryUnaryInterceptor(log.Default())),
+		grpc.ChainStreamInterceptor(recoveryStreamInterceptor(log.Default())),
+	)
 	harnesspb.RegisterHarnessLoopServiceServer(server, h)
 	codeindexpb.RegisterCodeIndexServiceServer(server, indexHandler)
 	healthServer := health.NewServer()
@@ -320,6 +384,16 @@ func main() {
 		server.Stop()
 	}
 	log.Printf("harnessloop: stopped")
+	return exitOK
+}
+
+// probeListen reports whether addr can be bound right now, then releases it.
+func probeListen(addr string) error {
+	lis, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	return lis.Close()
 }
 
 type modelWindowResolver struct {
