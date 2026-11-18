@@ -24,19 +24,19 @@ type Event struct {
 	// GlobalSeq 是租户级事件游标（hlp_event.events.global_seq），由仓储层在写入
 	// 事务内分配；Seq 仍是任务内序号。WatchFrom / List / SSE 的 since 语义都基于
 	// GlobalSeq —— 拿 per-task 的 Seq 当跨任务游标会漏掉每个新任务的事件。
-	GlobalSeq     int64
-	Timestamp     time.Time
-	Severity      Severity
-	TenantID      string
-	ProjectID     string
-	AgentID       string
-	Payload       []byte
-	PayloadRef    string
-	ParentTaskID  string
-	SubtaskID     string
-	HandoffID     string
-	DagID         string
-	DagNodeID     string
+	GlobalSeq    int64
+	Timestamp    time.Time
+	Severity     Severity
+	TenantID     string
+	ProjectID    string
+	AgentID      string
+	Payload      []byte
+	PayloadRef   string
+	ParentTaskID string
+	SubtaskID    string
+	HandoffID    string
+	DagID        string
+	DagNodeID    string
 }
 
 type ValidationError struct {
@@ -71,6 +71,19 @@ var secretPatterns = []*regexp.Regexp{
 }
 
 func (e *Event) Validate() error {
+	return e.validate(false)
+}
+
+// ValidateForPublish 与 Validate 的唯一差别：允许 Seq == 0。
+//
+// 0 的含义是「尚未分配」——seq 的唯一分配者是事件库（写入事务里按 task 取
+// MAX(seq)+1 并回填）。发布之前不可能知道真实 seq，所以这里放行 0；
+// 已落库的事件（Seq > 0）仍然走同一套字段校验。
+func (e *Event) ValidateForPublish() error {
+	return e.validate(true)
+}
+
+func (e *Event) validate(allowUnassignedSeq bool) error {
 	if e.EventID == "" {
 		return &ValidationError{Code: CodeMissingField, Field: "event_id", Msg: "event_id is required"}
 	}
@@ -89,8 +102,11 @@ func (e *Event) Validate() error {
 	if e.TaskID == "" {
 		return &ValidationError{Code: CodeMissingField, Field: "task_id", Msg: "task_id is required"}
 	}
-	if e.Seq <= 0 {
-		return &ValidationError{Code: CodeInvalidSeq, Field: "seq", Msg: fmt.Sprintf("seq %d must be positive", e.Seq)}
+	if e.Seq < 0 {
+		return &ValidationError{Code: CodeInvalidSeq, Field: "seq", Msg: fmt.Sprintf("seq %d must not be negative", e.Seq)}
+	}
+	if e.Seq == 0 && !allowUnassignedSeq {
+		return &ValidationError{Code: CodeInvalidSeq, Field: "seq", Msg: "seq 0 must be positive"}
 	}
 	if e.Timestamp.IsZero() {
 		return &ValidationError{Code: CodeMissingField, Field: "timestamp", Msg: "timestamp is required"}

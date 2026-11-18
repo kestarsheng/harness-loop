@@ -90,6 +90,20 @@ type msSink struct {
 func (s *msSink) Append(_ context.Context, events []*event.Event) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// 假事件库要自己分配 seq：T-P2-32 之后 event.Publisher 不再给事件编号，
+	// 编号权属于存储端（生产实现是 repository.EventRepo.Append 的 RETURNING）。
+	for _, e := range events {
+		if e.Seq > 0 {
+			continue
+		}
+		var max int64
+		for _, prev := range s.events {
+			if prev.TaskID == e.TaskID && prev.Seq > max {
+				max = prev.Seq
+			}
+		}
+		e.Seq = max + 1
+	}
 	s.events = append(s.events, events...)
 	return nil
 }
@@ -866,7 +880,7 @@ func TestModelSuiteFiveFailuresUnavailable(t *testing.T) {
 		}
 	}
 	// 恢复后 model.recovered 且重新可选（用显式选择证明可用，而不是假定
-        // 某种策略必然选它）。
+	// 某种策略必然选它）。
 	rec := chain.ObserveSuccess("strong")
 	if len(rec) == 0 || rec[0].Type != modelregistry.EventModelRecovered {
 		t.Fatalf("recovery events = %+v", rec)
@@ -1163,6 +1177,7 @@ func TestModelSuiteSelectionConstraintsEnforced(t *testing.T) {
 		t.Fatalf("unknown task must violate FK: %v", err)
 	}
 }
+
 // 9.10 回退性能口径：一次 rate_limit 回退（primary 失败 + 1 个 fallback 成功）
 // 的 Execute 耗时；无 design 阈值，留档用于报告区间。
 func TestModelSuiteFallbackLatency(t *testing.T) {

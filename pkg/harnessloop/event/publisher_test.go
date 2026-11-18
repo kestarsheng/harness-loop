@@ -1,10 +1,14 @@
 package event
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -15,14 +19,33 @@ type fakeSink struct {
 	events []*Event
 	fail   bool
 	calls  int
+	// allocate 为 true 时模拟事件库：给 Seq==0 的事件分配 per-task 递增的 seq
+	// 并回填到原对象上（真实实现是 repository.EventRepo.Append 的 RETURNING）。
+	allocate bool
+	seqs     map[string]int64
+	err      error
 }
 
 func (s *fakeSink) Append(ctx context.Context, events []*Event) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls++
+	if s.err != nil {
+		return s.err
+	}
 	if s.fail {
 		return errors.New("sink unavailable")
+	}
+	if s.allocate {
+		if s.seqs == nil {
+			s.seqs = map[string]int64{}
+		}
+		for _, e := range events {
+			if e.Seq <= 0 {
+				s.seqs[e.TaskID]++
+				e.Seq = s.seqs[e.TaskID]
+			}
+		}
 	}
 	s.events = append(s.events, events...)
 	return nil
@@ -55,8 +78,9 @@ func mkEvent(id, taskID string, seq int64) *Event {
 	}
 }
 
-func TestPublisherAssignsMonotonicSeq(t *testing.T) {
-	sink := &fakeSink{}
+// 分配权在存储端：发布器不得给事件编号，只读取回填值维护水位镜像。
+func TestPublisherDelegatesSeqToStore(t *testing.T) {
+	sink := &fakeSink{allocate: true}
 	p := NewPublisher(sink, NewMemoryIdempotency(100), nil)
 	ctx := context.Background()
 
@@ -66,11 +90,33 @@ func TestPublisherAssignsMonotonicSeq(t *testing.T) {
 			t.Fatalf("publish %d: %v", i, err)
 		}
 		if e.Seq != int64(i) {
-			t.Fatalf("seq = %d, want %d", e.Seq, i)
+			t.Fatalf("seq = %d, want %d (store-assigned)", e.Seq, i)
 		}
 	}
 	if sink.count() != 5 {
 		t.Fatalf("sink count = %d", sink.count())
+	}
+	if got := p.SeqWatermark("task-1"); got != 5 {
+		t.Fatalf("watermark = %d, want 5 (backfilled from store)", got)
+	}
+	if got := p.Stats().SeqBackfilled; got != 5 {
+		t.Fatalf("backfilled stat = %d", got)
+	}
+}
+
+// 存储端不回填 seq（例如内存 sink）时，发布器也绝不能自己 +1 —— 那正是双写者。
+func TestPublisherNeverInventsSeq(t *testing.T) {
+	sink := &fakeSink{}
+	p := NewPublisher(sink, NewMemoryIdempotency(100), nil)
+	e := mkEvent("ev-noseq", "task-1", 0)
+	if err := p.Publish(context.Background(), e); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	if e.Seq != 0 {
+		t.Fatalf("publisher must not assign seq, got %d", e.Seq)
+	}
+	if p.SeqWatermark("task-1") != 0 {
+		t.Fatal("watermark must stay 0 when the store did not assign")
 	}
 }
 
@@ -147,16 +193,23 @@ func TestPublisherRejectsInvalidEvent(t *testing.T) {
 	}
 }
 
-func TestPublisherRestoreSeq(t *testing.T) {
+func TestPublisherRestoreSeqOnlyMirrorsWatermark(t *testing.T) {
 	sink := &fakeSink{}
 	p := NewPublisher(sink, NewMemoryIdempotency(100), nil)
 	p.RestoreSeq("task-1", 10)
+	if got := p.SeqWatermark("task-1"); got != 10 {
+		t.Fatalf("watermark = %d, want 10", got)
+	}
 	e := mkEvent("ev-4", "task-1", 0)
 	if err := p.Publish(context.Background(), e); err != nil {
 		t.Fatalf("publish: %v", err)
 	}
-	if e.Seq != 11 {
-		t.Fatalf("seq = %d, want 11", e.Seq)
+	// Checkpoint 水位只用来判定漂移；seq 仍然由库分配。
+	if e.Seq != 0 {
+		t.Fatalf("seq = %d, want 0 (store assigns)", e.Seq)
+	}
+	if p.SeqWatermark("task-1") != 10 {
+		t.Fatal("watermark must keep the restored value")
 	}
 }
 
@@ -192,5 +245,87 @@ func TestJSONLBufferRoundTrip(t *testing.T) {
 	p := NewPublisher(sink, nil, NewJSONLBuffer(filepath.Join(t.TempDir(), "none.jsonl")))
 	if err := p.Flush(ctx); err != nil {
 		t.Fatalf("flush empty: %v", err)
+	}
+}
+
+type recordingObserver struct {
+	n      int
+	typ    string
+	reason string
+}
+
+func (o *recordingObserver) EventPublishFailed(eventType, reason string) {
+	o.n++
+	o.typ, o.reason = eventType, reason
+}
+
+// 失败必须可见：日志 + 计数 + 观测钩子，三者缺一不可。
+func TestPublisherFailureIsVisible(t *testing.T) {
+	var logged bytes.Buffer
+	log.SetOutput(&logged)
+	defer log.SetOutput(os.Stderr)
+
+	sink := &fakeSink{err: fmt.Errorf("db down: %w", ErrSeqConflict)}
+	obs := &recordingObserver{}
+	buf := NewMemoryBuffer()
+	p := NewPublisher(sink, nil, buf)
+	p.SetObserver(obs)
+
+	err := p.Publish(context.Background(), mkEvent("ev-fail", "task-1", 0))
+	if !errors.Is(err, ErrSeqConflict) {
+		t.Fatalf("err = %v, want ErrSeqConflict", err)
+	}
+	stats := p.Stats()
+	if stats.Failed != 1 {
+		t.Fatalf("Failed = %d, want 1", stats.Failed)
+	}
+	if stats.Buffered != 1 || p.Pending() != 1 {
+		t.Fatalf("failed event must be buffered, pending=%d buffered=%d", p.Pending(), stats.Buffered)
+	}
+	if obs.n != 1 || obs.reason != "seq_conflict" || obs.typ != string(StageTransition) {
+		t.Fatalf("observer = %+v, want one publish failure with reason=seq_conflict", obs)
+	}
+	out := logged.String()
+	if !strings.Contains(out, "publish failed") || !strings.Contains(out, "ev-fail") || !strings.Contains(out, "seq_conflict") {
+		t.Fatalf("failure log missing context: %q", out)
+	}
+}
+
+// 连缓冲都写不进去，才算真丢；这种必须单独计数并显式记日志。
+func TestPublisherCountsLostEventsWhenBufferFails(t *testing.T) {
+	var logged bytes.Buffer
+	log.SetOutput(&logged)
+	defer log.SetOutput(os.Stderr)
+
+	p := NewPublisher(&fakeSink{fail: true}, nil, failingBuffer{})
+	if err := p.Publish(context.Background(), mkEvent("ev-lost", "task-1", 0)); err == nil {
+		t.Fatal("publish must report the failure")
+	}
+	stats := p.Stats()
+	if stats.BufferedLost != 1 || stats.Buffered != 0 {
+		t.Fatalf("stats = %+v, want one lost event", stats)
+	}
+	if !strings.Contains(logged.String(), "event lost") {
+		t.Fatalf("lost event must be logged: %q", logged.String())
+	}
+}
+
+type failingBuffer struct{}
+
+func (failingBuffer) Add(e *Event) error       { return errors.New("disk full") }
+func (failingBuffer) Drain() ([]*Event, error) { return nil, nil }
+func (failingBuffer) Len() int                 { return 0 }
+
+func TestFailureReason(t *testing.T) {
+	cases := map[string]error{
+		"seq_conflict": ErrSeqConflict,
+		"canceled":     context.Canceled,
+		"timeout":      context.DeadlineExceeded,
+		"sink_error":   errors.New("boom"),
+	}
+	for want, err := range cases {
+		if got := FailureReason(err); got != want {
+			t.Fatalf("FailureReason(%v) = %s, want %s", err, got, want)
+		}
 	}
 }

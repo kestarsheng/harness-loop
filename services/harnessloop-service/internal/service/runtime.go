@@ -190,6 +190,10 @@ func (r *Runtime) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 	taskSpan := r.Tracer.StartTask(ctx, in.TenantID, in.ProjectID, in.TaskID)
 	defer taskSpan.End()
 
+	// 把发布失败计数接到指标面：Runtime 是生产装配里唯一同时握有 publisher 与
+	// *metrics.Harness 的位置，挂一次就对所有 emit 路径（含 bridge/emitter）生效。
+	attachEventObserver(r.Events, r.Metrics)
+
 	task, err := r.Tasks.Get(ctx, in.TenantID, in.TaskID)
 	if err != nil {
 		return nil, err
@@ -953,7 +957,9 @@ func (r *Runtime) publishTerminal(ctx context.Context, tenantID, projectID, task
 		typ = event.TaskAborted
 		severity = event.SeverityWarn
 	}
-	_ = r.Events.Publish(ctx, &event.Event{
+	// 终态事件是「任务到底结束了没有」的唯一证据，失败必须可见：发布器会把它
+	// 放进缓冲队列重投，这里负责把失败写进日志与指标。
+	if err := r.Events.Publish(ctx, &event.Event{
 		EventID:       fmt.Sprintf("%s-%s", taskID, reason),
 		EventType:     typ,
 		SchemaVersion: event.CurrentSchemaVersion,
@@ -963,7 +969,9 @@ func (r *Runtime) publishTerminal(ctx context.Context, tenantID, projectID, task
 		TenantID:      tenantID,
 		ProjectID:     projectID,
 		Payload:       terminalPayload(reason, failed),
-	})
+	}); err != nil {
+		reportEmitFailure(taskID, typ, err)
+	}
 }
 
 // terminalPayload keeps the historical {"terminal_reason":...} shape and adds
@@ -986,7 +994,7 @@ func (r *Runtime) publishError(ctx context.Context, in RunInput, stage fsm.Stage
 		return
 	}
 	payload := []byte(fmt.Sprintf(`{"category":%q,"reason":%q}`, category, reason))
-	_ = r.Events.Publish(ctx, &event.Event{
+	if err := r.Events.Publish(ctx, &event.Event{
 		EventID:       fmt.Sprintf("%s-%s-error-%d", in.TaskID, stage, attempt.AttemptNo),
 		EventType:     event.Error,
 		SchemaVersion: event.CurrentSchemaVersion,
@@ -998,7 +1006,9 @@ func (r *Runtime) publishError(ctx context.Context, in RunInput, stage fsm.Stage
 		TenantID:      in.TenantID,
 		ProjectID:     in.ProjectID,
 		Payload:       payload,
-	})
+	}); err != nil {
+		reportEmitFailure(in.TaskID, event.Error, err)
+	}
 }
 
 func (r *Runtime) compactionLimits() compaction.DegradeLimits {
@@ -1087,7 +1097,7 @@ func (r *Runtime) publishCompaction(ctx context.Context, in RunInput, stage fsm.
 	if err != nil {
 		return
 	}
-	_ = r.Events.Publish(ctx, &event.Event{
+	if err := r.Events.Publish(ctx, &event.Event{
 		EventID:       fmt.Sprintf("%s-%s-%d", in.TaskID, eventType, time.Now().UnixNano()),
 		EventType:     eventType,
 		SchemaVersion: event.CurrentSchemaVersion,
@@ -1099,7 +1109,9 @@ func (r *Runtime) publishCompaction(ctx context.Context, in RunInput, stage fsm.
 		TenantID:      in.TenantID,
 		ProjectID:     in.ProjectID,
 		Payload:       raw,
-	})
+	}); err != nil {
+		reportEmitFailure(in.TaskID, eventType, err)
+	}
 }
 
 func (r *Runtime) globalMemoryPath() string {

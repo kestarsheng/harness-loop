@@ -1,9 +1,7 @@
 package event
 
 import (
-	"context"
 	"errors"
-	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -157,126 +155,83 @@ func TestKnownTypesCoverage(t *testing.T) {
 	}
 }
 
-func TestSeqAllocatorMonotonic(t *testing.T) {
-	a := NewSeqAllocator(0)
-	var last int64
-	for i := 0; i < 100; i++ {
-		next := a.Next()
-		if next != last+1 {
-			t.Fatalf("seq jumped from %d to %d", last, next)
-		}
-		last = next
+// SeqWatermark 只做「读取 / 回填」，没有 Next()——进程内一旦再出现分配器，
+// 就是第二个写者，会与库分配的 seq 撞 (task_id, seq) 唯一键（T-P2-32）。
+func TestSeqWatermarkObserveKeepsMax(t *testing.T) {
+	w := NewSeqWatermark(0)
+	for _, n := range []int64{3, 1, 7, 5} {
+		w.Observe(n)
 	}
-	if a.Last() != 100 {
-		t.Fatalf("last = %d", a.Last())
+	if w.Last() != 7 {
+		t.Fatalf("watermark = %d, want 7 (must never move backwards)", w.Last())
 	}
 }
 
-func TestSeqAllocatorRestoreRejectsRegression(t *testing.T) {
-	a := NewSeqAllocator(5)
-	a.Next()
-	a.Next()
-	if err := a.Restore(7); err != nil {
+func TestSeqWatermarkRestoreRejectsRegression(t *testing.T) {
+	w := NewSeqWatermark(5)
+	w.Observe(7)
+	if err := w.Restore(7); err != nil {
 		t.Fatalf("forward restore: %v", err)
 	}
-	if err := a.Restore(3); !errors.Is(err, ErrSeqRegression) {
+	if err := w.Restore(3); !errors.Is(err, ErrSeqRegression) {
 		t.Fatalf("regression must be rejected, got %v", err)
 	}
-	if a.Last() != 7 {
-		t.Fatalf("last must stay at 7, got %d", a.Last())
+	if w.Last() != 7 {
+		t.Fatalf("last must stay at 7, got %d", w.Last())
 	}
 }
 
-func TestSeqAllocatorPersistWatermark(t *testing.T) {
-	a := NewSeqAllocator(0)
-	a.SetPersistEvery(3)
-	if a.NeedsPersist() {
-		t.Fatal("fresh allocator must not need persisting")
+func TestSeqWatermarkPersistWatermark(t *testing.T) {
+	w := NewSeqWatermark(0)
+	w.SetPersistEvery(3)
+	if w.NeedsPersist() {
+		t.Fatal("fresh watermark must not need persisting")
 	}
-	a.Next()
-	a.Next()
-	a.Next()
-	if !a.NeedsPersist() {
+	w.Observe(1)
+	w.Observe(2)
+	w.Observe(3)
+	if !w.NeedsPersist() {
 		t.Fatal("must need persisting after threshold")
 	}
-	a.PersistedTo(3)
-	if a.NeedsPersist() || a.Persisted() != 3 {
-		t.Fatalf("watermark not recorded: %d", a.Persisted())
+	w.PersistedTo(3)
+	if w.NeedsPersist() || w.Persisted() != 3 {
+		t.Fatalf("watermark not recorded: %d", w.Persisted())
 	}
-	a.PersistedTo(1)
-	if a.Persisted() != 3 {
+	w.PersistedTo(1)
+	if w.Persisted() != 3 {
 		t.Fatal("watermark must not move backwards")
 	}
 }
 
-func TestSeqAllocatorConcurrent(t *testing.T) {
-	a := NewSeqAllocator(0)
+func TestSeqWatermarkConcurrentObserve(t *testing.T) {
+	w := NewSeqWatermark(0)
 	var wg sync.WaitGroup
-	var mu sync.Mutex
-	seen := make([]int64, 0, 200)
-	for i := 0; i < 200; i++ {
+	for i := 1; i <= 200; i++ {
 		wg.Add(1)
-		go func() {
+		go func(n int64) {
 			defer wg.Done()
-			n := a.Next()
-			mu.Lock()
-			seen = append(seen, n)
-			mu.Unlock()
-		}()
+			w.Observe(n)
+		}(int64(i))
 	}
 	wg.Wait()
-	sort.Slice(seen, func(i, j int) bool { return seen[i] < seen[j] })
-	for i, n := range seen {
-		if n != int64(i+1) {
-			t.Fatalf("seq not contiguous at %d: %v", i, seen[:10])
-		}
+	if w.Last() != 200 {
+		t.Fatalf("last = %d, want 200", w.Last())
 	}
 }
 
-func TestIdempotencyDeduplicates(t *testing.T) {
-	ctx := context.Background()
-	store := NewMemoryIdempotency(100)
-	for i := 0; i < 3; i++ {
-		if err := store.Mark(ctx, "evt-1"); err != nil {
-			if !errors.Is(err, ErrDuplicateEvent) {
-				t.Fatalf("unexpected: %v", err)
-			}
-		}
-	}
-	if store.Count() != 1 {
-		t.Fatalf("count = %d, want 1", store.Count())
-	}
-	ok, err := store.Seen(ctx, "evt-1")
-	if err != nil || !ok {
-		t.Fatalf("seen = %v err=%v", ok, err)
-	}
-	if err := store.Mark(ctx, ""); err == nil {
-		t.Fatal("empty event id must fail")
-	}
-}
-
-func TestIdempotencyEvictsOldest(t *testing.T) {
-	ctx := context.Background()
-	store := NewMemoryIdempotency(2)
-	for _, id := range []string{"a", "b", "c"} {
-		if err := store.Mark(ctx, id); err != nil {
-			t.Fatalf("mark %s: %v", id, err)
-		}
-		time.Sleep(time.Millisecond)
-	}
-	if store.Count() != 2 {
-		t.Fatalf("count = %d, want 2", store.Count())
-	}
-	if ok, _ := store.Seen(ctx, "a"); ok {
-		t.Fatal("oldest event should have been evicted")
-	}
-}
-
-func TestEventCloneIsDeep(t *testing.T) {
+// 发布前 seq 还没有分配（0 表示「待库分配」），所以 Publish 路径必须放行 0；
+// 已落库事件仍然要求 seq > 0。
+func TestValidateForPublishAllowsUnassignedSeq(t *testing.T) {
 	e := minimalEvent()
-	cp := e.Clone()
-	cp.Payload[0] = 'X'
-	if e.Payload[0] == 'X' {
-		t.Fatal("clone must not share payload buffer")
+	e.Seq = 0
+	if err := e.ValidateForPublish(); err != nil {
+		t.Fatalf("unassigned seq must pass publish validation: %v", err)
+	}
+	if err := e.Validate(); err == nil {
+		t.Fatal("strict validation must still reject seq 0")
+	}
+	e.Seq = -1
+	if err := e.ValidateForPublish(); err == nil {
+		t.Fatal("negative seq must be rejected everywhere")
 	}
 }

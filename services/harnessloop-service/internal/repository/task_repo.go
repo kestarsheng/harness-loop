@@ -63,6 +63,10 @@ type TaskRun struct {
 	UpdatedAt      time.Time
 }
 
+// EventInsert 是状态转移时随事务一起写入的事件。
+//
+// Seq 已不再由调用方决定（T-P2-32）：它只作为兼容字段保留，写入时一律由库在
+// 语句内按 task 取 MAX(seq)+1 分配，避免状态转移与普通事件成为两个写者。
 type EventInsert struct {
 	EventID       string
 	Seq           int64
@@ -303,21 +307,24 @@ func insertEvent(ctx context.Context, tx pgx.Tx, tenantID, taskID string, e Even
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, tenantID); err != nil {
 		return fmt.Errorf("task_repo: lock tenant %s for event cursor: %w", tenantID, err)
 	}
-	_, err := tx.Exec(ctx, `
-		INSERT INTO hlp_event.events
-			(event_id, task_id, tenant_id, project_id, seq, event_type, schema_version, stage, attempt, severity, ts, payload, global_seq)
-		SELECT $1, $2, $3, t.project_id,
-		       CASE WHEN $4 > 0 THEN $4
-		            ELSE (SELECT COALESCE(MAX(e2.seq), 0) + 1 FROM hlp_event.events e2 WHERE e2.task_id = $2 AND e2.tenant_id = $3)
-		       END,
-		       $5, $6, NULLIF($7, ''), NULLIF($8, 0), $9, now(), $10,
-		       COALESCE((SELECT MAX(g.global_seq) FROM hlp_event.events g WHERE g.tenant_id = $3), 0) + 1
-		FROM hlp_task.task_runs t WHERE t.task_id = $2 AND t.tenant_id = $3`,
-		e.EventID, taskID, tenantID, e.Seq, e.EventType, schema, string(e.Stage), e.Attempt, severity, payload)
-	if err != nil {
-		return fmt.Errorf("task_repo: insert event %s: %w", e.EventID, err)
-	}
-	return nil
+	// seq 的分配权同样归库（T-P2-32）：这里不再采信调用方传进来的 e.Seq，
+	// 一律在语句内按 task 取 MAX(seq)+1，避免出现第二个写者。
+	return withSeqRetry(ctx, tx, fmt.Sprintf("task_id=%s event_id=%s", taskID, e.EventID), func(ctx context.Context, sp pgx.Tx) error {
+		_, err := sp.Exec(ctx, `
+			INSERT INTO hlp_event.events
+				(event_id, task_id, tenant_id, project_id, seq, event_type, schema_version, stage, attempt, severity, ts, payload, global_seq)
+			SELECT $1, $2, $3, t.project_id,
+			       COALESCE((SELECT MAX(e2.seq) FROM hlp_event.events e2 WHERE e2.task_id = $2 AND e2.tenant_id = $3), 0) + 1,
+			       $4, $5, NULLIF($6, ''), NULLIF($7, 0), $8, now(), $9,
+			       COALESCE((SELECT MAX(g.global_seq) FROM hlp_event.events g WHERE g.tenant_id = $3), 0) + 1
+			FROM hlp_task.task_runs t WHERE t.task_id = $2 AND t.tenant_id = $3
+			ON CONFLICT (event_id) DO NOTHING`,
+			e.EventID, taskID, tenantID, e.EventType, schema, string(e.Stage), e.Attempt, severity, payload)
+		if err != nil {
+			return fmt.Errorf("task_repo: insert event %s: %w", e.EventID, err)
+		}
+		return nil
+	})
 }
 
 func (r *TaskRepo) UpdateStatus(ctx context.Context, tenantID, taskID string, status TaskStatus, terminalReason string, expectedVersion int64) (*TaskRun, error) {

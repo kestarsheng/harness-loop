@@ -34,6 +34,10 @@ const (
 	MetricSandboxEscapeTotal      = "hlp_sandbox_escape_attempts_total"
 	MetricExecDeniedTotal         = "hlp_exec_denied_total"
 	MetricApprovalPending         = "hlp_approval_pending"
+	// T-P2-32：事件投递失败与 seq 撞键的可见面。过去 emit 错误被 `_ =` 吞掉，
+	// 丢的正是 tool.denied / task.completed，事后只能靠「事件缺失」反推。
+	MetricEventPublishFailedTotal = "hlp_event_publish_failed_total"
+	MetricEventSeqConflictTotal   = "hlp_event_seq_conflict_total"
 )
 
 // DefaultBuckets are reused across duration/latency histograms.
@@ -144,5 +148,16 @@ func (h *Harness) preRegister() {
 	}
 	for _, priority := range []string{"low", "normal", "high"} {
 		h.Reg.Gauge(MetricApprovalPending, "Pending approvals.", map[string]string{"priority": priority})
+	}
+	for _, typ := range []string{
+		"task.completed", "task.failed", "task.aborted", "tool.denied", "approval.requested",
+		"security.violation", "stage.transition", "error", "subtask.token_usage",
+	} {
+		for _, reason := range []string{"sink_error", "seq_conflict", "timeout", "canceled"} {
+			h.Reg.Counter(MetricEventPublishFailedTotal, "Event publish failures after buffering.", map[string]string{"event_type": typ, "reason": reason})
+		}
+	}
+	for _, source := range []string{"event_repo", "task_transfer"} {
+		h.Reg.Counter(MetricEventSeqConflictTotal, "Event seq allocation conflicts.", map[string]string{"source": source})
 	}
 }
