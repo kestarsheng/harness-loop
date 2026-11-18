@@ -64,6 +64,30 @@ type StreamEvent struct {
 // StreamCallback is called for each streaming event
 type StreamCallback func(event StreamEvent)
 
+// Stage-loop context variables. The harness loop (harnessloop-service) owns the
+// stage policy matrix and publishes the tool subset a stage may use; the engine
+// only consumes it. Keeping the policy in the caller means the engine never
+// hard-codes which stage allows which tool (DFX-M-05 可配置化).
+const (
+	// StageToolListVar carries the comma-separated MCP tool names the current
+	// stage is allowed to call.
+	StageToolListVar = "__stage_tools__"
+	// StageRequiresToolCallVar is "true" when a stage may not finish without at
+	// least one real tool call.
+	StageRequiresToolCallVar = "__requires_tool_call__"
+	// stageFinishTool is the tool the model must call to close a stage.
+	stageFinishTool = "stage_finish"
+	// stageNudgeLimit caps how many times the loop re-prompts a model that tries
+	// to finish a stage without calling any tool. Bounded so a stubborn model
+	// cannot burn the whole step budget.
+	stageNudgeLimit = 2
+)
+
+// ErrStageToolCallRequired reports that a stage finished without the mandatory
+// tool call. It is returned instead of accepting the finish, so a "completed"
+// stage always has at least one real tool decision behind it.
+var ErrStageToolCallRequired = errors.New("stage requires at least one tool call before finish")
+
 // LLMStreamingClient extends LLMClient with streaming capability
 type LLMStreamingClient interface {
 	LLMClient
@@ -158,15 +182,32 @@ func (e *Engine) executeLoopStream(ctx context.Context, execCtx *ExecutionContex
 	// Check if the LLM client supports streaming
 	_, hasStreaming := e.llmClient.(LLMStreamingClient)
 
+	// Stage mode bookkeeping: how many tools the loop really executed (handoff
+	// and stage_finish do not count) and how often we already nudged the model
+	// to use one.
+	toolCallsMade := 0
+	nudges := 0
+
 	for step := 0; step < e.config.MaxSteps; step++ {
 		stepStart := time.Now()
 		execCtx.StepCount = step + 1
 
+		// In stage mode the running agent is narrowed to the tools the current
+		// stage may use and its handoffs are removed: one stage is one agent's
+		// job, and a handoff would emit no tool_call chunk for the gate.
+		stepAgent := currentAgent
+		if execCtx.StageMode {
+			stepAgent = stageAgentOverlay(currentAgent, execCtx)
+		}
+
 		// Build messages for this agent
-		messages := e.buildAgentMessages(ctx, currentAgent, execCtx)
+		messages := e.buildAgentMessages(ctx, stepAgent, execCtx)
+		if execCtx.StageMode {
+			messages = applyStageDirective(messages, execCtx)
+		}
 
 		// Build tools for this agent
-		tools, err := e.buildAgentTools(ctx, currentAgent)
+		tools, err := e.buildAgentTools(ctx, stepAgent)
 		if err == nil && execCtx.StageMode {
 			tools = appendStageFinishTool(ctx, e.tools, tools)
 		}
@@ -195,8 +236,10 @@ func (e *Engine) executeLoopStream(ctx context.Context, execCtx *ExecutionContex
 		var llmResp *LLMResponse
 
 		if hasStreaming {
-			// Use real streaming LLM call
-			llmResp, err = e.callLLMStreaming(ctx, llmReq, callback, currentAgent.ID, currentAgent.Name, step+1)
+			// Use real streaming LLM call. Stage mode always aggregates streamed
+			// tool_call deltas: a stage without tool_calls has nothing to gate,
+			// which is exactly the gap this loop closes.
+			llmResp, err = e.callLLMStreamingMode(ctx, llmReq, callback, currentAgent.ID, currentAgent.Name, step+1, execCtx.StageMode)
 		} else {
 			// Fallback to non-streaming
 			llmResp, err = e.llmClient.Chat(ctx, llmReq)
@@ -218,13 +261,31 @@ func (e *Engine) executeLoopStream(ctx context.Context, execCtx *ExecutionContex
 			execCtx.AddMessage("assistant", llmResp.Content)
 			if execCtx.StageMode {
 				if args, ok := ParseStageFinishProtocol(llmResp.Content); ok {
+					// A stage that promised a tool call must actually make one:
+					// the harness policy gate only sees real tool_call chunks.
+					// Re-prompt a bounded number of times, then fail loudly
+					// instead of accepting a finish with no evidence behind it.
+					if stageRequiresToolCall(execCtx) && toolCallsMade == 0 {
+						if nudges < stageNudgeLimit {
+							nudges++
+							execCtx.AddMessage("user", stageToolNudgeText(execCtx))
+							continue
+						}
+						execCtx.MarkError(ErrStageToolCallRequired.Error())
+						callback(StreamEvent{
+							Type:    EventError,
+							AgentID: currentAgent.ID,
+							Error:   ErrStageToolCallRequired.Error(),
+						})
+						return e.buildResult(execCtx, llmResp.Content), ErrStageToolCallRequired
+					}
 					callback(StreamEvent{
 						Type: EventToolStart, AgentID: currentAgent.ID, AgentName: currentAgent.Name,
-						ToolName: "stage_finish", ToolArgs: args,
+						ToolName: stageFinishTool, ToolArgs: args,
 					})
 					callback(StreamEvent{
 						Type: EventToolResult, AgentID: currentAgent.ID, AgentName: currentAgent.Name,
-						ToolName: "stage_finish", ToolResult: `{"status":"finished"}`,
+						ToolName: stageFinishTool, ToolResult: `{"status":"finished"}`,
 					})
 					return e.buildResult(execCtx, llmResp.Content), nil
 				}
@@ -256,6 +317,40 @@ func (e *Engine) executeLoopStream(ctx context.Context, execCtx *ExecutionContex
 
 		// Process tool calls
 		for _, tc := range llmResp.ToolCalls {
+			// stage_finish closes the stage: emit the call so the harness sees
+			// the finish payload on the stream, pair the result in history, and
+			// return. Without this branch a streamed stage_finish would be
+			// executed as a tool and the loop would run to the step limit.
+			if execCtx.StageMode && tc.Name == stageFinishTool {
+				callback(StreamEvent{
+					Type: EventToolStart, AgentID: currentAgent.ID, AgentName: currentAgent.Name,
+					ToolName: stageFinishTool, ToolArgs: tc.Arguments, Step: step + 1,
+				})
+				if !validStageFinishArgs(tc.Arguments) {
+					// Malformed payload: tell the model instead of handing the
+					// harness an unparseable finish (which fails the attempt).
+					msg := `stage_finish 参数不合法：必须包含 attempt_id、stage(a-d)、summary 三个非空字段`
+					callback(StreamEvent{
+						Type: EventToolResult, AgentID: currentAgent.ID, AgentName: currentAgent.Name,
+						ToolName: stageFinishTool, ToolResult: msg, Step: step + 1,
+					})
+					execCtx.AddToolMessage(tc.Name, tc.ID, msg)
+					tc.Status = "error"
+					tc.Result = msg
+					execCtx.RecordToolCall(tc)
+					continue
+				}
+				callback(StreamEvent{
+					Type: EventToolResult, AgentID: currentAgent.ID, AgentName: currentAgent.Name,
+					ToolName: stageFinishTool, ToolResult: `{"status":"finished"}`, Step: step + 1,
+				})
+				execCtx.AddToolMessage(tc.Name, tc.ID, `{"status":"finished"}`)
+				tc.Status = "completed"
+				tc.Result = `{"status":"finished"}`
+				execCtx.RecordToolCall(tc)
+				return e.buildResult(execCtx, llmResp.Content), nil
+			}
+
 			// Check if it's a handoff
 			if IsHandoffTool(tc.Name) {
 				targetID := ParseHandoffTarget(tc.Name)
@@ -456,6 +551,7 @@ func (e *Engine) executeLoopStream(ctx context.Context, execCtx *ExecutionContex
 			tc.Status = status
 			tc.Result = result
 			execCtx.RecordToolCall(tc)
+			toolCallsMade++
 
 			// Add to message history
 			execCtx.AddToolMessage(tc.Name, tc.ID, result)
@@ -491,6 +587,13 @@ func (e *Engine) executeLoopStream(ctx context.Context, execCtx *ExecutionContex
 // callLLMStreaming calls the LLM with streaming and forwards tokens via callback.
 // It collects the full response and returns an LLMResponse just like the non-streaming version.
 func (e *Engine) callLLMStreaming(ctx context.Context, req *LLMRequest, callback StreamCallback, agentID, agentName string, step int) (*LLMResponse, error) {
+	return e.callLLMStreamingMode(ctx, req, callback, agentID, agentName, step, false)
+}
+
+// callLLMStreamingMode is callLLMStreaming with an explicit override for
+// tool-call aggregation. Stage mode forces it on so a stage can never silently
+// lose the model's tool_call deltas when AGENT_STREAM_TOOL_CALLS is unset.
+func (e *Engine) callLLMStreamingMode(ctx context.Context, req *LLMRequest, callback StreamCallback, agentID, agentName string, step int, forceToolCalls bool) (*LLMResponse, error) {
 	streamingClient, ok := e.llmClient.(LLMStreamingClient)
 	if !ok {
 		// Fallback to non-streaming
@@ -516,7 +619,7 @@ func (e *Engine) callLLMStreaming(ctx context.Context, req *LLMRequest, callback
 	var totalTokens int
 	var usage *TokenUsage
 	var toolAcc *streamToolCallAccumulator
-	if e.config.StreamToolCalls {
+	if e.config.StreamToolCalls || forceToolCalls {
 		toolAcc = newStreamToolCallAccumulator()
 	}
 
@@ -669,4 +772,202 @@ func (a *streamToolCallAccumulator) result() ([]ToolCall, error) {
 		})
 	}
 	return calls, nil
+}
+
+// Stage-loop helpers. The harness loop publishes the stage policy as context
+// variables; these helpers turn that into (a) the tool subset offered to the
+// model and (b) prompt text that makes the tool loop, not the text protocol,
+// the primary way a stage finishes.
+
+// stageToolLabel maps an MCP tool name onto the name the harness policy and the
+// stage matrix use, so the model sees the same vocabulary the gate enforces.
+func stageToolLabel(name string) string {
+	switch name {
+	case "file_read":
+		return "read_file"
+	case "file_write":
+		return "write_file"
+	case "code_execute":
+		return "run_command"
+	}
+	return name
+}
+
+// stageAgentOverlay returns a per-step copy of the agent narrowed to the tools
+// the current stage may use. Handoffs are dropped: one stage is one agent's job,
+// and a handoff emits no tool_call chunk for the policy gate to decide on.
+func stageAgentOverlay(base *Agent, execCtx *ExecutionContext) *Agent {
+	if base == nil {
+		return base
+	}
+	overlay := *base
+	overlay.Handoffs = nil
+
+	allowed := stageToolNames(execCtx)
+	if len(allowed) == 0 {
+		return &overlay
+	}
+
+	seen := make(map[string]bool, len(base.Tools)+len(allowed))
+	merged := make([]string, 0, len(base.Tools)+len(allowed))
+	for _, name := range base.Tools {
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		merged = append(merged, name)
+	}
+	for _, name := range allowed {
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		merged = append(merged, name)
+	}
+	overlay.Tools = merged
+	return &overlay
+}
+
+// stageToolNames decodes the stage tool subset published by the harness loop.
+func stageToolNames(execCtx *ExecutionContext) []string {
+	raw, ok := execCtx.Variables[StageToolListVar]
+	if !ok {
+		return nil
+	}
+	list, ok := raw.(string)
+	if !ok || strings.TrimSpace(list) == "" {
+		return nil
+	}
+	parts := strings.Split(list, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+// stageRequiresToolCall reports whether this stage may not finish without a
+// real tool call.
+func stageRequiresToolCall(execCtx *ExecutionContext) bool {
+	raw, ok := execCtx.Variables[StageRequiresToolCallVar]
+	if !ok {
+		return false
+	}
+	switch v := raw.(type) {
+	case bool:
+		return v
+	case string:
+		return strings.EqualFold(strings.TrimSpace(v), "true")
+	}
+	return false
+}
+
+// stageLetter returns the current stage letter (a-d), or "" when unknown.
+func stageLetter(execCtx *ExecutionContext) string {
+	raw, ok := execCtx.Variables["__stage__"]
+	if !ok {
+		return ""
+	}
+	if s, ok := raw.(string); ok {
+		return strings.TrimSpace(s)
+	}
+	return ""
+}
+
+// stageDirectiveText is appended to the system prompt. System-level guidance is
+// what the model actually follows (a user message alone is often ignored).
+func stageDirectiveText(execCtx *ExecutionContext) string {
+	var sb strings.Builder
+	sb.WriteString("STAGE TOOL LOOP: this stage is only finished through the stage_finish tool call after you have used at least one tool.")
+	if names := stageToolNames(execCtx); len(names) > 0 {
+		labels := make([]string, 0, len(names))
+		for _, name := range names {
+			labels = append(labels, fmt.Sprintf("%s (%s)", stageToolLabel(name), name))
+		}
+		sb.WriteString("\nTools available in this stage: " + strings.Join(labels, ", ") + ".")
+		sb.WriteString("\nCall them with the arguments their schema declares before drawing any conclusion; do not describe what you would do instead of doing it.")
+	} else {
+		sb.WriteString("\nNo workspace tool is granted for this stage: answer from the stage message and finish with stage_finish.")
+	}
+	if stageRequiresToolCall(execCtx) {
+		sb.WriteString("\nThis stage must contain at least one real tool call; a finish without one is rejected and retried.")
+	}
+	sb.WriteString("\nIf the stage message asks for a machine-readable output (e.g. the b-stage SubtaskPlan JSON), that output must appear verbatim in the assistant content: stage_finish only closes the stage, it does not carry the deliverable.")
+	if stage := stageLetter(execCtx); stage != "" {
+		sb.WriteString("\nCurrent stage: " + stage + ".")
+	}
+	return sb.String()
+}
+
+// applyStageDirective rewrites the stage-mode guidance in the outgoing message
+// list: the directive is appended to the system prompt, and the trailing
+// text-only reminder built by buildAgentMessages is replaced with a tool-first
+// one. The replace (not append) keeps a single, unambiguous instruction last.
+func applyStageDirective(messages []Message, execCtx *ExecutionContext) []Message {
+	if len(messages) == 0 {
+		return messages
+	}
+	for i := range messages {
+		if messages[i].Role == "system" {
+			messages[i].Content += "\n\n" + stageDirectiveText(execCtx)
+			break
+		}
+	}
+	last := len(messages) - 1
+	if messages[last].Role == "user" && strings.Contains(messages[last].Content, StageFinishMarker) {
+		messages[last] = Message{Role: "user", Content: stageReminderText(execCtx)}
+	}
+	return messages
+}
+
+// stageReminderText replaces the legacy "output one line only" reminder, which
+// pushed the model away from tool calls and straight into the text protocol.
+func stageReminderText(execCtx *ExecutionContext) string {
+	var sb strings.Builder
+	sb.WriteString("结束本阶段前必须真实调用工具取得证据")
+	if names := stageToolNames(execCtx); len(names) > 0 {
+		labels := make([]string, 0, len(names))
+		for _, name := range names {
+			labels = append(labels, fmt.Sprintf("%s(%s)", stageToolLabel(name), name))
+		}
+		sb.WriteString("（本阶段可用：" + strings.Join(labels, "、") + "）")
+	}
+	sb.WriteString("，然后调用 stage_finish 工具结束：\n")
+	sb.WriteString(`{"attempt_id":"<stage message 中的 attempt_id>","stage":"<a|b|c|d>","summary":"<一句话概括>"}`)
+	sb.WriteString("\n若本阶段要求正文产出（例如 b 阶段的 SubtaskPlan JSON），必须先把该产出原样写在正文里，" +
+		"再调用 stage_finish；summary 不能代替正文产出。")
+	sb.WriteString("只有在确实无法发出工具调用时，才允许退回一行 " + StageFinishMarker + " 加同样的 JSON；" +
+		"只输出自然语言、不带任何结束信号会被视为未完成并重试。")
+	return sb.String()
+}
+
+// stageToolNudgeText is injected as a user turn when the model tries to finish
+// a stage without having called any tool.
+func stageToolNudgeText(execCtx *ExecutionContext) string {
+	msg := "你还没有调用任何工具。本阶段必须先真实调用工具"
+	if names := stageToolNames(execCtx); len(names) > 0 {
+		labels := make([]string, 0, len(names))
+		for _, name := range names {
+			labels = append(labels, fmt.Sprintf("%s(%s)", stageToolLabel(name), name))
+		}
+		msg += "（可用：" + strings.Join(labels, "、") + "）"
+	}
+	return msg + "，再调用 stage_finish 结束。"
+}
+
+// validStageFinishArgs checks a streamed stage_finish payload before the engine
+// accepts it, so a typo surfaces as a tool error the model can fix instead of an
+// unparseable finish that fails the whole attempt.
+func validStageFinishArgs(args json.RawMessage) bool {
+	var payload stageFinishProtocol
+	if err := json.Unmarshal(args, &payload); err != nil {
+		return false
+	}
+	payload.Stage = strings.ToLower(strings.TrimSpace(payload.Stage))
+	if strings.TrimSpace(payload.AttemptID) == "" || strings.TrimSpace(payload.Summary) == "" {
+		return false
+	}
+	return len(payload.Stage) == 1 && strings.Contains("abcde", payload.Stage)
 }
