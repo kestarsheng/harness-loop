@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"agent-platform/pkg/harnessloop/event"
 	"agent-platform/pkg/harnessloop/orchestrator"
 	"agent-platform/pkg/harnessloop/subtask"
 	"agent-platform/services/harnessloop-service/internal/repository"
@@ -23,6 +24,7 @@ type SubtaskResult struct {
 	Artifacts      []subtask.ArtifactRef
 	AcceptanceID   string
 	ConsumedTokens int64
+	TokenSource    string
 	ConsumedCost   float64
 	ModelID        string
 	DurationMS     int64
@@ -316,6 +318,19 @@ func (b *OrchestratorBridge) DispatchCStage(ctx context.Context, ec Orchestrator
 		}
 		if err := state.scheduler.MarkAccepted(ctx, st.SubtaskID, acceptanceID); err != nil {
 			fmt.Printf("[orchestrator] subtask %s accepted in memory but status write-back failed: %v\n", st.SubtaskID, err)
+		} else if res != nil {
+			// Record how the consumption figure was obtained next to the usage
+			// itself, so an estimate is never mistaken for billed tokens.
+			_ = b.taskEmitter(ec).EmitType(ctx, orchestrator.EmitContext{
+				SubtaskID: st.SubtaskID, DagID: st.DagID, DagNodeID: st.DagNodeID,
+				ParallelSetID: st.ParallelSetID,
+			}, event.SubtaskTokenUsage, orchestrator.SeverityInfo, map[string]any{
+				"subtask_id":      st.SubtaskID,
+				"consumed_tokens": res.ConsumedTokens,
+				"token_source":    res.TokenSource,
+				"model_id":        res.ModelID,
+				"duration_ms":     res.DurationMS,
+			})
 		}
 	}
 	return running, nil
@@ -332,6 +347,9 @@ func applySubtaskResult(st *subtask.Subtask, res *SubtaskResult) {
 	}
 	if res.ConsumedTokens > 0 {
 		st.ConsumedTokens = res.ConsumedTokens
+	}
+	if res.TokenSource != "" {
+		st.TokenSource = res.TokenSource
 	}
 	if res.ConsumedCost > 0 {
 		st.ConsumedCost = res.ConsumedCost
@@ -372,6 +390,7 @@ func (s *subtaskRepoStatusSink) StatusChanged(ctx context.Context, st *subtask.S
 		ToStatus:       string(st.Status),
 		AttemptNo:      st.AttemptNo,
 		ConsumedTokens: st.ConsumedTokens,
+		TokenSource:    st.TokenSource,
 		ConsumedCost:   st.ConsumedCost,
 		ArtifactRefs:   artifacts,
 		AcceptanceID:   st.AcceptanceID,

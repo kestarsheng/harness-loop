@@ -47,7 +47,10 @@ func normalizeBaseURL(base string) string {
 
 // buildChatParams converts a ChatRequest into SDK params. System prompt, model
 // override, max-token fallback and tool definitions follow the legacy client.
-func buildChatParams(cfg Config, req *ChatRequest) openai.ChatCompletionNewParams {
+//
+// stream_options is only attached for streaming calls: the gateway rejects a
+// request that sets stream_options while stream=false.
+func buildChatParams(cfg Config, req *ChatRequest, streaming bool) openai.ChatCompletionNewParams {
 	effectiveModel := cfg.Model
 	if req.Model != "" {
 		effectiveModel = req.Model
@@ -64,6 +67,14 @@ func buildChatParams(cfg Config, req *ChatRequest) openai.ChatCompletionNewParam
 	params := openai.ChatCompletionNewParams{
 		Model:    effectiveModel,
 		Messages: messages,
+	}
+	if streaming {
+		// Ask for the trailing usage frame on streaming responses. Providers that
+		// ignore stream_options simply omit the frame; consumers then fall back to
+		// their estimate instead of inventing a real usage value.
+		params.StreamOptions = openai.ChatCompletionStreamOptionsParam{
+			IncludeUsage: param.NewOpt(true),
+		}
 	}
 
 	maxTokens := req.MaxTokens
@@ -182,7 +193,7 @@ func normalizeToolCall(tc ToolCall) ToolCall {
 
 // chatOnce performs one non-streaming chat call through the SDK.
 func chatOnce(ctx context.Context, sdk *openai.Client, cfg Config, req *ChatRequest, cost func(int) float64) (*ChatResponse, error) {
-	completion, err := sdk.Chat.Completions.New(ctx, buildChatParams(cfg, req))
+	completion, err := sdk.Chat.Completions.New(ctx, buildChatParams(cfg, req, false))
 	if err != nil {
 		return nil, classifyError(ctx, err)
 	}
@@ -217,11 +228,20 @@ func chatStream(ctx context.Context, sdk *openai.Client, cfg Config, req *ChatRe
 	go func() {
 		defer close(ch)
 
-		stream := sdk.Chat.Completions.NewStreaming(ctx, buildChatParams(cfg, req))
+		stream := sdk.Chat.Completions.NewStreaming(ctx, buildChatParams(cfg, req, true))
 		defer stream.Close()
 
 		for stream.Next() {
 			chunk := stream.Current()
+			// The usage frame has no choices, so read it before the empty-choices
+			// skip. Some providers omit it entirely.
+			if u := chunk.Usage; u.TotalTokens > 0 || u.PromptTokens > 0 || u.CompletionTokens > 0 {
+				ch <- ChatStreamChunk{Usage: &Usage{
+					PromptTokens:     int(u.PromptTokens),
+					CompletionTokens: int(u.CompletionTokens),
+					TotalTokens:      int(u.TotalTokens),
+				}}
+			}
 			if len(chunk.Choices) == 0 {
 				continue
 			}

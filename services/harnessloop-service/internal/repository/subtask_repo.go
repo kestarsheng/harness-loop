@@ -36,6 +36,7 @@ type SubtaskRow struct {
 	HandoffID          string
 	AllocTokens        int64
 	ConsumedTokens     int64
+	TokenSource        string
 	ConsumedCost       float64
 	CreatedAt          time.Time
 	UpdatedAt          time.Time
@@ -51,7 +52,7 @@ const subtaskColumns = `subtask_id, parent_task_id, tenant_id, project_id, dag_i
 	depth, index_in_parent, COALESCE(parallel_set_id,''), role, status, depends_on,
 	input_contract, output_contract, acceptance_criteria, COALESCE(acceptance_id,''),
 	failure_strategy, attempt_no, artifact_refs, COALESCE(handoff_id,''),
-	alloc_tokens, consumed_tokens, consumed_cost::float8, created_at, updated_at`
+	alloc_tokens, consumed_tokens, token_source, consumed_cost::float8, created_at, updated_at`
 
 func scanSubtask(s rowScanner) (*SubtaskRow, error) {
 	var (
@@ -63,7 +64,7 @@ func scanSubtask(s rowScanner) (*SubtaskRow, error) {
 		&row.Role, &row.Status, &depends, &row.InputContract, &row.OutputContract,
 		&row.AcceptanceCriteria, &row.AcceptanceID, &row.FailureStrategy, &row.AttemptNo,
 		&row.ArtifactRefs, &row.HandoffID, &row.AllocTokens, &row.ConsumedTokens,
-		&row.ConsumedCost, &row.CreatedAt, &row.UpdatedAt); err != nil {
+		&row.TokenSource, &row.ConsumedCost, &row.CreatedAt, &row.UpdatedAt); err != nil {
 		return nil, err
 	}
 	if len(depends) > 0 {
@@ -153,8 +154,8 @@ func (r *SubtaskRepo) InsertBatch(ctx context.Context, rows []*SubtaskRow) error
 				depth, index_in_parent, parallel_set_id, role, status, depends_on,
 				input_contract, output_contract, acceptance_criteria, acceptance_id,
 				failure_strategy, attempt_no, artifact_refs, handoff_id,
-				alloc_tokens, consumed_tokens, consumed_cost, created_at, updated_at)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)
+				alloc_tokens, consumed_tokens, token_source, consumed_cost, created_at, updated_at)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)
 			ON CONFLICT (parent_task_id, dag_id, dag_node_id) DO UPDATE SET
 				subtask_id = EXCLUDED.subtask_id,
 				status = EXCLUDED.status,
@@ -170,7 +171,7 @@ func (r *SubtaskRepo) InsertBatch(ctx context.Context, rows []*SubtaskRow) error
 			row.Depth, row.IndexInParent, row.ParallelSetID, row.Role, row.Status, dependsJSON,
 			input, output, acceptance, nullIfEmpty(row.AcceptanceID),
 			row.FailureStrategy, row.AttemptNo, artifacts, nullIfEmpty(row.HandoffID),
-			row.AllocTokens, row.ConsumedTokens, row.ConsumedCost, row.CreatedAt, row.UpdatedAt); err != nil {
+			row.AllocTokens, row.ConsumedTokens, tokenSource(row.TokenSource), row.ConsumedCost, row.CreatedAt, row.UpdatedAt); err != nil {
 			return fmt.Errorf("subtask_repo: insert %s: %w", row.SubtaskID, err)
 		}
 	}
@@ -202,6 +203,7 @@ type SubtaskExecution struct {
 	ToStatus       string
 	AttemptNo      int
 	ConsumedTokens int64
+	TokenSource    string
 	ConsumedCost   float64
 	ArtifactRefs   []byte
 	AcceptanceID   string
@@ -252,10 +254,11 @@ func (r *SubtaskRepo) UpdateExecution(ctx context.Context, ex SubtaskExecution) 
 			consumed_cost = $6,
 			artifact_refs = $7::jsonb,
 			acceptance_id = COALESCE($8, acceptance_id),
+			token_source = $9,
 			updated_at = now()
 		WHERE subtask_id = $1 AND status = $2`,
 		ex.SubtaskID, ex.FromStatus, ex.ToStatus, ex.AttemptNo,
-		ex.ConsumedTokens, ex.ConsumedCost, artifacts, nullIfEmpty(ex.AcceptanceID))
+		ex.ConsumedTokens, ex.ConsumedCost, artifacts, nullIfEmpty(ex.AcceptanceID), tokenSource(ex.TokenSource))
 	if err != nil {
 		return fmt.Errorf("subtask_repo: update %s: %w", ex.SubtaskID, err)
 	}
@@ -272,4 +275,14 @@ func (r *SubtaskRepo) UpdateExecution(ctx context.Context, ex SubtaskExecution) 
 		return nil
 	}
 	return fmt.Errorf("%w: %s is %q, expected %q", ErrSubtaskStatusConflict, ex.SubtaskID, current, ex.FromStatus)
+}
+
+// tokenSource normalizes the consumption provenance written to the row.
+// Anything other than an explicit "actual" is labelled "estimate" so a missing
+// or malformed label can never claim billed tokens.
+func tokenSource(s string) string {
+	if s == "actual" {
+		return "actual"
+	}
+	return "estimate"
 }

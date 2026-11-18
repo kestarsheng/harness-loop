@@ -382,13 +382,15 @@ func (s *AgentService) ExecuteStream(req *pb.ExecuteStreamRequest, stream pb.Age
 			}
 		}
 
-		// Add step info for tool events
-		if event.Step > 0 {
+		// Add step info for tool events and for any event carrying real token
+		// usage. Final events have Step 0 but hold the run's cumulative tokens.
+		if event.Step > 0 || event.Tokens > 0 {
 			chunk.Step = &pb.AgentExecutionRecord{
-				AgentId:   event.AgentID,
-				AgentName: event.AgentName,
-				Action:    event.ToolName,
-				Result:    event.ToolResult,
+				AgentId:    event.AgentID,
+				AgentName:  event.AgentName,
+				Action:     event.ToolName,
+				Result:     event.ToolResult,
+				TokensUsed: int32(event.Tokens),
 			}
 		}
 
@@ -937,6 +939,13 @@ func (a *llmAdapter) ChatStream(ctx context.Context, req *agent.LLMRequest) (<-c
 			if chunk.Done {
 				out <- agent.LLMStreamChunk{Done: true}
 				return
+			}
+			if chunk.Usage != nil {
+				out <- agent.LLMStreamChunk{Usage: &agent.TokenUsage{
+					PromptTokens:     chunk.Usage.PromptTokens,
+					CompletionTokens: chunk.Usage.CompletionTokens,
+					TotalTokens:      chunk.Usage.TotalTokens,
+				}}
 			}
 			if chunk.Content != "" {
 				out <- agent.LLMStreamChunk{Content: chunk.Content}
