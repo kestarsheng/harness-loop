@@ -1,0 +1,463 @@
+package devstack
+
+import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+)
+
+// fakeProber reports contract items as healthy on demand.
+type fakeProber struct {
+	mu      sync.Mutex
+	healthy map[string]bool
+	detail  string
+}
+
+func newFakeProber() *fakeProber {
+	return &fakeProber{healthy: map[string]bool{}, detail: "probe"}
+}
+
+func (p *fakeProber) set(name string, healthy bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.healthy[name] = healthy
+}
+
+func (p *fakeProber) Healthy(_ context.Context, item Item) (bool, string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.healthy[item.Name], p.detail
+}
+
+func (p *fakeProber) get(name string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.healthy[name]
+}
+
+// fakeRunner records launches and marks items healthy like a real service would.
+type fakeRunner struct {
+	mu        sync.Mutex
+	prober    *fakeProber
+	runs      []string
+	starts    []string
+	kills     []int
+	listeners map[int]int
+	portOf    map[string]int
+	failRun   map[string]error
+	failStart map[string]error
+	noHealth  map[string]bool
+	nextPID   int
+}
+
+func newFakeRunner(prober *fakeProber, contract *Contract) *fakeRunner {
+	r := &fakeRunner{
+		prober:    prober,
+		listeners: map[int]int{},
+		portOf:    map[string]int{},
+		failRun:   map[string]error{},
+		failStart: map[string]error{},
+		noHealth:  map[string]bool{},
+		nextPID:   1000,
+	}
+	for _, it := range contract.Items {
+		r.portOf[it.Name] = it.Port
+	}
+	return r
+}
+
+func (r *fakeRunner) Run(_ context.Context, spec LaunchSpec) error {
+	r.mu.Lock()
+	r.runs = append(r.runs, spec.Name)
+	err := r.failRun[spec.Name]
+	noHealth := r.noHealth[spec.Name]
+	r.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	if !noHealth {
+		r.prober.set(spec.Name, true)
+	}
+	return nil
+}
+
+func (r *fakeRunner) Start(_ context.Context, spec LaunchSpec) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if err := r.failStart[spec.Name]; err != nil {
+		return 0, err
+	}
+	r.starts = append(r.starts, spec.Name)
+	pid := r.nextPID
+	r.nextPID++
+	r.listeners[r.portOf[spec.Name]] = pid
+	if !r.noHealth[spec.Name] {
+		r.prober.set(spec.Name, true)
+	}
+	return pid, nil
+}
+
+func (r *fakeRunner) Kill(_ context.Context, pid int, _ time.Duration) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.kills = append(r.kills, pid)
+	return nil
+}
+
+func (r *fakeRunner) LookupListenerPID(port int) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if pid, ok := r.listeners[port]; ok {
+		return pid, nil
+	}
+	return 0, errors.New("not found")
+}
+
+func (r *fakeRunner) snapshot() (runs, starts []string, kills []int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.runs...), append([]string(nil), r.starts...), append([]int(nil), r.kills...)
+}
+
+func newTestManager(t *testing.T) (*Manager, *fakeProber, *fakeRunner) {
+	t.Helper()
+	contract := loadContract(t)
+	root := t.TempDir()
+	m := New(root, contract)
+	prober := newFakeProber()
+	runner := newFakeRunner(prober, contract)
+	m.Prober = prober
+	m.Runner = runner
+	m.PrepareConfig = func(string, Item) error { return nil }
+	m.PollInterval = 2 * time.Millisecond
+	m.StartTimeout = 40 * time.Millisecond
+	m.KillGrace = 20 * time.Millisecond
+	return m, prober, runner
+}
+
+func startOrder(contract *Contract) (containers, processes []string) {
+	for _, it := range contract.Items {
+		if it.Kind == KindContainer {
+			containers = append(containers, it.Name)
+		} else {
+			processes = append(processes, it.Name)
+		}
+	}
+	return containers, processes
+}
+
+func TestUpStartsAll14AndWritesPIDs(t *testing.T) {
+	m, _, runner := newTestManager(t)
+	rep, err := m.Up(context.Background())
+	if err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	if len(rep.Items) != 14 {
+		t.Fatalf("items = %d", len(rep.Items))
+	}
+	for _, it := range rep.Items {
+		if !it.Healthy || !it.Started {
+			t.Fatalf("%s status = %+v", it.Name, it)
+		}
+	}
+	runs, starts, _ := runner.snapshot()
+	containers, processes := startOrder(m.Contract)
+	if strings.Join(runs, ",") != strings.Join(containers, ",") {
+		t.Fatalf("container order = %v, want %v", runs, containers)
+	}
+	if strings.Join(starts, ",") != strings.Join(processes, ",") {
+		t.Fatalf("process order = %v, want %v", starts, processes)
+	}
+	for _, name := range processes {
+		item, _ := m.Contract.Item(name)
+		path := m.pidPath(item)
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("pid file for %s missing: %v", name, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(m.Dirs.Run, "harness-svc.pid")); err != nil {
+		t.Fatalf("harness-service pid file must use pid_name: %v", err)
+	}
+}
+
+func TestUpIsIdempotent(t *testing.T) {
+	m, prober, runner := newTestManager(t)
+	if _, err := m.Up(context.Background()); err != nil {
+		t.Fatalf("first Up: %v", err)
+	}
+	_, startsAfterFirst, _ := runner.snapshot()
+
+	rep, err := m.Up(context.Background())
+	if err != nil {
+		t.Fatalf("second Up: %v", err)
+	}
+	if len(rep.Items) != 14 {
+		t.Fatalf("items = %d", len(rep.Items))
+	}
+	for _, it := range rep.Items {
+		if !it.Reused || it.Started {
+			t.Fatalf("second Up must reuse %s: %+v", it.Name, it)
+		}
+		if !prober.get(it.Name) {
+			t.Fatalf("%s probe state lost", it.Name)
+		}
+	}
+	_, startsAfterSecond, kills := runner.snapshot()
+	if len(startsAfterSecond) != len(startsAfterFirst) {
+		t.Fatalf("second Up restarted services: %v -> %v", startsAfterFirst, startsAfterSecond)
+	}
+	if len(kills) != 0 {
+		t.Fatalf("second Up killed processes: %v", kills)
+	}
+}
+
+func TestEnsureReusesHealthyStack(t *testing.T) {
+	m, prober, runner := newTestManager(t)
+	prober.set("harnessloop", true)
+	// Other items report unhealthy; Ensure must still reuse the running stack.
+	rep, err := m.Ensure(context.Background())
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	if !rep.Reused {
+		t.Fatal("Ensure must report reuse when 50013 is healthy")
+	}
+	runs, starts, _ := runner.snapshot()
+	if len(runs)+len(starts) != 0 {
+		t.Fatalf("Ensure started items on a healthy stack: runs=%v starts=%v", runs, starts)
+	}
+	if len(rep.Items) != 14 {
+		t.Fatalf("status items = %d", len(rep.Items))
+	}
+}
+
+func TestEnsureStartsWhenHarnessLoopDown(t *testing.T) {
+	m, _, runner := newTestManager(t)
+	rep, err := m.Ensure(context.Background())
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	if rep.Reused {
+		t.Fatal("Ensure must not report reuse on a cold start")
+	}
+	_, starts, _ := runner.snapshot()
+	if len(starts) != 10 {
+		t.Fatalf("starts = %d, want 10", len(starts))
+	}
+}
+
+func TestMissingHarnessLoopItemFails(t *testing.T) {
+	m, _, _ := newTestManager(t)
+	m.Contract = &Contract{Version: SupportedVersion, Items: []Item{{
+		Name: "x", Kind: KindProcess, Port: 1, Command: "true",
+		Health: Health{Type: HealthPort, Address: "127.0.0.1:1"},
+	}}}
+	if _, err := m.Ensure(context.Background()); err == nil {
+		t.Fatal("Ensure without harnessloop must fail")
+	}
+}
+
+func TestHealthTimeoutRollsBackStartedProcesses(t *testing.T) {
+	m, _, runner := newTestManager(t)
+	runner.noHealth["chat"] = true
+	// memory starts before chat; chat never becomes healthy.
+	_, err := m.Up(context.Background())
+	if err == nil {
+		t.Fatal("Up must fail when chat never becomes healthy")
+	}
+	var step *StepError
+	if !errors.As(err, &step) || step.Item != "chat" {
+		t.Fatalf("error = %v, want StepError(chat)", err)
+	}
+	if !strings.Contains(err.Error(), "health check") {
+		t.Fatalf("error must mention health check: %v", err)
+	}
+
+	_, starts, kills := runner.snapshot()
+	wantStarts := []string{"memory", "knowledge", "chat"}
+	if strings.Join(starts, ",") != strings.Join(wantStarts, ",") {
+		t.Fatalf("starts = %v, want %v", starts, wantStarts)
+	}
+	if len(kills) != 3 {
+		t.Fatalf("rollback kills = %v, want memory+knowledge+chat", kills)
+	}
+	// Rollback must be newest-first.
+	if kills[0] < kills[1] {
+		t.Fatalf("kills not newest-first: %v", kills)
+	}
+	for _, name := range wantStarts {
+		item, _ := m.Contract.Item(name)
+		if _, statErr := os.Stat(m.pidPath(item)); !os.IsNotExist(statErr) {
+			t.Fatalf("pid file for %s must be removed after rollback", name)
+		}
+	}
+	// Items after chat must never start.
+	for _, name := range starts {
+		if name == "a2a" {
+			t.Fatal("items after the failed step must not start")
+		}
+	}
+}
+
+func TestStartErrorRollsBackPreviousProcesses(t *testing.T) {
+	m, _, runner := newTestManager(t)
+	runner.failStart["knowledge"] = errors.New("boom")
+	_, err := m.Up(context.Background())
+	if err == nil {
+		t.Fatal("Up must fail")
+	}
+	var step *StepError
+	if !errors.As(err, &step) || step.Item != "knowledge" {
+		t.Fatalf("error = %v", err)
+	}
+	_, starts, kills := runner.snapshot()
+	if strings.Join(starts, ",") != "memory" {
+		t.Fatalf("starts = %v", starts)
+	}
+	if len(kills) != 1 {
+		t.Fatalf("kills = %v, want memory rolled back", kills)
+	}
+}
+
+func TestContainerStartFailureStopsBeforeProcesses(t *testing.T) {
+	m, _, runner := newTestManager(t)
+	runner.failRun["postgres"] = errors.New("docker down")
+	_, err := m.Up(context.Background())
+	if err == nil {
+		t.Fatal("Up must fail")
+	}
+	_, starts, kills := runner.snapshot()
+	if len(starts) != 0 || len(kills) != 0 {
+		t.Fatalf("no process should start: starts=%v kills=%v", starts, kills)
+	}
+}
+
+func TestStatusReportsPerItemHealth(t *testing.T) {
+	m, prober, _ := newTestManager(t)
+	prober.set("gateway", true)
+	rep, err := m.Status(context.Background())
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if len(rep.Items) != 14 {
+		t.Fatalf("items = %d", len(rep.Items))
+	}
+	for _, it := range rep.Items {
+		if want := it.Name == "gateway"; it.Healthy != want {
+			t.Fatalf("%s healthy = %v", it.Name, it.Healthy)
+		}
+	}
+	if rep.Healthy() {
+		t.Fatal("report with unhealthy items must not be healthy")
+	}
+}
+
+func TestDownStopsReverseOrderAndRemovesPIDFiles(t *testing.T) {
+	m, _, runner := newTestManager(t)
+	if err := m.ensureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	// Give every process a PID file; containers are stopped by command.
+	var processNames []string
+	for _, it := range m.Contract.Items {
+		if it.IsProcess() {
+			processNames = append(processNames, it.Name)
+			if err := writePIDFile(m.pidPath(it), 7000+len(processNames)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	rep, err := m.Down(context.Background(), false)
+	if err != nil {
+		t.Fatalf("Down: %v", err)
+	}
+	if len(rep.Items) != 14 {
+		t.Fatalf("items = %d", len(rep.Items))
+	}
+	_, _, kills := runner.snapshot()
+	if len(kills) != len(processNames) {
+		t.Fatalf("kills = %d, want %d", len(kills), len(processNames))
+	}
+	// Reverse contract order: vite first, memory last.
+	wantFirst := 7000 + indexOf(processNames, "vite") + 1
+	if kills[0] != wantFirst {
+		t.Fatalf("first kill = %d, want vite pid %d", kills[0], wantFirst)
+	}
+	for _, it := range m.Contract.Items {
+		if _, statErr := os.Stat(m.pidPath(it)); !os.IsNotExist(statErr) {
+			t.Fatalf("pid file for %s must be removed", it.Name)
+		}
+	}
+	runs, _, _ := runner.snapshot()
+	if strings.Join(runs, ",") != "redis-stop,qdrant-stop,mongo-stop,postgres-stop" {
+		t.Fatalf("container stop order = %v", runs)
+	}
+}
+
+func TestDownKeepDataSkipsComposeContainers(t *testing.T) {
+	m, _, runner := newTestManager(t)
+	rep, err := m.Down(context.Background(), true)
+	if err != nil {
+		t.Fatalf("Down: %v", err)
+	}
+	runs, _, _ := runner.snapshot()
+	if strings.Join(runs, ",") != "redis-stop" {
+		t.Fatalf("keep-db must only stop redis, got %v", runs)
+	}
+	for _, it := range rep.Items {
+		if it.Name == "postgres" && it.Detail != "kept (--keep-db)" {
+			t.Fatalf("postgres detail = %q", it.Detail)
+		}
+	}
+}
+
+func indexOf(list []string, want string) int {
+	for i, v := range list {
+		if v == want {
+			return i
+		}
+	}
+	return -1
+}
+
+func TestDockerStopCommand(t *testing.T) {
+	tests := []struct {
+		command string
+		want    string
+		ok      bool
+	}{
+		{"docker compose -f docker/docker-compose.data.yaml up -d postgres", "docker compose -f docker/docker-compose.data.yaml stop postgres", true},
+		{"docker run -d --name hlp-dev-redis -p 56379:6379 redis:7-alpine", "docker stop hlp-dev-redis", true},
+		{".harness/dev/bin/gateway", "", false},
+		{"docker", "", false},
+	}
+	for _, tc := range tests {
+		got, ok := dockerStopCommand(tc.command)
+		if ok != tc.ok || got != tc.want {
+			t.Fatalf("%q -> %q,%v want %q,%v", tc.command, got, ok, tc.want, tc.ok)
+		}
+	}
+}
+
+func TestTimeoutForKind(t *testing.T) {
+	m, _, _ := newTestManager(t)
+	m.StartTimeout = 0
+	if got := m.timeoutFor(Item{Kind: KindContainer}); got != 90*time.Second {
+		t.Fatalf("container timeout = %s", got)
+	}
+	if got := m.timeoutFor(Item{Kind: KindFrontend}); got != 120*time.Second {
+		t.Fatalf("frontend timeout = %s", got)
+	}
+	if got := m.timeoutFor(Item{Kind: KindProcess}); got != 60*time.Second {
+		t.Fatalf("process timeout = %s", got)
+	}
+	m.StartTimeout = time.Second
+	if got := m.timeoutFor(Item{Kind: KindContainer}); got != time.Second {
+		t.Fatalf("override timeout = %s", got)
+	}
+}
