@@ -36,7 +36,11 @@ func resolveWith(root, rel string, eval func(string) (string, error)) (string, e
 		decoded = unescaped
 	}
 	decoded = strings.ReplaceAll(decoded, `\`, "/")
-	if decoded == "" || decoded == "." {
+	// "." and "" are not the same argument. "." has a referent — it names the
+	// workspace root, which is exactly what an agent means by `read_file(".")`
+	// or `list_dir(".")`. "" has none: nothing was named, so refusing it keeps
+	// the "a path argument must name something" contract intact.
+	if decoded == "" {
 		return "", fmt.Errorf("%w: empty path", ErrUnsafePath)
 	}
 	if hasURLScheme(decoded) {
@@ -44,6 +48,13 @@ func resolveWith(root, rel string, eval func(string) (string, error)) (string, e
 	}
 	if filepath.IsAbs(decoded) || strings.HasPrefix(decoded, "/") || strings.HasPrefix(decoded, `\`) {
 		return "", fmt.Errorf("%w: absolute path %q is not allowed", ErrUnsafePath, rel)
+	}
+	// Parent traversal is refused here rather than left to the escapes-root
+	// check below: when the root is itself a filesystem root (`/`, `C:\`),
+	// joining `..` stays "inside" and the containment test would wave it
+	// through. `.` is unaffected — Clean(".") is ".", not "..".
+	if hasParentTraversal(decoded) {
+		return "", fmt.Errorf("%w: %q escapes workspace root", ErrPathEscape, rel)
 	}
 
 	rootAbs, err := filepath.Abs(root)
@@ -64,6 +75,15 @@ func resolveWith(root, rel string, eval func(string) (string, error)) (string, e
 		return "", fmt.Errorf("%w: %q escapes workspace root", ErrPathEscape, rel)
 	}
 	return resolved, nil
+}
+
+// hasParentTraversal reports whether a slash-normalized relative path climbs
+// above the workspace root. Only leading `..` segments count: a segment such as
+// ".. " is an ordinary file name on most filesystems, and `pkg/..` cleans to
+// "." (inside the root), so both stay allowed.
+func hasParentTraversal(p string) bool {
+	cleaned := filepath.Clean(filepath.FromSlash(p))
+	return cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator))
 }
 
 func hasURLScheme(p string) bool {

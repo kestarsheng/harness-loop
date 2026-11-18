@@ -14,15 +14,93 @@ func TestResolveRejectsUnsafePaths(t *testing.T) {
 		"../escape.txt",
 		`..\escape.txt`,
 		"%2e%2e%2fescape.txt",
+		"..",
+		"../",
+		"pkg/../..",
 		"/etc/passwd",
 		`\\server\share\file`,
 		"",
-		".",
 		"a\x00b",
 	}
 	for _, rel := range cases {
 		if _, err := Resolve(root, rel); err == nil {
 			t.Fatalf("%q must be rejected", rel)
+		}
+	}
+}
+
+// "." names the workspace root; the empty string names nothing. Pinning both
+// halves here keeps a future "just allow relative paths" refactor from
+// silently reviving the empty-path hole.
+func TestResolveDotIsWorkspaceRoot(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("hi"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Resolve returns the symlink-evaluated form, and t.TempDir() may sit under
+	// a link itself (macOS /var -> /private/var), so compare against the same
+	// treatment of the root.
+	want := root
+	if evaluated, err := filepath.EvalSymlinks(root); err == nil {
+		want = evaluated
+	}
+
+	got, err := Resolve(root, ".")
+	if err != nil {
+		t.Fatalf(`Resolve(root, ".") must succeed, got %v`, err)
+	}
+	if filepath.Clean(got) != filepath.Clean(want) {
+		t.Fatalf(`Resolve(root, ".") = %s, want workspace root %s`, got, want)
+	}
+	if !isWithin(root, got) {
+		t.Fatalf(`"." resolved outside root: %s`, got)
+	}
+
+	cached, err := ResolveCached(root, ".")
+	if err != nil {
+		t.Fatalf(`ResolveCached(root, ".") must succeed, got %v`, err)
+	}
+	if filepath.Clean(cached) != filepath.Clean(got) {
+		t.Fatalf(`ResolveCached(root, ".") = %s, Resolve gives %s`, cached, got)
+	}
+
+	// Subtask c calls read_file(".") / list_dir("."): the resolved argument has
+	// to be usable as the workspace root, not merely error-free.
+	entries, err := os.ReadDir(got)
+	if err != nil {
+		t.Fatalf(`reading "." as the workspace root: %v`, err)
+	}
+	found := false
+	for _, entry := range entries {
+		if entry.Name() == "README.md" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf(`"." does not point at the populated root, entries=%v`, entries)
+	}
+
+	// Allowing "." must not punch through the subpath whitelist: the root is not
+	// inside "pkg", so a restricted guard still refuses it.
+	restricted := PathGuard{Root: root, AllowedSubpaths: []string{"pkg"}}
+	if bad, err := restricted.Check([]string{"."}); err == nil || bad != "." {
+		t.Fatalf(`PathGuard must refuse "." under a subpath restriction, echoed %q err %v`, bad, err)
+	}
+}
+
+func TestResolveEmptyStringStillRejected(t *testing.T) {
+	root := t.TempDir()
+	if _, err := Resolve(root, ""); !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf(`Resolve(root, "") must fail with E_UNSAFE_PATH, got %v`, err)
+	}
+	if _, err := Resolve(root, "."); err != nil {
+		t.Fatalf(`"." must stay accepted while "" is refused, got %v`, err)
+	}
+	// ".." must still be an escape, not merely "unsafe": callers branch on this.
+	for _, rel := range []string{"..", "../", "..\\x", "pkg/../.."} {
+		if _, err := Resolve(root, rel); !errors.Is(err, ErrPathEscape) {
+			t.Fatalf("%q must fail with E_PATH_ESCAPE, got %v", rel, err)
 		}
 	}
 }
