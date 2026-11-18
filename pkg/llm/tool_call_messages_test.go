@@ -108,16 +108,27 @@ func TestChatEmitsPairedToolCallFieldsWhenEnabled(t *testing.T) {
 	}
 }
 
-func TestToOpenAIMessageDefaultsCallType(t *testing.T) {
-	client := NewOpenAIClient(Config{EmitToolCallMessages: true})
-	out := client.toOpenAIMessage(Message{
-		Role:      "assistant",
-		ToolCalls: []ToolCall{{ID: "call-1", Function: ToolCallFunction{Name: "noop"}}},
+func TestChatDefaultsToolCallType(t *testing.T) {
+	got := captureChatBody(t, Config{Model: "m", APIKey: "k", EmitToolCallMessages: true}, &ChatRequest{
+		Messages: []Message{
+			{
+				Role:      "assistant",
+				ToolCalls: []ToolCall{{ID: "call-1", Function: ToolCallFunction{Name: "noop"}}},
+			},
+		},
 	})
-	if len(out.ToolCalls) != 1 {
-		t.Fatalf("expected 1 tool call, got %d", len(out.ToolCalls))
+
+	messages, ok := got["messages"].([]any)
+	if !ok || len(messages) != 1 {
+		t.Fatalf("expected 1 message, got %#v", got["messages"])
 	}
-	if out.ToolCalls[0].Type != "function" {
-		t.Errorf("type = %q, want function", out.ToolCalls[0].Type)
+	assistant, _ := messages[0].(map[string]any)
+	calls, ok := assistant["tool_calls"].([]any)
+	if !ok || len(calls) != 1 {
+		t.Fatalf("assistant tool_calls = %#v", assistant["tool_calls"])
+	}
+	call, _ := calls[0].(map[string]any)
+	if call["type"] != "function" {
+		t.Errorf("type = %v, want function", call["type"])
 	}
 }

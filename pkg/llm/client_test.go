@@ -21,6 +21,7 @@ func TestEmbedBatchUsesConfiguredModel(t *testing.T) {
 		if m, ok := req["model"].(string); ok {
 			gotModel = m
 		}
+		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"data": []map[string]interface{}{
 				{"embedding": []float64{0.1, 0.2, 0.3}, "index": 0},
@@ -61,6 +62,7 @@ func TestEmbedBatchDefaultsToSmallModel(t *testing.T) {
 		if m, ok := req["model"].(string); ok {
 			gotModel = m
 		}
+		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"data": []map[string]interface{}{
 				{"embedding": []float64{0.1}, "index": 0},
