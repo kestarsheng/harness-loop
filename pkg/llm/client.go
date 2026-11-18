@@ -2,15 +2,12 @@
 package llm
 
 import (
-	"bufio"
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"strings"
 	"time"
+
+	"github.com/openai/openai-go"
 )
 
 // Config holds LLM client configuration
@@ -218,10 +215,11 @@ func (m *metricsClient) EmbedBatch(ctx context.Context, texts []string) ([][]flo
 	return result, err
 }
 
-// OpenAIClient implements Client for OpenAI API
+// OpenAIClient implements Client for OpenAI-compatible APIs on top of
+// github.com/openai/openai-go.
 type OpenAIClient struct {
-	config     Config
-	httpClient *http.Client
+	config Config
+	sdk    openai.Client
 }
 
 // NewOpenAIClient creates a new OpenAI client
@@ -234,371 +232,19 @@ func NewOpenAIClient(cfg Config) *OpenAIClient {
 	}
 	return &OpenAIClient{
 		config: cfg,
-		httpClient: &http.Client{
-			Timeout: 300 * time.Second, // 5 分钟
-		},
+		sdk:    newSDKClient(cfg),
 	}
-}
-
-type openAIChatRequest struct {
-	Model       string          `json:"model"`
-	Messages    []openAIMessage `json:"messages"`
-	MaxTokens   int             `json:"max_tokens,omitempty"`
-	Temperature float64         `json:"temperature,omitempty"`
-	Tools       []openAITool    `json:"tools,omitempty"`
-	Stream      bool            `json:"stream,omitempty"`
-}
-
-type openAIMessage struct {
-	Role       string           `json:"role"`
-	Content    string           `json:"content,omitempty"`
-	ToolCallID string           `json:"tool_call_id,omitempty"`
-	ToolCalls  []openAIToolCall `json:"tool_calls,omitempty"`
-}
-
-type openAITool struct {
-	Type     string         `json:"type"`
-	Function openAIToolFunc `json:"function"`
-}
-
-type openAIToolFunc struct {
-	Name        string      `json:"name"`
-	Description string      `json:"description"`
-	Parameters  interface{} `json:"parameters"`
-}
-
-type openAIToolCall struct {
-	Index    int                `json:"index,omitempty"`
-	ID       string             `json:"id"`
-	Type     string             `json:"type"`
-	Function openAIToolCallFunc `json:"function"`
-}
-
-type openAIToolCallFunc struct {
-	Name      string `json:"name"`
-	Arguments string `json:"arguments"`
-}
-
-type openAIChatResponse struct {
-	ID      string `json:"id"`
-	Object  string `json:"object"`
-	Created int64  `json:"created"`
-	Model   string `json:"model"`
-	Choices []struct {
-		Index        int           `json:"index"`
-		Message      openAIMessage `json:"message"`
-		Delta        openAIMessage `json:"delta,omitempty"`
-		FinishReason string        `json:"finish_reason"`
-	} `json:"choices"`
-	Usage struct {
-		PromptTokens     int `json:"prompt_tokens"`
-		CompletionTokens int `json:"completion_tokens"`
-		TotalTokens      int `json:"total_tokens"`
-	} `json:"usage"`
-}
-
-// toOpenAIMessage maps an internal message to the wire format. Tool call
-// fields are emitted only when Config.EmitToolCallMessages is enabled, so the
-// default request body stays identical to the legacy behaviour for gateways
-// that reject tool_calls/tool_call_id.
-func (c *OpenAIClient) toOpenAIMessage(m Message) openAIMessage {
-	out := openAIMessage{Role: m.Role, Content: m.Content}
-	if !c.config.EmitToolCallMessages {
-		return out
-	}
-	out.ToolCallID = m.ToolCallID
-	if len(m.ToolCalls) == 0 {
-		return out
-	}
-	out.ToolCalls = make([]openAIToolCall, 0, len(m.ToolCalls))
-	for _, tc := range m.ToolCalls {
-		callType := tc.Type
-		if callType == "" {
-			callType = "function"
-		}
-		out.ToolCalls = append(out.ToolCalls, openAIToolCall{
-			ID:   tc.ID,
-			Type: callType,
-			Function: openAIToolCallFunc{
-				Name:      tc.Function.Name,
-				Arguments: tc.Function.Arguments,
-			},
-		})
-	}
-	return out
 }
 
 // Chat sends a chat request
 func (c *OpenAIClient) Chat(ctx context.Context, req *ChatRequest) (*ChatResponse, error) {
-	messages := make([]openAIMessage, 0, len(req.Messages)+1)
-
-	// Add system prompt if provided
-	if req.SystemPrompt != "" {
-		messages = append(messages, openAIMessage{
-			Role:    "system",
-			Content: req.SystemPrompt,
-		})
-	}
-
-	// Add messages
-	for _, m := range req.Messages {
-		messages = append(messages, c.toOpenAIMessage(m))
-	}
-
-	// Build request — prefer per-request model override
-	effectiveModel := c.config.Model
-	if req.Model != "" {
-		effectiveModel = req.Model
-	}
-	openAIReq := openAIChatRequest{
-		Model:       effectiveModel,
-		Messages:    messages,
-		MaxTokens:   req.MaxTokens,
-		Temperature: req.Temperature,
-	}
-
-	if req.MaxTokens == 0 {
-		openAIReq.MaxTokens = c.config.MaxTokens
-	}
-
-	// Add tools
-	if len(req.Tools) > 0 {
-		for _, t := range req.Tools {
-			openAIReq.Tools = append(openAIReq.Tools, openAITool{
-				Type: t.Type,
-				Function: openAIToolFunc{
-					Name:        t.Function.Name,
-					Description: t.Function.Description,
-					Parameters:  t.Function.Parameters,
-				},
-			})
-		}
-	}
-
-	// Send request
-	body, err := json.Marshal(openAIReq)
-	if err != nil {
-		return nil, fmt.Errorf("marshal request: %w", err)
-	}
-
-	httpReq, err := http.NewRequestWithContext(ctx, "POST",
-		c.config.BaseURL+"/chat/completions",
-		strings.NewReader(string(body)))
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
-	}
-
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+c.config.APIKey)
-
-	resp, err := c.httpClient.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("send request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		respBody, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API error (status %d): %s", resp.StatusCode, string(respBody))
-	}
-
-	var openAIResp openAIChatResponse
-	if err := json.NewDecoder(resp.Body).Decode(&openAIResp); err != nil {
-		return nil, fmt.Errorf("decode response: %w", err)
-	}
-
-	// Build response
-	result := &ChatResponse{
-		TotalTokens:  openAIResp.Usage.TotalTokens,
-		PromptTokens: openAIResp.Usage.PromptTokens,
-	}
-
-	if len(openAIResp.Choices) > 0 {
-		choice := openAIResp.Choices[0]
-		result.Content = choice.Message.Content
-		result.FinishReason = choice.FinishReason
-
-		// Parse tool calls
-		for _, tc := range choice.Message.ToolCalls {
-			result.ToolCalls = append(result.ToolCalls, ToolCall{
-				ID:   tc.ID,
-				Type: tc.Type,
-				Function: ToolCallFunction{
-					Name:      tc.Function.Name,
-					Arguments: tc.Function.Arguments,
-				},
-			})
-		}
-	}
-
-	// Calculate cost
-	result.Cost = c.calculateCost(result.TotalTokens)
-
-	return result, nil
+	return chatOnce(ctx, &c.sdk, c.config, req, c.calculateCost)
 }
 
-// ChatStream sends a streaming chat request - REAL implementation
+// ChatStream sends a streaming chat request. The returned channel always ends
+// with either Done or Error.
 func (c *OpenAIClient) ChatStream(ctx context.Context, req *ChatRequest) (<-chan ChatStreamChunk, error) {
-	ch := make(chan ChatStreamChunk, 100)
-
-	go func() {
-		defer close(ch)
-
-		// Build messages
-		messages := make([]openAIMessage, 0, len(req.Messages)+1)
-
-		// Add system prompt if provided
-		if req.SystemPrompt != "" {
-			messages = append(messages, openAIMessage{
-				Role:    "system",
-				Content: req.SystemPrompt,
-			})
-		}
-
-		// Add messages
-		for _, m := range req.Messages {
-			messages = append(messages, c.toOpenAIMessage(m))
-		}
-
-		// Build streaming request — prefer per-request model override
-		effectiveModel := c.config.Model
-		if req.Model != "" {
-			effectiveModel = req.Model
-		}
-		openAIReq := openAIChatRequest{
-			Model:    effectiveModel,
-			Messages: messages,
-			Stream:   true, // Enable streaming
-		}
-
-		if req.MaxTokens > 0 {
-			openAIReq.MaxTokens = req.MaxTokens
-		} else {
-			openAIReq.MaxTokens = c.config.MaxTokens
-		}
-
-		if req.Temperature > 0 {
-			openAIReq.Temperature = req.Temperature
-		}
-
-		// Add tools
-		if len(req.Tools) > 0 {
-			for _, t := range req.Tools {
-				openAIReq.Tools = append(openAIReq.Tools, openAITool{
-					Type: t.Type,
-					Function: openAIToolFunc{
-						Name:        t.Function.Name,
-						Description: t.Function.Description,
-						Parameters:  t.Function.Parameters,
-					},
-				})
-			}
-		}
-
-		// Send request
-		body, err := json.Marshal(openAIReq)
-		if err != nil {
-			ch <- ChatStreamChunk{Error: fmt.Errorf("marshal request: %w", err)}
-			return
-		}
-
-		httpReq, err := http.NewRequestWithContext(ctx, "POST",
-			c.config.BaseURL+"/chat/completions",
-			bytes.NewReader(body))
-		if err != nil {
-			ch <- ChatStreamChunk{Error: fmt.Errorf("create request: %w", err)}
-			return
-		}
-
-		httpReq.Header.Set("Content-Type", "application/json")
-		httpReq.Header.Set("Authorization", "Bearer "+c.config.APIKey)
-
-		resp, err := c.httpClient.Do(httpReq)
-		if err != nil {
-			ch <- ChatStreamChunk{Error: fmt.Errorf("send request: %w", err)}
-			return
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != 200 {
-			respBody, _ := io.ReadAll(resp.Body)
-			ch <- ChatStreamChunk{Error: fmt.Errorf("API error (status %d): %s", resp.StatusCode, string(respBody))}
-			return
-		}
-
-		// Parse SSE stream
-		reader := bufio.NewReader(resp.Body)
-
-		for {
-			line, err := reader.ReadString('\n')
-			if err != nil {
-				if err == io.EOF {
-					ch <- ChatStreamChunk{Done: true}
-					return
-				}
-				ch <- ChatStreamChunk{Error: fmt.Errorf("read stream: %w", err)}
-				return
-			}
-
-			// Skip empty lines
-			line = strings.TrimSpace(line)
-			if line == "" {
-				continue
-			}
-
-			// Check for data prefix
-			if !strings.HasPrefix(line, "data: ") {
-				continue
-			}
-
-			// Extract data
-			data := strings.TrimPrefix(line, "data: ")
-
-			// Check for stream end
-			if data == "[DONE]" {
-				ch <- ChatStreamChunk{Done: true}
-				return
-			}
-
-			// Parse JSON
-			var streamResp openAIChatResponse
-			if err := json.Unmarshal([]byte(data), &streamResp); err != nil {
-				continue // Skip malformed chunks
-			}
-
-			// Extract content from delta
-			if len(streamResp.Choices) > 0 {
-				choice := streamResp.Choices[0]
-				if choice.Delta.Content != "" {
-					ch <- ChatStreamChunk{
-						Content: choice.Delta.Content,
-					}
-				}
-
-				// Check for tool calls in stream
-				if len(choice.Delta.ToolCalls) > 0 {
-					for _, tc := range choice.Delta.ToolCalls {
-						ch <- ChatStreamChunk{
-							ToolCall: &ToolCall{
-								ID:   tc.ID,
-								Type: tc.Type,
-								Function: ToolCallFunction{
-									Name:      tc.Function.Name,
-									Arguments: tc.Function.Arguments,
-								},
-							},
-							ToolCallIndex: tc.Index,
-						}
-					}
-				}
-			}
-
-			// Track tokens - unused but kept for reference
-			_ = streamResp.Usage.TotalTokens
-		}
-	}()
-
-	return ch, nil
+	return chatStream(ctx, &c.sdk, c.config, req), nil
 }
 
 // Embed generates embeddings for a single text
@@ -615,61 +261,7 @@ func (c *OpenAIClient) Embed(ctx context.Context, text string) ([]float64, error
 
 // EmbedBatch generates embeddings for multiple texts
 func (c *OpenAIClient) EmbedBatch(ctx context.Context, texts []string) ([][]float64, error) {
-	// Use configured embedding model, fallback to text-embedding-3-small
-	embeddingModel := c.config.EmbeddingModel
-	if embeddingModel == "" {
-		embeddingModel = "text-embedding-3-small"
-	}
-	req := map[string]interface{}{
-		"model": embeddingModel,
-		"input": texts,
-	}
-
-	body, err := json.Marshal(req)
-	if err != nil {
-		return nil, fmt.Errorf("marshal request: %w", err)
-	}
-
-	httpReq, err := http.NewRequestWithContext(ctx, "POST",
-		c.config.BaseURL+"/embeddings",
-		strings.NewReader(string(body)))
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
-	}
-
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+c.config.APIKey)
-
-	resp, err := c.httpClient.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("send request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		respBody, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API error (status %d): %s", resp.StatusCode, string(respBody))
-	}
-
-	var embedResp struct {
-		Data []struct {
-			Embedding []float64 `json:"embedding"`
-			Index     int       `json:"index"`
-		} `json:"data"`
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&embedResp); err != nil {
-		return nil, fmt.Errorf("decode response: %w", err)
-	}
-
-	results := make([][]float64, len(embedResp.Data))
-	for _, d := range embedResp.Data {
-		if d.Index < len(results) {
-			results[d.Index] = d.Embedding
-		}
-	}
-
-	return results, nil
+	return embedBatch(ctx, &c.sdk, c.config, texts)
 }
 
 func (c *OpenAIClient) calculateCost(tokens int) float64 {
