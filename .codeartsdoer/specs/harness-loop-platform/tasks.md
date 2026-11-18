@@ -7,7 +7,7 @@
 | 状态 | 待评审 |
 | 上游文档 | `spec.md` v1.1（170 条 REQ + 38 条 DFX）、`design.md` v1.2（12 章，5 项锁定决策） |
 | 代码基线 | `agent-platform` @ `4a05ccb`，Go 1.22 |
-| 任务规模 | 100 个任务（P0 27 / P1 36 / P2 37） |
+| 任务规模 | 102 个任务（P0 27 / P1 36 / P2 39） |
 | 已锁定决策 | A 方案记忆事实源、PG 仅承载索引与事件（D2）、RAG 复用 Go knowledge-service（D3）、runtime 复用 `pkg/llm` + cobra/Bubble Tea（D4）、新增 :50008（D6/D14）、自研模板摘要唯一通道（D13）、多 Agent 8/20/20/2（U13-A）、审批一期留 agent-service（U17-A）、阶段模型默认继承（U18-A）、子任务验收复用父验收器（U19-A） |
 
 > 阅读约定：每个任务给出「目标 → 关联需求 → 设计章节 → 依赖 → 文件 → 实施要点 → 验收标准 → 复杂度」。`[N]` 表示新增文件，`[M]` 表示改造存量文件。验收标准优先给出可直接执行的命令或断言。本文件不含实现代码。
@@ -1325,7 +1325,31 @@
 | 验收标准 | 50 并发任务事件收集率 **100%**；`task.completed`/`tool.denied` 不再缺失；emit 失败有日志与指标；`go test ./pkg/harnessloop/event/... ./services/harnessloop-service/...` 全绿。 |
 | 复杂度 | M（0.5~1 天） |
 
-> P2 合计：实施 32 个 + 测试 5 个 = **37 个任务**。
+### T-P2-33 compaction 依赖门禁回归
+
+| 字段 | 内容 |
+|---|---|
+| 目标 | 修复 `TestFidelityNoExternalEngineImports`：T-P2-24 引入 openai-go 后，其传递依赖被误判为「外部压缩引擎」，导致 compaction 包门禁红。 |
+| 关联需求 | REQ-039、REQ-045；design 4.5（C 方案：自研模板摘要为唯一通道） |
+| 依赖 | T-P2-24 |
+| 涉及文件 | [M] `pkg/harnessloop/compaction/fidelity_test.go`（仅测试） |
+| 实施要点 | 1) 只检查 compaction 源文件的**直接 import**，不把 `pkg/llm` 的传递依赖算作压缩引擎；2) 保留原意：直接 import 外部压缩引擎（如 langchain / llmlingua / 独立 sidecar）仍必须失败；3) 补一条负向用例证明门禁没被整体放开；4) 不改 compaction 业务代码。 |
+| 验收标准 | `go test ./pkg/harnessloop/compaction/... -count=1` 全绿；负向用例（直接 import 外部引擎）仍 FAIL；`go build -p 1 ./...`、depcheck 0。 |
+| 复杂度 | S（0.5 天） |
+
+### T-P2-34 子任务失败重试（ActionRetry 接执行侧）
+
+| 字段 | 内容 |
+|---|---|
+| 目标 | d→c 回退后，failed 子任务能按重试预算重新执行；当前子任务 FSM 终态无出边，回退只恢复 pending 子任务。 |
+| 关联需求 | REQ-128、REQ-131；design 4.13.8（传播策略 retry） |
+| 依赖 | T-P2-29 |
+| 涉及文件 | [M] `pkg/harnessloop/orchestrator/{propagation,scheduler}.go`、[M] `pkg/harnessloop/subtask/model.go`、[M] `services/harnessloop-service/internal/service/**` |
+| 实施要点 | 1) 为 `failed`（及 tolerate 外失败）定义受 attempt 上限约束的重试迁移，禁止无限循环；2) 把 `propagation.ActionRetry` 接到执行侧（当前只有测试引用）；3) 重试次数、事件与 DB 状态一致；4) 超过上限仍 failed 并由父任务按 T-P2-29 语义收口。 |
+| 验收标准 | 失败子任务在 d→c 回退后真实重跑并 `accepted`；或达到上限后 `failed` 且事件序列可证；`go test ./pkg/harnessloop/orchestrator/... ./services/harnessloop-service/...` 全绿。 |
+| 复杂度 | M（1 天） |
+
+> P2 合计：实施 34 个 + 测试 5 个 = **39 个任务**。
 
 ---
 
