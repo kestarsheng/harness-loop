@@ -14,6 +14,7 @@ import (
 	"agent-platform/pkg/agent/checkpoint"
 	"agent-platform/pkg/agent/intervention"
 	"agent-platform/pkg/config"
+	"agent-platform/pkg/harnessloop/policy"
 	"agent-platform/pkg/llm"
 	pb "agent-platform/pkg/pb/agent"
 	commonpb "agent-platform/pkg/pb/common"
@@ -37,6 +38,10 @@ type AgentService struct {
 	harnessClient harnesspb.HarnessServiceClient
 	harnessConn   *grpc.ClientConn
 	skillStore    agent.SkillStore
+	// stageMatrix is the harness stage policy matrix, loaded once at startup.
+	// It is read (not enforced) here: the gate lives in harnessloop-service and
+	// uses the same file, so the engine only offers tools that would pass it.
+	stageMatrix policy.Matrix
 }
 
 // NewAgentService creates a new agent service
@@ -76,6 +81,7 @@ func NewAgentService(registry *agent.Registry, llmClient llm.Client, mcpClient m
 		cfg:           cfg,
 		harnessClient: harnessClient,
 		harnessConn:   harnessConn,
+		stageMatrix:   loadStageMatrix(stageMatrixPath()),
 	}
 
 	// Create execution engine with metrics-wrapped LLM client
@@ -239,6 +245,10 @@ func (s *AgentService) Execute(ctx context.Context, req *pb.ExecuteRequest) (*pb
 	}
 	ctx = withToolPolicyContext(ctx, toolPolicyContextFromVars(contextVars, req.TenantId))
 
+	// Stage mode: publish the stage's allowed tool subset so the engine can
+	// narrow the agent's tools to what the policy gate would allow anyway.
+	annotateStageContextVars(contextVars, s.stageMatrix)
+
 	// Resolve system prompt: render from Prompt Management if agent has PromptTemplateKey
 	systemPromptOverride := s.renderSystemPrompt(ctx, req.EntryAgent, req.SessionId, contextVars)
 
@@ -345,6 +355,10 @@ func (s *AgentService) ExecuteStream(req *pb.ExecuteStreamRequest, stream pb.Age
 		contextVars[k] = v
 	}
 	ctx = withToolPolicyContext(ctx, toolPolicyContextFromVars(contextVars, req.TenantId))
+
+	// Stage mode: publish the stage's allowed tool subset so the engine can
+	// narrow the agent's tools to what the policy gate would allow anyway.
+	annotateStageContextVars(contextVars, s.stageMatrix)
 
 	// Resolve system prompt: render from Prompt Management if agent has PromptTemplateKey
 	systemPromptOverride := s.renderSystemPrompt(ctx, req.EntryAgent, req.SessionId, contextVars)
