@@ -18,6 +18,7 @@ import (
 	"agent-platform/pkg/harnessloop/fsm"
 	"agent-platform/pkg/harnessloop/orchestrator"
 	"agent-platform/pkg/harnessloop/retry"
+	"agent-platform/pkg/harnessloop/subtask"
 	"agent-platform/pkg/harnessloop/tracing"
 	"agent-platform/pkg/llm"
 	"agent-platform/services/harnessloop-service/internal/metrics"
@@ -33,6 +34,11 @@ const (
 	ReasonCompleted = "completed"
 	ReasonAborted   = "aborted"
 	ReasonFailed    = "failed"
+	// ReasonCompletedWithFailedSubtask is the tolerated half-success: every
+	// subtask reached a terminal state, at least one was accepted, and the
+	// failures all sit in tolerate sets (T-P2-29 point 3). The DB status stays
+	// "completed", the terminal reason is what distinguishes it from a clean run.
+	ReasonCompletedWithFailedSubtask = "completed_with_failed_subtasks"
 )
 
 type TaskStore interface {
@@ -97,6 +103,9 @@ type RunResult struct {
 	RetryCount     int
 	LastError      string
 	CheckpointID   string
+	// FailedSubtasks lists the children a tolerated half-success finished with
+	// (T-P2-29). It is empty for a clean completed run.
+	FailedSubtasks []orchestrator.FailedSubtaskRef
 }
 
 type AbortResult struct {
@@ -348,16 +357,31 @@ func (r *Runtime) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 		if err := r.Attempts.Finish(ctx, attempt.AttemptID, r.now()); err != nil {
 			return nil, fmt.Errorf("runtime: finish attempt: %w", err)
 		}
-		aggregation := r.runOrchestration(ctx, in, task.WorkspaceRoot, stage, attempt, stageRes)
-
-		accSpan := r.Tracer.StartAcceptance(stageSpan, string(stage), attemptNo, "")
-		verdict := r.evaluate(ctx, in, task, aggregation, stage, attempt, stageRes)
-		accSpan.SetAttr("verdict", string(verdict.Verdict))
-		accSpan.End()
-		r.Metrics.Acceptance(string(stage), string(verdict.Verdict), string(verdict.VerifiedBy))
-		attempt.AcceptanceID = verdict.AcceptanceID
-		if verdict.AcceptanceID != "" {
-			_ = r.Attempts.AttachAcceptance(ctx, attempt.AttemptID, verdict.AcceptanceID)
+		aggregation, aggErr := r.runOrchestration(ctx, in, task.WorkspaceRoot, stage, attempt, stageRes)
+		var verdict acceptance.Verdict
+		// T-P2-29：子任务没收口时，父任务连 d 阶段验收都不该开始——否则
+		// "父任务 completed"会变成子任务 running 的遮羞布。
+		//
+		// 但"没收口"不是终态：它是 d 阶段的一次验收失败，必须和模型验收失败
+		// 走同一条回退路径（d→c，必要时 d→b），由验收预算决定何时才允许
+		// failed。直接 finalize(failed) 会把一次可重试的执行失败升级成不可恢复
+		// 的终态——fail-fast 子任务一失败，父任务就再没有重跑的机会。
+		if gateErr := r.dStageClosure(stage, aggregation, aggErr); gateErr != nil {
+			verdict = dStageClosureVerdict(stage, gateErr)
+			r.publishError(ctx, in, stage, attempt, rollbackCategory(verdict), gateErr.Error())
+			r.Metrics.Acceptance(string(stage), string(verdict.Verdict), string(verdict.VerifiedBy))
+			fmt.Printf("[orchestrator] d-stage closure gate failed, scheduling rollback to %s: %v\n",
+				verdict.RollbackTarget, gateErr)
+		} else {
+			accSpan := r.Tracer.StartAcceptance(stageSpan, string(stage), attemptNo, "")
+			verdict = r.evaluate(ctx, in, task, aggregation, stage, attempt, stageRes)
+			accSpan.SetAttr("verdict", string(verdict.Verdict))
+			accSpan.End()
+			r.Metrics.Acceptance(string(stage), string(verdict.Verdict), string(verdict.VerifiedBy))
+			attempt.AcceptanceID = verdict.AcceptanceID
+			if verdict.AcceptanceID != "" {
+				_ = r.Attempts.AttachAcceptance(ctx, attempt.AttemptID, verdict.AcceptanceID)
+			}
 		}
 
 		if verdict.Verdict == acceptance.VerdictPass {
@@ -373,7 +397,13 @@ func (r *Runtime) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 			budget.OnStageEnter()
 			entryReason = fsm.EntryInitial
 			if target == fsm.StageDone {
-				return r.finalize(ctx, in, result, ReasonCompleted, target, "", "", 0, "", task.Version)
+				reason := ReasonCompleted
+				if aggregation != nil && aggregation.CompletedWithFailures {
+					// tolerate 策略下确有失败但全部收口：完成，但不假装干净。
+					reason = ReasonCompletedWithFailedSubtask
+					result.FailedSubtasks = aggregation.FailedSubtasks
+				}
+				return r.finalize(ctx, in, result, reason, target, "", "", 0, "", task.Version)
 			}
 			continue
 		}
@@ -448,7 +478,7 @@ func (r *Runtime) Abort(ctx context.Context, tenantID, taskID string, epoch int6
 			res.Timestamp = updated.UpdatedAt
 		}
 		r.aborted[taskID] = true
-		r.publishTerminal(ctx, tenantID, task.ProjectID, taskID, ReasonAborted)
+		r.publishTerminal(ctx, tenantID, task.ProjectID, taskID, ReasonAborted, nil)
 	}
 	r.aborts[key] = res
 	return res, nil
@@ -549,7 +579,9 @@ func (r *Runtime) finalize(ctx context.Context, in RunInput, res *RunResult, rea
 			return nil, fmt.Errorf("runtime: finalize status: %w", err)
 		}
 	}
-	r.publishTerminal(ctx, in.TenantID, in.ProjectID, in.TaskID, reason)
+	// DB 与事件用同一份 terminal_reason（含 failed_subtasks），避免"库里 completed、
+	// 事件里 completed_with_failed_subtasks"这种两边不一致（T-P2-29 验收）。
+	r.publishTerminal(ctx, in.TenantID, in.ProjectID, in.TaskID, reason, res.FailedSubtasks)
 	r.Metrics.TaskTerminal(string(status))
 
 	res.TerminalReason = reason
@@ -564,11 +596,13 @@ func (r *Runtime) finalize(ctx context.Context, in RunInput, res *RunResult, rea
 }
 
 // runOrchestration bridges b/c/d stage completion into the orchestration layer.
-// It is best-effort: a plan that cannot be parsed or a missing executor never
-// aborts the parent stage, preserving the pre-flag behaviour.
-func (r *Runtime) runOrchestration(ctx context.Context, in RunInput, workspaceRoot string, stage fsm.Stage, attempt fsm.Attempt, res *StageRunResult) *orchestrator.AggregationReport {
+// It is best-effort for the parent stage — a plan that cannot be parsed or a
+// missing executor never aborts the parent stage, preserving the pre-flag
+// behaviour — but the d-stage report and its error are returned so the caller
+// can enforce the "children must be closed" invariant (T-P2-29).
+func (r *Runtime) runOrchestration(ctx context.Context, in RunInput, workspaceRoot string, stage fsm.Stage, attempt fsm.Attempt, res *StageRunResult) (*orchestrator.AggregationReport, error) {
 	if r.Orchestrator == nil || !r.Orchestrator.Enabled() || res == nil {
-		return nil
+		return nil, nil
 	}
 	ec := OrchestratorStageContext{
 		TenantID: in.TenantID, ProjectID: in.ProjectID, TaskID: in.TaskID,
@@ -594,10 +628,83 @@ func (r *Runtime) runOrchestration(ctx context.Context, in RunInput, workspaceRo
 	case fsm.StageExecute:
 		_, _ = r.Orchestrator.DispatchCStage(runCtx, ec)
 	case fsm.StageVerify:
-		report, _ := r.Orchestrator.AggregateDStage(runCtx, ec)
-		return report
+		return r.Orchestrator.AggregateDStage(runCtx, ec)
+	}
+	return nil, nil
+}
+
+// dStageClosure is the parent terminal invariant of T-P2-29: a parent may only
+// leave d as completed when every child reached a terminal state and at least
+// one child was accepted. A missing DAG (nothing was ever planned) is not a
+// violation — there are no children to close — and the pre-orchestration
+// single-agent path keeps working unchanged.
+func (r *Runtime) dStageClosure(stage fsm.Stage, report *orchestrator.AggregationReport, aggErr error) error {
+	if r.Orchestrator == nil || !r.Orchestrator.Enabled() || stage != fsm.StageVerify {
+		return nil
+	}
+	if errors.Is(aggErr, ErrNoDagPlanned) {
+		return nil
+	}
+	if aggErr != nil {
+		return fmt.Errorf("subtasks_not_closed: d-stage aggregation failed: %w", aggErr)
+	}
+	if report == nil {
+		return errors.New("subtasks_not_closed: d-stage produced no aggregation report")
+	}
+	if report.Summary.NonTerminal > 0 {
+		return fmt.Errorf("subtasks_not_closed: %d of %d subtasks are still pending/running",
+			report.Summary.NonTerminal, report.Summary.Total)
+	}
+	if !report.Complete {
+		return fmt.Errorf("subtasks_not_closed: aggregation report is incomplete (%d conflicts, %d/%d accepted)",
+			len(report.Conflicts), report.Summary.Accepted, report.Summary.Total)
+	}
+	if report.Summary.Accepted == 0 {
+		return fmt.Errorf("subtasks_not_closed: 0 of %d subtasks were accepted", report.Summary.Total)
 	}
 	return nil
+}
+
+// closureErrorCode unwraps the stable error code out of the gate error. The
+// d-stage gate wraps the aggregator error with %w, and orchestrator.ErrorCode
+// only does a direct type assertion, so the unwrap has to happen here.
+func closureErrorCode(err error) string {
+	var coded *subtask.CodedError
+	if errors.As(err, &coded) {
+		return coded.Code
+	}
+	return orchestrator.ErrorCode(err)
+}
+
+// dStageClosureVerdict turns a closure violation into an ordinary d-stage
+// acceptance failure. The returned verdict is deliberately shaped like one
+// produced by the acceptance layer (fail + failed_criteria + rollback_target)
+// so the runtime routes it through rollbackCategory/retry.Budget instead of
+// short-circuiting to a terminal failure.
+//
+// 回退目标是"谁能修好这次收口失败"：执行层没产出可用产物（0 accepted、
+// 子任务还挂在 pending/running、产物校验不过）回 c 重跑；DAG 版本已经不属于
+// 这个父任务，说明计划本身错了，回 b 重新规划。两种情况都只是"再试一次"，
+// 只有验收预算耗尽才允许 failed。
+func dStageClosureVerdict(stage fsm.Stage, gateErr error) acceptance.Verdict {
+	criterion := "impl_gap"
+	if closureErrorCode(gateErr) == orchestrator.CodeAggregationDagMismatch {
+		criterion = "plan_gap"
+	}
+	target := defaultRollbackTarget(stage)
+	if criterion == "plan_gap" {
+		target = string(fsm.StagePlan)
+	}
+	if !fsm.IsLegalTarget(stage, fsm.Stage(target)) {
+		target = defaultRollbackTarget(stage)
+	}
+	return acceptance.Verdict{
+		Verdict:        acceptance.VerdictFail,
+		Reason:         gateErr.Error(),
+		FailedCriteria: []acceptance.FailedCriterion{{CriterionID: "subtasks_closed", Category: criterion}},
+		RollbackTarget: target,
+		VerifiedBy:     acceptance.VerifiedByProgram,
+	}
 }
 
 func (r *Runtime) evaluate(ctx context.Context, in RunInput, task *repository.TaskRun, aggregation *orchestrator.AggregationReport, stage fsm.Stage, attempt fsm.Attempt, out *StageRunResult) acceptance.Verdict {
@@ -799,9 +906,17 @@ func (r *Runtime) saveCheckpoint(ctx context.Context, in RunInput, task *reposit
 }
 
 func (r *Runtime) transitionEvents(in RunInput, from, to fsm.Stage, attempt fsm.Attempt) []repository.EventInsert {
-	payload := []byte(fmt.Sprintf(`{"from":%q,"to":%q,"attempt_id":%q}`, from, to, attempt.AttemptID))
+	// event_id 是 hlp_event.events 的主键，必须逐次唯一：d→c 回退可以发生多次
+	// （每次收口失败一次），沿用 task-from-to 会在第二次回退时撞主键，把一次
+	// 可恢复的回退变成 Transfer 报错、任务卡在 running。
+	id := fmt.Sprintf("%s-%s-%s", in.TaskID, from, to)
+	if attempt.AttemptNo > 0 {
+		id = fmt.Sprintf("%s-%d", id, attempt.AttemptNo)
+	}
+	payload := []byte(fmt.Sprintf(`{"from":%q,"to":%q,"attempt_id":%q,"attempt_no":%d}`,
+		from, to, attempt.AttemptID, attempt.AttemptNo))
 	return []repository.EventInsert{{
-		EventID:   fmt.Sprintf("%s-%s-%s", in.TaskID, from, to),
+		EventID:   id,
 		Seq:       0,
 		EventType: "stage.transition",
 		Severity:  "info",
@@ -810,7 +925,7 @@ func (r *Runtime) transitionEvents(in RunInput, from, to fsm.Stage, attempt fsm.
 	}}
 }
 
-func (r *Runtime) publishTerminal(ctx context.Context, tenantID, projectID, taskID, reason string) {
+func (r *Runtime) publishTerminal(ctx context.Context, tenantID, projectID, taskID, reason string, failed []orchestrator.FailedSubtaskRef) {
 	if r.Events == nil {
 		return
 	}
@@ -829,11 +944,15 @@ func (r *Runtime) publishTerminal(ctx context.Context, tenantID, projectID, task
 	case ReasonCompleted:
 		typ = event.TaskCompleted
 		severity = event.SeverityInfo
+	case ReasonCompletedWithFailedSubtask:
+		// 完成，但确实有子任务失败：事件类型仍是 task.completed（父任务真的
+		// 走完了），严重级别降为 warn，并把失败子任务列在 payload 里。
+		typ = event.TaskCompleted
+		severity = event.SeverityWarn
 	case ReasonAborted:
 		typ = event.TaskAborted
 		severity = event.SeverityWarn
 	}
-	payload := []byte(fmt.Sprintf(`{"terminal_reason":%q}`, reason))
 	_ = r.Events.Publish(ctx, &event.Event{
 		EventID:       fmt.Sprintf("%s-%s", taskID, reason),
 		EventType:     typ,
@@ -843,8 +962,22 @@ func (r *Runtime) publishTerminal(ctx context.Context, tenantID, projectID, task
 		Severity:      severity,
 		TenantID:      tenantID,
 		ProjectID:     projectID,
-		Payload:       payload,
+		Payload:       terminalPayload(reason, failed),
 	})
+}
+
+// terminalPayload keeps the historical {"terminal_reason":...} shape and adds
+// failed_subtasks only when the parent finished with tolerated failures.
+func terminalPayload(reason string, failed []orchestrator.FailedSubtaskRef) []byte {
+	payload := map[string]any{"terminal_reason": reason}
+	if len(failed) > 0 {
+		payload["failed_subtasks"] = failed
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return []byte(fmt.Sprintf(`{"terminal_reason":%q}`, reason))
+	}
+	return raw
 }
 
 func (r *Runtime) publishError(ctx context.Context, in RunInput, stage fsm.Stage, attempt fsm.Attempt, category retry.Category, reason string) {

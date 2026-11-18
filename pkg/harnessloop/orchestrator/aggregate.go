@@ -100,6 +100,21 @@ type AggregationSummary struct {
 	Rejected  int `json:"rejected"`
 	Failed    int `json:"failed"`
 	Cancelled int `json:"cancelled"`
+	// NonTerminal counts pending/running/waiting_handoff rows. A non-zero value
+	// means the children have not closed yet, so the parent must not be
+	// completed (T-P2-29).
+	NonTerminal int `json:"non_terminal"`
+}
+
+// FailedSubtaskRef names one subtask that reached a terminal non-accepted
+// state. d-stage reports them explicitly so "父任务 completed" never hides a
+// failed child (T-P2-29 point 3/4).
+type FailedSubtaskRef struct {
+	SubtaskID string         `json:"subtask_id"`
+	DagNodeID string         `json:"dag_node_id,omitempty"`
+	Status    subtask.Status `json:"status"`
+	Reason    string         `json:"reason,omitempty"`
+	Strategy  string         `json:"failure_strategy,omitempty"`
 }
 
 // AggregationReport is AggregationReport/v1 and is a required d-stage
@@ -116,7 +131,13 @@ type AggregationReport struct {
 	Conflicts   []Conflict         `json:"conflicts"`
 	Summary     AggregationSummary `json:"summary"`
 	Complete    bool               `json:"complete"`
-	CompletedAt time.Time          `json:"completed_at"`
+	// CompletedWithFailures marks the tolerated half-success: every child is
+	// terminal, at least one was accepted, and every failed/cancelled child sits
+	// in a tolerate set. The parent then finishes as
+	// terminal_reason=completed_with_failed_subtasks instead of completed.
+	CompletedWithFailures bool               `json:"completed_with_failures,omitempty"`
+	FailedSubtasks        []FailedSubtaskRef `json:"failed_subtasks"`
+	CompletedAt           time.Time          `json:"completed_at"`
 }
 
 type AggregationRequest struct {
@@ -240,15 +261,30 @@ func (a *Aggregator) Aggregate(ctx context.Context, req AggregationRequest) (*Ag
 			item.Verdict = "cancelled"
 			item.Reason = string(st.Status)
 		default:
-			// pending/running/waiting_handoff must never contribute artifacts.
-			securityViolation = true
-			report.Complete = false
-			item.Verdict = "rejected"
+			// pending/running/waiting_handoff: the child has not closed yet.
+			// It contributes no artifacts and blocks the parent terminal state
+			// (T-P2-29 point 1).
+			report.Summary.NonTerminal++
+			item.Verdict = "not_terminal"
 			item.Reason = "subtask is not terminal"
+		}
+		if st.Status.Terminal() && st.Status != subtask.StatusAccepted {
+			report.FailedSubtasks = append(report.FailedSubtasks, FailedSubtaskRef{
+				SubtaskID: st.SubtaskID,
+				DagNodeID: st.DagNodeID,
+				Status:    st.Status,
+				Reason:    item.Reason,
+				Strategy:  string(st.FailureStrategy),
+			})
 		}
 		report.Items = append(report.Items, item)
 	}
 
+	// d-stage gates. Precedence matters: a cross-tenant row is a security
+	// violation, a stale DAG row is a scope violation, an open child means "not
+	// closed yet", and a report with zero accepted children proves nothing was
+	// actually delivered (T-P2-29 point 2).
+	gateErr := a.gateReport(report, securityViolation, dagMismatch)
 	if securityViolation {
 		if a.emitter != nil {
 			if err := emitSecurityViolation(ctx, a.emitter, req.ParentTaskID, "", "",
@@ -256,12 +292,6 @@ func (a *Aggregator) Aggregate(ctx context.Context, req AggregationRequest) (*Ag
 				return report, err
 			}
 		}
-		return report, newError(CodeSubtaskNotAccepted,
-			"aggregation only accepts accepted subtasks; reject/fail/cancel rows are listed without artifacts")
-	}
-	if dagMismatch {
-		return report, newError(CodeAggregationDagMismatch,
-			"aggregation received a subtask from a DAG version outside %v", report.DagIDs)
 	}
 
 	a.detectConflicts(ctx, req, report)
@@ -295,24 +325,69 @@ func (a *Aggregator) Aggregate(ctx context.Context, req AggregationRequest) (*Ag
 		ParentTaskID: req.ParentTaskID,
 		DagID:        req.DagID,
 		Payload: map[string]any{
-			"dag_ids":        report.DagIDs,
-			"dag_versions":   report.DagVersions,
-			"total":          report.Summary.Total,
-			"accepted":       report.Summary.Accepted,
-			"rejected":       report.Summary.Rejected,
-			"failed":         report.Summary.Failed,
-			"cancelled":      report.Summary.Cancelled,
-			"conflict_count": len(report.Conflicts),
-			"complete":       report.Complete,
+			"dag_ids":                 report.DagIDs,
+			"dag_versions":            report.DagVersions,
+			"total":                   report.Summary.Total,
+			"accepted":                report.Summary.Accepted,
+			"rejected":                report.Summary.Rejected,
+			"failed":                  report.Summary.Failed,
+			"cancelled":               report.Summary.Cancelled,
+			"non_terminal":            report.Summary.NonTerminal,
+			"completed_with_failures": report.CompletedWithFailures,
+			"failed_subtasks":         report.FailedSubtasks,
+			"conflict_count":          len(report.Conflicts),
+			"complete":                report.Complete,
 		},
 	}); err != nil {
 		return report, err
+	}
+	if gateErr != nil {
+		return report, gateErr
 	}
 	if !report.Complete {
 		return report, newError(CodeAggregationIncomplete,
 			"aggregation report is incomplete: %d conflicts, artifact verification failed", len(report.Conflicts))
 	}
 	return report, nil
+}
+
+// gateReport applies the "children must be closed" invariant and decides
+// whether the remaining failures are tolerated.
+func (a *Aggregator) gateReport(report *AggregationReport, securityViolation, dagMismatch bool) error {
+	switch {
+	case securityViolation:
+		return newError(CodeSubtaskNotAccepted,
+			"aggregation only accepts subtasks of this parent/tenant/project")
+	case dagMismatch:
+		return newError(CodeAggregationDagMismatch,
+			"aggregation received a subtask from a DAG version outside %v", report.DagIDs)
+	case report.Summary.NonTerminal > 0:
+		report.Complete = false
+		return newError(CodeAggregationNotTerminal,
+			"%d of %d subtasks are still pending/running; the parent cannot be completed until every child is terminal",
+			report.Summary.NonTerminal, report.Summary.Total)
+	case report.Summary.Accepted == 0:
+		report.Complete = false
+		return newError(CodeAggregationNoAccepted,
+			"0 of %d subtasks were accepted; an empty deliverable must not complete the parent",
+			report.Summary.Total)
+	}
+	if len(report.FailedSubtasks) == 0 {
+		return nil
+	}
+	// Terminal-but-not-accepted children may only be tolerated when their own
+	// failure strategy says so. A fail-fast/retry child that failed must not be
+	// papered over as a completed parent.
+	for _, failed := range report.FailedSubtasks {
+		if subtask.FailureStrategy(failed.Strategy) != subtask.StrategyTolerate {
+			report.Complete = false
+			return newError(CodeAggregationIncomplete,
+				"subtask %s ended as %s under failure_strategy=%q; only tolerate sets may finish with failed children",
+				failed.SubtaskID, failed.Status, failed.Strategy)
+		}
+	}
+	report.CompletedWithFailures = true
+	return nil
 }
 
 func (a *Aggregator) detectConflicts(ctx context.Context, req AggregationRequest, report *AggregationReport) {
@@ -415,13 +490,21 @@ func contractType(contract map[string]any) string {
 }
 
 // RequireForAcceptance is the d-stage gate: without a complete report the
-// acceptance must not start (REQ-133).
+// acceptance must not start (REQ-133). A complete report still needs at least
+// one accepted child — "all children failed" is not an accepted deliverable.
 func (a *Aggregator) RequireForAcceptance(report *AggregationReport) error {
 	if report == nil || report.TaskID == "" || len(report.Items) == 0 {
 		return newError(CodeAggregationMissing, "aggregation report is required before d-stage acceptance")
 	}
 	if len(report.Conflicts) > 0 || !report.Complete {
 		return newError(CodeAggregationIncomplete, "aggregation report is incomplete or has conflicts")
+	}
+	if report.Summary.NonTerminal > 0 {
+		return newError(CodeAggregationNotTerminal,
+			"%d subtasks are not terminal; the parent cannot be accepted", report.Summary.NonTerminal)
+	}
+	if report.Summary.Accepted == 0 {
+		return newError(CodeAggregationNoAccepted, "no subtask was accepted; the parent cannot be accepted")
 	}
 	return nil
 }

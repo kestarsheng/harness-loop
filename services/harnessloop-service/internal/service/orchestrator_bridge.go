@@ -397,6 +397,11 @@ func (s *subtaskRepoStatusSink) StatusChanged(ctx context.Context, st *subtask.S
 	})
 }
 
+// ErrNoDagPlanned marks the "this parent never produced a DAG" case: b 阶段
+// 没走到、或者计划被拒。它不是"子任务没收口"——不存在子任务——所以 d 阶段的
+// 收口闸门必须能把它和"有子任务但没到终态"区分开（T-P2-29）。
+var ErrNoDagPlanned = errors.New("orchestrator bridge: no DAG was planned")
+
 // AggregateDStage builds the d-stage aggregation report from the scheduler's
 // latest subtask states. The parent then leaves the admission pool: its slots
 // are already back with the tenant gate, this only clears the parent's record.
@@ -404,30 +409,103 @@ func (b *OrchestratorBridge) AggregateDStage(ctx context.Context, ec Orchestrato
 	if !b.Enabled() {
 		return nil, nil
 	}
-	state := b.stateFor(ec.TaskID)
-	if state == nil || state.plan == nil {
-		return nil, fmt.Errorf("orchestrator bridge: no DAG was planned for task %s", ec.TaskID)
-	}
 	defer b.releaseAdmission(ec.TenantID, ec.TaskID)
-	latest := make([]*subtask.Subtask, 0, len(state.plan.Subtasks))
-	for _, st := range state.plan.Subtasks {
-		if state.scheduler != nil {
-			if cur, ok := state.scheduler.Item(st.SubtaskID); ok {
-				latest = append(latest, cur)
-				continue
-			}
-		}
-		latest = append(latest, st)
+	latest, dagID, err := b.dStageRows(ctx, ec)
+	if err != nil {
+		return nil, err
 	}
 	taskEmitter := b.taskEmitter(ec)
 	aggregator := orchestrator.NewAggregator(orchestrator.FSVerifier{Root: ec.WorkspaceRoot}, taskEmitter)
 	return aggregator.Aggregate(ctx, orchestrator.AggregationRequest{
 		ParentTaskID: ec.TaskID,
-		DagID:        state.dagID,
+		DagID:        dagID,
 		TenantID:     ec.TenantID,
 		ProjectID:    ec.ProjectID,
 		Subtasks:     latest,
 	})
+}
+
+// dStageRows returns the freshest view of every subtask of this parent. The
+// in-memory scheduler wins because it is what the status sink mirrors; when the
+// process lost that state (restart, or a plan produced by another instance) the
+// persisted rows are used instead. Without the fallback a parent could finish
+// "clean" just because its plan is no longer in memory — exactly the masking
+// T-P2-29 forbids.
+func (b *OrchestratorBridge) dStageRows(ctx context.Context, ec OrchestratorStageContext) ([]*subtask.Subtask, string, error) {
+	if state := b.stateFor(ec.TaskID); state != nil && state.plan != nil {
+		latest := make([]*subtask.Subtask, 0, len(state.plan.Subtasks))
+		for _, st := range state.plan.Subtasks {
+			if state.scheduler != nil {
+				if cur, ok := state.scheduler.Item(st.SubtaskID); ok {
+					latest = append(latest, cur)
+					continue
+				}
+			}
+			latest = append(latest, st)
+		}
+		return latest, state.dagID, nil
+	}
+	if b.subtasks == nil {
+		return nil, "", fmt.Errorf("%w for task %s", ErrNoDagPlanned, ec.TaskID)
+	}
+	rows, err := b.subtasks.List(ctx, ec.TenantID, ec.ProjectID, ec.TaskID, 1000)
+	if err != nil {
+		return nil, "", fmt.Errorf("orchestrator bridge: load subtasks for task %s: %w", ec.TaskID, err)
+	}
+	if len(rows) == 0 {
+		return nil, "", fmt.Errorf("%w for task %s", ErrNoDagPlanned, ec.TaskID)
+	}
+	out := make([]*subtask.Subtask, 0, len(rows))
+	dagID := ""
+	for _, row := range rows {
+		st := subtaskFromRow(row)
+		if st == nil {
+			continue
+		}
+		if dagID == "" {
+			dagID = st.DagID
+		}
+		out = append(out, st)
+	}
+	return out, dagID, nil
+}
+
+// subtaskFromRow rehydrates a persisted subtask row. It is the inverse of
+// subtaskRows and exists so the d-stage can aggregate rows it did not plan in
+// this process.
+func subtaskFromRow(row *repository.SubtaskRow) *subtask.Subtask {
+	if row == nil {
+		return nil
+	}
+	st := &subtask.Subtask{
+		SubtaskID:       row.SubtaskID,
+		ParentTaskID:    row.ParentTaskID,
+		TenantID:        row.TenantID,
+		ProjectID:       row.ProjectID,
+		DagID:           row.DagID,
+		DagNodeID:       row.DagNodeID,
+		Depth:           row.Depth,
+		IndexInParent:   row.IndexInParent,
+		ParallelSetID:   row.ParallelSetID,
+		Role:            row.Role,
+		Status:          subtask.Status(row.Status),
+		DependsOn:       append([]string(nil), row.DependsOn...),
+		AcceptanceID:    row.AcceptanceID,
+		FailureStrategy: subtask.FailureStrategy(row.FailureStrategy),
+		AttemptNo:       row.AttemptNo,
+		HandoffID:       row.HandoffID,
+		AllocTokens:     row.AllocTokens,
+		ConsumedTokens:  row.ConsumedTokens,
+		TokenSource:     row.TokenSource,
+		ConsumedCost:    row.ConsumedCost,
+		CreatedAt:       row.CreatedAt,
+		UpdatedAt:       row.UpdatedAt,
+	}
+	_ = json.Unmarshal(row.InputContract, &st.InputContract)
+	_ = json.Unmarshal(row.OutputContract, &st.OutputContract)
+	_ = json.Unmarshal(row.AcceptanceCriteria, &st.AcceptanceCriteria)
+	_ = json.Unmarshal(row.ArtifactRefs, &st.ArtifactRefs)
+	return st
 }
 
 func (b *OrchestratorBridge) stateFor(taskID string) *orchestrationState {

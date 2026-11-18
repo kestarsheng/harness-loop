@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -30,6 +31,132 @@ func newTestOrchestratorBridge() (*OrchestratorBridge, *modelEventSink, *autoAcc
 const testDAGPlan = `{"dag_id":"dag-1","nodes":[
  {"node_id":"n1","role":"coder","input_contract":{"type":"file_set","paths":["src/a/**"]},"output_contract":{"type":"artifacts","paths":["src/a/**"]}}],
  "edges":[],"parallel_sets":[]}`
+
+// 三个并行节点的计划，用来验证 T-P2-29 的三态（0/3、3/3、2/3 容忍失败）。
+func testTriNodePlan(strategy string) string {
+	return `{"dag_id":"dag-3","nodes":[
+	 {"node_id":"n1","role":"coder","input_contract":{"type":"workspace","paths":["."]},"output_contract":{"type":"files","paths":["out/n1"]}},
+	 {"node_id":"n2","role":"coder","input_contract":{"type":"workspace","paths":["."]},"output_contract":{"type":"files","paths":["out/n2"]}},
+	 {"node_id":"n3","role":"coder","input_contract":{"type":"workspace","paths":["."]},"output_contract":{"type":"files","paths":["out/n3"]}}],
+	 "edges":[],
+	 "parallel_sets":[{"set_id":"p1","nodes":["n1","n2","n3"],"failure_strategy":"` + strategy + `","tolerate_ratio":0.5}]}`
+}
+
+// scriptedExecutor 按 dag_node_id 决定成功/失败，用来伪造子任务行。
+type scriptedExecutor struct {
+	fail map[string]bool
+}
+
+func (e *scriptedExecutor) Execute(_ context.Context, _ OrchestratorStageContext, st *subtask.Subtask) (*SubtaskResult, error) {
+	if e.fail[st.DagNodeID] {
+		return nil, &SubtaskExecError{Reason: "scripted failure for " + st.DagNodeID}
+	}
+	return &SubtaskResult{AcceptanceID: "acc-" + st.SubtaskID, Conclusion: "done-" + st.SubtaskID}, nil
+}
+
+func planAndRunDStage(t *testing.T, strategy string, exec SubtaskExecutor) (*orchestrator.AggregationReport, error) {
+	t.Helper()
+	sink := &modelEventSink{}
+	pub := event.NewPublisher(sink, nil, nil)
+	emitter := orchestrator.NewPublisherEmitter(pub, orchestrator.EmitContext{})
+	bridge := NewOrchestratorBridge(true, emitter, exec)
+	ec := OrchestratorStageContext{TenantID: "tenant-a", ProjectID: "proj-a", TaskID: "task-1", Stage: "b", AttemptNo: 1}
+	if _, err := bridge.PlanBStage(context.Background(), ec, []byte(testTriNodePlan(strategy))); err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	ec.Stage = "c"
+	if _, err := bridge.DispatchCStage(context.Background(), ec); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	ec.Stage = "d"
+	return bridge.AggregateDStage(context.Background(), ec)
+}
+
+// T-P2-29 三态：3/3 accepted → complete；0/3 accepted → 不得 complete；
+// tolerate 下 2/3 成功 → complete 但带 failed_subtasks。
+func TestOrchestratorBridgeDStageClosureThreeStates(t *testing.T) {
+	t.Run("all accepted closes", func(t *testing.T) {
+		report, err := planAndRunDStage(t, "tolerate", &scriptedExecutor{})
+		if err != nil {
+			t.Fatalf("3/3 accepted must close: %v", err)
+		}
+		if !report.Complete || report.Summary.Accepted != 3 || report.CompletedWithFailures {
+			t.Fatalf("unexpected report: %+v", report)
+		}
+		if len(report.FailedSubtasks) != 0 {
+			t.Fatalf("a clean run must not list failed subtasks: %+v", report.FailedSubtasks)
+		}
+	})
+
+	t.Run("zero accepted blocks", func(t *testing.T) {
+		exec := &scriptedExecutor{fail: map[string]bool{"n1": true, "n2": true, "n3": true}}
+		report, err := planAndRunDStage(t, "tolerate", exec)
+		if err == nil {
+			t.Fatalf("0/3 accepted must not close the d stage")
+		}
+		if orchestrator.ErrorCode(err) != orchestrator.CodeAggregationNoAccepted {
+			t.Fatalf("error code = %q, want %q (err=%v)", orchestrator.ErrorCode(err), orchestrator.CodeAggregationNoAccepted, err)
+		}
+		if report == nil || report.Complete {
+			t.Fatalf("report must be incomplete: %+v", report)
+		}
+		if report.Summary.Failed != 3 || len(report.FailedSubtasks) != 3 {
+			t.Fatalf("every failed child must be listed: summary=%+v failed=%+v", report.Summary, report.FailedSubtasks)
+		}
+	})
+
+	t.Run("tolerated failure completes with failures", func(t *testing.T) {
+		exec := &scriptedExecutor{fail: map[string]bool{"n3": true}}
+		report, err := planAndRunDStage(t, "tolerate", exec)
+		if err != nil {
+			t.Fatalf("a tolerated failure must still aggregate: %v", err)
+		}
+		if !report.Complete || !report.CompletedWithFailures {
+			t.Fatalf("expected complete with failures: complete=%v with_failures=%v", report.Complete, report.CompletedWithFailures)
+		}
+		if report.Summary.Accepted != 2 || report.Summary.Failed != 1 {
+			t.Fatalf("unexpected summary: %+v", report.Summary)
+		}
+		if len(report.FailedSubtasks) != 1 || report.FailedSubtasks[0].DagNodeID != "n3" {
+			t.Fatalf("failed_subtasks must name n3: %+v", report.FailedSubtasks)
+		}
+	})
+
+	// 需求 1：running/pending 子任务 → 不得返回 complete。
+	t.Run("open subtasks block", func(t *testing.T) {
+		sink := &modelEventSink{}
+		pub := event.NewPublisher(sink, nil, nil)
+		emitter := orchestrator.NewPublisherEmitter(pub, orchestrator.EmitContext{})
+		// 不挂 executor：子任务停在 running，正是"没收口"的场景。
+		bridge := NewOrchestratorBridge(true, emitter, nil)
+		ec := OrchestratorStageContext{TenantID: "tenant-a", ProjectID: "proj-a", TaskID: "task-1", Stage: "b", AttemptNo: 1}
+		if _, err := bridge.PlanBStage(context.Background(), ec, []byte(testTriNodePlan("tolerate"))); err != nil {
+			t.Fatalf("plan: %v", err)
+		}
+		ec.Stage = "c"
+		if _, err := bridge.DispatchCStage(context.Background(), ec); err != nil {
+			t.Fatalf("dispatch: %v", err)
+		}
+		ec.Stage = "d"
+		report, err := bridge.AggregateDStage(context.Background(), ec)
+		if orchestrator.ErrorCode(err) != orchestrator.CodeAggregationNotTerminal {
+			t.Fatalf("error code = %q, want %q (err=%v)", orchestrator.ErrorCode(err), orchestrator.CodeAggregationNotTerminal, err)
+		}
+		if report.Complete || report.Summary.NonTerminal != 3 {
+			t.Fatalf("open subtasks must block completion: %+v", report)
+		}
+	})
+}
+
+// 没有规划过 DAG（b 阶段没走到 / 计划被拒）不是"子任务没收口"，必须能被上层识别。
+func TestOrchestratorBridgeDStageWithoutPlan(t *testing.T) {
+	bridge, _, _ := newTestOrchestratorBridge()
+	ec := OrchestratorStageContext{TenantID: "tenant-a", ProjectID: "proj-a", TaskID: "task-none", Stage: "d"}
+	_, err := bridge.AggregateDStage(context.Background(), ec)
+	if !errors.Is(err, ErrNoDagPlanned) {
+		t.Fatalf("err = %v, want ErrNoDagPlanned", err)
+	}
+}
 
 func TestOrchestratorBridgePlansDispatchesAndAggregates(t *testing.T) {
 	bridge, sink, executor := newTestOrchestratorBridge()
@@ -176,4 +303,9 @@ func TestOrchestratorBridgeSharesTenantGateWithAdmission(t *testing.T) {
 	if _, err := bridge.PlanBStage(context.Background(), other, []byte(testDAGPlan)); err != nil {
 		t.Fatalf("another tenant must have its own pool: %v", err)
 	}
+}
+
+// aggErrCode 造一个带稳定错误码的编排层错误，供分类断言使用。
+func aggErrCode(code string) error {
+	return &subtask.CodedError{Code: code, Detail: "test"}
 }
