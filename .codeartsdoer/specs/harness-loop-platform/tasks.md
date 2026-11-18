@@ -7,7 +7,7 @@
 | 状态 | 待评审 |
 | 上游文档 | `spec.md` v1.1（170 条 REQ + 38 条 DFX）、`design.md` v1.2（12 章，5 项锁定决策） |
 | 代码基线 | `agent-platform` @ `4a05ccb`，Go 1.22 |
-| 任务规模 | 102 个任务（P0 27 / P1 36 / P2 39） |
+| 任务规模 | 104 个任务（P0 27 / P1 36 / P2 41） |
 | 已锁定决策 | A 方案记忆事实源、PG 仅承载索引与事件（D2）、RAG 复用 Go knowledge-service（D3）、runtime 复用 `pkg/llm` + cobra/Bubble Tea（D4）、新增 :50008（D6/D14）、自研模板摘要唯一通道（D13）、多 Agent 8/20/20/2（U13-A）、审批一期留 agent-service（U17-A）、阶段模型默认继承（U18-A）、子任务验收复用父验收器（U19-A） |
 
 > 阅读约定：每个任务给出「目标 → 关联需求 → 设计章节 → 依赖 → 文件 → 实施要点 → 验收标准 → 复杂度」。`[N]` 表示新增文件，`[M]` 表示改造存量文件。验收标准优先给出可直接执行的命令或断言。本文件不含实现代码。
@@ -1349,7 +1349,31 @@
 | 验收标准 | 失败子任务在 d→c 回退后真实重跑并 `accepted`；或达到上限后 `failed` 且事件序列可证；`go test ./pkg/harnessloop/orchestrator/... ./services/harnessloop-service/...` 全绿。 |
 | 复杂度 | M（1 天） |
 
-> P2 合计：实施 34 个 + 测试 5 个 = **39 个任务**。
+### T-P2-35 orchestrator 开启导致 harnessloop-service 崩溃（P0）
+
+| 字段 | 内容 |
+|---|---|
+| 目标 | 定位并修复「orchestrator 开启后 harnessloop-service 进程稳定被杀」；多节点与工具循环必须能同时运行。 |
+| 关联需求 | REQ-123~141、DFX-R-01；design 7.3 |
+| 依赖 | 无（阻塞 T-P2-23 达标） |
+| 涉及文件 | [M] `services/harnessloop-service/cmd/**`、`internal/service/**`（启动与生命周期）、必要时 [M] `pkg/harnessloop/orchestrator/**` |
+| 实施要点 | 1) 复现：orchestrator=on 启动后数秒进程退出；2) 抓取退出码、stderr、Windows 事件日志与 panic；3) 区分 panic/os.Exit/信号/端口冲突；4) 修复后 orchestrator=on 连续跑 3 次真实任务不崩；5) 补回归测试或启动自检。 |
+| 验收标准 | `orchestrator=on` 启动 10 分钟不退出；连续 3 个真实任务完成且进程存活；退出原因可查；`go test ./services/harnessloop-service/...` 全绿。 |
+| 复杂度 | M（1 天） |
+
+### T-P2-36 HARNESSLOOP_LLM_* 注入导致启动 exit(1)（P0）
+
+| 字段 | 内容 |
+|---|---|
+| 目标 | 修复注入 `HARNESSLOOP_LLM_API_KEY/BASE_URL/MODEL` 后 harnessloop-service 静默 exit(1)，否则真实 LLM 配置无法在隔离栈生效。 |
+| 关联需求 | REQ-096、REQ-101；design 4.11.5 |
+| 依赖 | 无 |
+| 涉及文件 | [M] `services/harnessloop-service/cmd/**`、`internal/config/**`、[M] `docs/dev.md` |
+| 实施要点 | 1) 复现并保留 stderr（当前静默）；2) 校验配置加载顺序（环境变量 vs yaml）与必填项；3) 错误必须打印可读原因并非零退出；4) 补配置单测。 |
+| 验收标准 | 注入三变量后服务正常启动并完成一次真实任务；缺少变量时给出明确错误而非静默 exit(1)；配置测试全绿。 |
+| 复杂度 | S（0.5 天） |
+
+> P2 合计：实施 36 个 + 测试 5 个 = **41 个任务**。
 
 ---
 
