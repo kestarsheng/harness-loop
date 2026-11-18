@@ -15,6 +15,7 @@ import (
 	"agent-platform/pkg/harnessloop/policy/sandbox"
 	"agent-platform/pkg/llm"
 	pb "agent-platform/pkg/pb/mcp"
+	"agent-platform/services/mcp-service/internal/audit"
 	"agent-platform/services/mcp-service/internal/handler"
 	"agent-platform/services/mcp-service/internal/service"
 
@@ -54,6 +55,13 @@ func main() {
 	})
 	if err != nil {
 		log.Fatalf("Failed to create LLM client: %v", err)
+	}
+
+	// Tool-level refusals (path escape, missing workspace root) never reach the
+	// policy engine, so they are written to their own audit trail.
+	if auditPath := os.Getenv("MCP_TOOL_AUDIT_FILE"); auditPath != "" {
+		audit.SetFile(auditPath)
+		log.Printf("MCP tool audit trail: %s", auditPath)
 	}
 
 	// Create MCP service

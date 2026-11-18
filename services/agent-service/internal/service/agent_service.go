@@ -399,7 +399,7 @@ func (s *AgentService) ExecuteStream(req *pb.ExecuteStreamRequest, stream pb.Age
 		// call would overwrite the real arguments downstream.
 		if event.ToolName != "" && event.Type == agent.EventToolStart && len(event.ToolArgs) > 0 {
 			chunk.ToolCall = &pb.ToolCall{
-				Name:      event.ToolName,
+				Name:      harnessToolName(event.ToolName),
 				Arguments: string(event.ToolArgs),
 			}
 		}
