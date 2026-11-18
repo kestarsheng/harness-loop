@@ -18,13 +18,16 @@ func TestLoopCommandRegistered(t *testing.T) {
 	if len(args) != 0 {
 		t.Fatalf("unexpected args: %v", args)
 	}
-	for _, name := range []string{"goal", "goal-file", "workspace", "project", "budget-tokens", "budget-cost", "timeout"} {
+	for _, name := range []string{"goal", "goal-file", "workspace", "project", "budget-tokens", "budget-cost", "timeout", "exit-on-complete"} {
 		if loop.Flags().Lookup(name) == nil {
 			t.Fatalf("loop flag --%s missing", name)
 		}
 	}
 	if got := loop.Flags().Lookup("timeout").DefValue; got != "0s" {
 		t.Fatalf("loop timeout default = %s", got)
+	}
+	if got := loop.Flags().Lookup("exit-on-complete").DefValue; got != "false" {
+		t.Fatalf("loop exit-on-complete default = %s", got)
 	}
 
 	run, _, err := root.Find([]string{"run"})
