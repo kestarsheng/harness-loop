@@ -119,6 +119,9 @@ type Options struct {
 	// evidence runs (HARNESS_TUI_VIEW / HARNESS_TUI_KB_QUERY).
 	InitialView  string
 	InitialQuery string
+	// Session turns this model into a resident multi-task session. It is only
+	// set by RunSession; Run keeps the legacy single-task behaviour.
+	Session *SessionConfig
 }
 
 type Model struct {
@@ -190,32 +193,54 @@ type Model struct {
 	toolDenied        int
 
 	pollTick int
+
+	// session is nil for the legacy single-task monitor. When set, terminal
+	// tasks return to the input box instead of quitting.
+	session       *SessionConfig
+	input         *PromptModel
+	awaitingInput bool
+	submitting    bool
+	exitRequested bool
+	taskIDs       []string
+
+	// taskGen tags async messages so a late reply from a previous task can
+	// never be applied to the task now on screen.
+	taskGen    int
+	taskCtx    context.Context
+	taskCancel context.CancelFunc
 }
 
 type taskMsg struct {
+	Gen   int
 	State TaskState
 	Err   error
 }
 
 type catchUpMsg struct {
+	Gen    int
 	Events []Event
 	Next   int64
 	Err    error
 }
 
 type watchStartedMsg struct {
-	Ch <-chan WatchEvent
+	Gen int
+	Ch  <-chan WatchEvent
 }
 
 type eventMsg struct {
+	Gen   int
 	Event Event
 }
 
 type watchErrMsg struct {
+	Gen int
 	Err error
 }
 
-type reconnectMsg struct{}
+type reconnectMsg struct {
+	Gen int
+}
 
 type abortMsg struct {
 	Err error
@@ -226,9 +251,21 @@ type openURLMsg struct {
 	Err error
 }
 
-type flushMsg struct{}
+type flushMsg struct {
+	Gen int
+}
 
-type pollMsg struct{}
+type pollMsg struct {
+	Gen int
+}
+
+// taskCreatedMsg is the reply to a session goal submission.
+type taskCreatedMsg struct {
+	Task TaskState
+	Src  Source
+	Goal string
+	Err  error
+}
 
 func NewModel(state TaskState, src Source, opts Options) *Model {
 	now := opts.Now
@@ -276,6 +313,14 @@ func NewModel(state TaskState, src Source, opts Options) *Model {
 	if strings.TrimSpace(opts.InitialQuery) != "" {
 		m.kb.Query = strings.TrimSpace(opts.InitialQuery)
 	}
+	if opts.Session != nil {
+		m.session = opts.Session
+		m.input = NewPromptModel("Harness Loop", opts.WebURL, PromptOptions{
+			NoColor:   opts.NoColor,
+			Hyperlink: opts.Hyperlink,
+			Embedded:  true,
+		})
+	}
 	return m
 }
 
@@ -285,6 +330,18 @@ func (m *Model) WithContext(ctx context.Context) *Model {
 }
 
 func (m *Model) Init() tea.Cmd {
+	if m.session != nil {
+		m.awaitingInput = true
+		m.input.Reset()
+		if goal := strings.TrimSpace(m.session.InitialGoal); goal != "" {
+			// Reuse the same dispatcher as typed input so an initial "exit" or
+			// slash command cannot create a task by accident.
+			if _, cmd := m.handleSessionSubmit(goal); cmd != nil {
+				return cmd
+			}
+		}
+		return nil
+	}
 	cmds := []tea.Cmd{
 		tea.Tick(flushInterval, func(time.Time) tea.Msg { return flushMsg{} }),
 		tea.Tick(pollInterval, func(time.Time) tea.Msg { return pollMsg{} }),
@@ -308,26 +365,60 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		if m.input != nil {
+			_, _ = m.input.Update(msg)
+		}
 		return m, nil
 
 	case tea.KeyMsg:
+		if m.session != nil && m.awaitingInput {
+			return m, m.input.HandleKey(msg)
+		}
 		return m.handleKey(msg)
 
+	case promptSubmitMsg:
+		return m.handleSessionSubmit(msg.Value)
+
+	case promptQuitMsg:
+		m.exitRequested = true
+		return m, tea.Quit
+
+	case taskCreatedMsg:
+		if msg.Err != nil {
+			m.submitting = false
+			m.awaitingInput = true
+			m.errText = "create task failed: " + msg.Err.Error()
+			return m, nil
+		}
+		m.startTask(msg.Task, msg.Src)
+		m.taskIDs = append(m.taskIDs, msg.Task.TaskID)
+		gen := m.taskGen
+		return m, tea.Batch(
+			tea.Tick(flushInterval, func(time.Time) tea.Msg { return flushMsg{Gen: gen} }),
+			tea.Tick(pollInterval, func(time.Time) tea.Msg { return pollMsg{Gen: gen} }),
+			m.catchUpCmd(),
+		)
+
 	case flushMsg:
+		if msg.Gen != m.taskGen {
+			return m, nil
+		}
 		m.flushPending()
 		if m.terminal {
 			return m, nil
 		}
-		return m, tea.Tick(flushInterval, func(time.Time) tea.Msg { return flushMsg{} })
+		gen := m.taskGen
+		return m, tea.Tick(flushInterval, func(time.Time) tea.Msg { return flushMsg{Gen: gen} })
 
 	case pollMsg:
-		if m.terminal {
+		if msg.Gen != m.taskGen || m.terminal {
 			return m, nil
 		}
 		m.pollTick++
+		gen := m.taskGen
 		cmds := []tea.Cmd{
 			m.fetchTaskCmd(),
-			tea.Tick(pollInterval, func(time.Time) tea.Msg { return pollMsg{} }),
+			tea.Tick(pollInterval, func(time.Time) tea.Msg { return pollMsg{Gen: gen} }),
 		}
 		if m.pollTick%5 == 0 {
 			if cmd := m.refreshPanelCmd(m.mode); cmd != nil {
@@ -345,17 +436,23 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case taskMsg:
+		if msg.Gen != m.taskGen {
+			return m, nil
+		}
 		if msg.Err != nil {
 			m.errText = "task refresh failed: " + msg.Err.Error()
 			return m, nil
 		}
 		m.mergeTask(msg.State)
 		if m.terminal {
-			return m, tea.Quit
+			return m, m.terminalCmd()
 		}
 		return m, nil
 
 	case catchUpMsg:
+		if msg.Gen != m.taskGen {
+			return m, nil
+		}
 		if msg.Err != nil {
 			return m, m.scheduleReconnect(msg.Err)
 		}
@@ -366,11 +463,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.lastSeq = msg.Next
 		}
 		if m.terminal {
-			return m, tea.Quit
+			return m, m.terminalCmd()
 		}
 		return m, m.connectCmd()
 
 	case watchStartedMsg:
+		if msg.Gen != m.taskGen {
+			return m, nil
+		}
 		m.watchCh = msg.Ch
 		m.connected = true
 		m.reconnecting = false
@@ -380,17 +480,23 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.nextEventCmd()
 
 	case eventMsg:
+		if msg.Gen != m.taskGen {
+			return m, nil
+		}
 		m.applyEvent(msg.Event)
 		if m.terminal {
-			return m, tea.Quit
+			return m, m.terminalCmd()
 		}
 		return m, m.nextEventCmd()
 
 	case watchErrMsg:
+		if msg.Gen != m.taskGen {
+			return m, nil
+		}
 		return m, m.scheduleReconnect(msg.Err)
 
 	case reconnectMsg:
-		if m.terminal {
+		if msg.Gen != m.taskGen || m.terminal {
 			return m, nil
 		}
 		return m, m.catchUpCmd()
@@ -412,6 +518,95 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	return m, nil
+}
+
+// handleSessionSubmit turns an input-box line into either a new task or a
+// session exit, using the same dispatcher as the terminal fallback prompt.
+func (m *Model) handleSessionSubmit(line string) (tea.Model, tea.Cmd) {
+	if m.session == nil || !m.awaitingInput {
+		return m, nil
+	}
+	dispatched := DispatchSessionLine(line)
+	switch dispatched.Action {
+	case SessionExit:
+		m.exitRequested = true
+		return m, tea.Quit
+	case SessionSubmit:
+		m.awaitingInput = false
+		m.submitting = true
+		m.errText = ""
+		return m, m.createTaskCmd(dispatched.Goal)
+	default:
+		return m, nil
+	}
+}
+
+// terminalCmd decides what happens when the current task reaches a terminal
+// state: resident sessions go back to the input box, legacy runs quit.
+func (m *Model) terminalCmd() tea.Cmd {
+	if m.session == nil || m.session.ExitOnComplete {
+		return tea.Quit
+	}
+	if !m.awaitingInput {
+		m.awaitingInput = true
+		m.submitting = false
+		m.mode = ViewMain
+		m.input.Reset()
+		m.cancelTaskContext()
+	}
+	return nil
+}
+
+// startTask swaps the monitor over to a freshly created task and resets all
+// per-task rendering state.
+func (m *Model) startTask(state TaskState, src Source) {
+	m.cancelTaskContext()
+	if state.Attempts == nil {
+		state.Attempts = map[string]int{}
+	}
+	if state.Attempt == 0 {
+		state.Attempt = state.Attempts[state.CurrentStage]
+	}
+	state.StageStartedAt = m.now()
+	m.state = state
+	m.src = src
+	m.taskGen++
+	m.watchCh = nil
+	m.terminal = false
+	m.awaitingInput = false
+	m.submitting = false
+	m.mode = ViewMain
+	m.connected = true
+	m.reconnecting = false
+	m.reconnectAttempt = 0
+	m.reconnectDelay = reconnectMin
+	m.aborting = false
+	m.opening = false
+	m.lastSeq = 0
+	m.events = nil
+	m.stream = nil
+	m.pending = nil
+	m.verdicts = map[string]string{}
+	m.verifiedBy = map[string]string{}
+	m.retryByCategory = map[string]int{}
+	m.evidence = nil
+	m.failed = nil
+	m.subagents = views.SubagentData{}
+	m.models = views.ModelData{}
+	m.errText = ""
+	m.pollTick = 0
+	if m.input != nil {
+		m.input.Reset()
+	}
+	m.taskCtx, m.taskCancel = context.WithCancel(m.baseCtx())
+}
+
+func (m *Model) cancelTaskContext() {
+	if m.taskCancel != nil {
+		m.taskCancel()
+		m.taskCancel = nil
+		m.taskCtx = nil
+	}
 }
 
 func (m *Model) mergeTask(next TaskState) {
@@ -581,6 +776,21 @@ func (m *Model) View() string {
 		}
 		parts = append(parts, views.RenderStream(m.stream, width, streamMax, m.theme))
 		parts = append(parts, views.RenderEvents(m.events, width, eventsMax, m.theme))
+	}
+	if m.session != nil {
+		switch {
+		case m.awaitingInput:
+			parts = append(parts, "", m.input.InputLine())
+			if errText := m.input.ErrorText(); errText != "" {
+				parts = append(parts, "  "+errText)
+			}
+			if m.errText != "" {
+				parts = append(parts, "  "+m.errText)
+			}
+			parts = append(parts, "  Enter submit   exit end session   Esc clear")
+		case m.submitting && m.state.TaskID == "":
+			parts = append(parts, "", "  creating task…")
+		}
 	}
 	parts = append(parts, views.RenderFooter(m.modeName(), width, m.theme))
 	return strings.Join(parts, "\n")
@@ -873,7 +1083,8 @@ func (m *Model) scheduleReconnect(err error) tea.Cmd {
 	if m.reconnectDelay > reconnectMax {
 		m.reconnectDelay = reconnectMax
 	}
-	return tea.Tick(delay, func(time.Time) tea.Msg { return reconnectMsg{} })
+	gen := m.taskGen
+	return tea.Tick(delay, func(time.Time) tea.Msg { return reconnectMsg{Gen: gen} })
 }
 
 func (m *Model) baseCtx() context.Context {
@@ -883,17 +1094,49 @@ func (m *Model) baseCtx() context.Context {
 	return context.Background()
 }
 
+// taskBaseCtx is the per-task context; cancelling it stops the previous task's
+// poll and watch goroutines when the session moves on.
+func (m *Model) taskBaseCtx() context.Context {
+	if m.taskCtx != nil {
+		return m.taskCtx
+	}
+	return m.baseCtx()
+}
+
+// createTaskCmd asks the session factory for one new task.
+func (m *Model) createTaskCmd(goal string) tea.Cmd {
+	cfg := m.session
+	if cfg == nil || cfg.CreateTask == nil {
+		return nil
+	}
+	ctx := m.baseCtx()
+	return func() tea.Msg {
+		callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		view, err := cfg.CreateTask(callCtx, goal)
+		if err != nil {
+			return taskCreatedMsg{Goal: goal, Err: err}
+		}
+		var src Source
+		if cfg.SourceFor != nil {
+			src = cfg.SourceFor(view.GetTaskId())
+		}
+		return taskCreatedMsg{Task: taskStateFromProto(view), Src: src, Goal: goal}
+	}
+}
+
 func (m *Model) fetchTaskCmd() tea.Cmd {
 	src := m.src
 	if src == nil {
 		return nil
 	}
-	ctx := m.baseCtx()
+	ctx := m.taskBaseCtx()
+	gen := m.taskGen
 	return func() tea.Msg {
 		callCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
 		state, err := src.Task(callCtx)
-		return taskMsg{State: state, Err: err}
+		return taskMsg{Gen: gen, State: state, Err: err}
 	}
 }
 
@@ -902,13 +1145,14 @@ func (m *Model) catchUpCmd() tea.Cmd {
 	if src == nil {
 		return nil
 	}
-	ctx := m.baseCtx()
+	ctx := m.taskBaseCtx()
+	gen := m.taskGen
 	since := m.lastSeq
 	return func() tea.Msg {
 		callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
 		events, next, err := src.ListEvents(callCtx, since)
-		return catchUpMsg{Events: events, Next: next, Err: err}
+		return catchUpMsg{Gen: gen, Events: events, Next: next, Err: err}
 	}
 }
 
@@ -917,14 +1161,15 @@ func (m *Model) connectCmd() tea.Cmd {
 	if src == nil {
 		return nil
 	}
-	ctx := m.baseCtx()
+	ctx := m.taskBaseCtx()
+	gen := m.taskGen
 	since := m.lastSeq
 	return func() tea.Msg {
 		ch, err := src.Watch(ctx, since)
 		if err != nil {
-			return watchErrMsg{Err: err}
+			return watchErrMsg{Gen: gen, Err: err}
 		}
-		return watchStartedMsg{Ch: ch}
+		return watchStartedMsg{Gen: gen, Ch: ch}
 	}
 }
 
@@ -933,15 +1178,16 @@ func (m *Model) nextEventCmd() tea.Cmd {
 	if ch == nil {
 		return nil
 	}
+	gen := m.taskGen
 	return func() tea.Msg {
 		item, ok := <-ch
 		if !ok {
-			return watchErrMsg{Err: fmt.Errorf("event stream closed")}
+			return watchErrMsg{Gen: gen, Err: fmt.Errorf("event stream closed")}
 		}
 		if item.Err != nil {
-			return watchErrMsg{Err: item.Err}
+			return watchErrMsg{Gen: gen, Err: item.Err}
 		}
-		return eventMsg{Event: item.Event}
+		return eventMsg{Gen: gen, Event: item.Event}
 	}
 }
 
@@ -950,7 +1196,7 @@ func (m *Model) abortCmd() tea.Cmd {
 	if src == nil || m.state.TaskID == "" {
 		return nil
 	}
-	ctx := m.baseCtx()
+	ctx := m.taskBaseCtx()
 	return func() tea.Msg {
 		callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()

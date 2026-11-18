@@ -28,6 +28,32 @@ type RunResult struct {
 	QuitEarly bool
 }
 
+// TaskFactory creates one task for the resident session.
+type TaskFactory func(ctx context.Context, goal string) (*harnesspb.TaskView, error)
+
+// SessionConfig turns the TUI into a resident session: each submitted goal
+// creates a task, terminal tasks return to the input box, and typed commands
+// (for example exit) are dispatched through DispatchSessionLine.
+type SessionConfig struct {
+	// ExitOnComplete restores the legacy "quit when the task completes"
+	// behaviour instead of returning to the input box.
+	ExitOnComplete bool
+	// InitialGoal is submitted immediately on start; empty starts at the input
+	// box.
+	InitialGoal string
+	CreateTask  TaskFactory
+	// SourceFor builds the monitor source for a newly created task.
+	SourceFor func(taskID string) Source
+}
+
+// SessionResult reports what happened during one resident session.
+type SessionResult struct {
+	TaskIDs   []string
+	LastState TaskState
+	HasLast   bool
+	Exited    bool
+}
+
 func Run(ctx context.Context, client harnesspb.HarnessLoopServiceClient, tenant string, task *harnesspb.TaskView, opts RunOptions) (RunResult, error) {
 	if client == nil {
 		return RunResult{}, fmt.Errorf("tui: harnessloop client is required")
@@ -36,16 +62,7 @@ func Run(ctx context.Context, client harnesspb.HarnessLoopServiceClient, tenant 
 		return RunResult{}, fmt.Errorf("tui: task view is required")
 	}
 	src := &grpcSource{client: client, tenant: tenant, taskID: task.GetTaskId(), ctx: ctx}
-	model := NewModel(taskStateFromProto(task), src, Options{
-		NoColor:      opts.NoColor,
-		WebURL:       opts.WebURL,
-		Hyperlink:    opts.Hyperlink,
-		OpenURL:      opts.OpenURL,
-		KB:           opts.KB,
-		KBTopK:       opts.KBTopK,
-		InitialView:  opts.InitialView,
-		InitialQuery: opts.InitialQuery,
-	}).WithContext(ctx)
+	model := NewModel(taskStateFromProto(task), src, modelOptions(opts)).WithContext(ctx)
 	program := tea.NewProgram(
 		model,
 		tea.WithContext(ctx),
@@ -56,6 +73,56 @@ func Run(ctx context.Context, client harnesspb.HarnessLoopServiceClient, tenant 
 		return RunResult{}, err
 	}
 	return RunResult{State: model.state, QuitEarly: !model.state.terminal()}, nil
+}
+
+// RunSession runs the resident multi-task session until the user types exit,
+// the context is cancelled, or (with ExitOnComplete) the current task finishes.
+func RunSession(ctx context.Context, client harnesspb.HarnessLoopServiceClient, tenant string, opts RunOptions, cfg SessionConfig) (SessionResult, error) {
+	if client == nil {
+		return SessionResult{}, fmt.Errorf("tui: harnessloop client is required")
+	}
+	if cfg.CreateTask == nil {
+		return SessionResult{}, fmt.Errorf("tui: session task factory is required")
+	}
+	if cfg.SourceFor == nil {
+		cfg.SourceFor = func(taskID string) Source {
+			return &grpcSource{client: client, tenant: tenant, taskID: taskID, ctx: ctx}
+		}
+	}
+	options := modelOptions(opts)
+	options.Session = &cfg
+	model := NewModel(TaskState{}, nil, options).WithContext(ctx)
+	program := tea.NewProgram(
+		model,
+		tea.WithContext(ctx),
+		tea.WithFPS(10),
+		tea.WithAltScreen(),
+	)
+	if _, err := program.Run(); err != nil {
+		return SessionResult{}, err
+	}
+	result := SessionResult{
+		TaskIDs: append([]string(nil), model.taskIDs...),
+		Exited:  model.exitRequested,
+	}
+	if model.state.TaskID != "" {
+		result.LastState = model.state
+		result.HasLast = true
+	}
+	return result, nil
+}
+
+func modelOptions(opts RunOptions) Options {
+	return Options{
+		NoColor:      opts.NoColor,
+		WebURL:       opts.WebURL,
+		Hyperlink:    opts.Hyperlink,
+		OpenURL:      opts.OpenURL,
+		KB:           opts.KB,
+		KBTopK:       opts.KBTopK,
+		InitialView:  opts.InitialView,
+		InitialQuery: opts.InitialQuery,
+	}
 }
 
 type grpcSource struct {
@@ -119,7 +186,11 @@ func (s *grpcSource) ListEvents(ctx context.Context, sinceSeq int64) ([]Event, i
 }
 
 func (s *grpcSource) Watch(ctx context.Context, sinceSeq int64) (<-chan WatchEvent, error) {
-	streamCtx, cancel := context.WithCancel(s.baseContext())
+	base := ctx
+	if base == nil {
+		base = s.baseContext()
+	}
+	streamCtx, cancel := context.WithCancel(base)
 	stream, err := s.client.WatchEvents(s.callContext(streamCtx), &harnesspb.WatchEventsRequest{
 		TenantId: s.tenant, SinceSeq: sinceSeq, TaskIds: []string{s.taskID},
 	})

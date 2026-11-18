@@ -21,7 +21,17 @@ type PromptOptions struct {
 	Hyperlink bool
 	Width     int
 	Height    int
+	// Embedded switches the prompt into the resident-session input box:
+	// Enter emits promptSubmitMsg instead of quitting, Esc clears the line, and
+	// Ctrl+C asks the owning model to end the session.
+	Embedded bool
 }
+
+// promptSubmitMsg carries a goal submitted from the embedded input box.
+type promptSubmitMsg struct{ Value string }
+
+// promptQuitMsg asks the owning session model to end the current terminal.
+type promptQuitMsg struct{}
 
 // PromptModel is a minimal single-line text input built directly on Bubble
 // Tea so the CLI does not need the bubbles dependency.
@@ -30,6 +40,7 @@ type PromptModel struct {
 	webURL    string
 	hyperlink bool
 	noColor   bool
+	embedded  bool
 	theme     Theme
 
 	value  []rune
@@ -60,6 +71,7 @@ func NewPromptModel(title, webURL string, opts PromptOptions) *PromptModel {
 		webURL:    webURL,
 		hyperlink: opts.Hyperlink,
 		noColor:   opts.NoColor,
+		embedded:  opts.Embedded,
 		theme:     NewTheme(opts.NoColor),
 		width:     width,
 		height:    height,
@@ -82,23 +94,38 @@ func (m *PromptModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
-		return m.handleKey(msg)
+		return m, m.handleKey(msg)
 	}
 	return m, nil
 }
 
-func (m *PromptModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m *PromptModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 	switch msg.Type {
-	case tea.KeyCtrlC, tea.KeyEsc:
+	case tea.KeyCtrlC:
+		if m.embedded {
+			return func() tea.Msg { return promptQuitMsg{} }
+		}
 		m.canceled = true
-		return m, tea.Quit
+		return tea.Quit
+	case tea.KeyEsc:
+		if m.embedded {
+			m.reset()
+			return nil
+		}
+		m.canceled = true
+		return tea.Quit
 	case tea.KeyEnter:
 		if strings.TrimSpace(string(m.value)) == "" {
 			m.errText = "goal cannot be empty"
-			return m, nil
+			return nil
+		}
+		if m.embedded {
+			value := m.Value()
+			m.reset()
+			return func() tea.Msg { return promptSubmitMsg{Value: value} }
 		}
 		m.done = true
-		return m, tea.Quit
+		return tea.Quit
 	case tea.KeyBackspace:
 		if m.cursor > 0 {
 			m.deleteRange(m.cursor-1, m.cursor)
@@ -130,7 +157,15 @@ func (m *PromptModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyRunes:
 		m.insertRunes(msg.Runes)
 	}
-	return m, nil
+	return nil
+}
+
+func (m *PromptModel) reset() {
+	m.value = nil
+	m.cursor = 0
+	m.errText = ""
+	m.done = false
+	m.canceled = false
 }
 
 func (m *PromptModel) insertRunes(runes []rune) {
@@ -227,6 +262,19 @@ func (m *PromptModel) displayLine() string {
 	}
 	return b.String()
 }
+
+// HandleKey forwards a key press from an embedding model to the same input
+// implementation, returning whatever command the edit produced.
+func (m *PromptModel) HandleKey(msg tea.KeyMsg) tea.Cmd { return m.handleKey(msg) }
+
+// Reset clears the input buffer between session tasks.
+func (m *PromptModel) Reset() { m.reset() }
+
+// InputLine renders the compact one-line composer used inside the session.
+func (m *PromptModel) InputLine() string { return "  > " + m.displayLine() }
+
+// ErrorText returns the current inline validation error.
+func (m *PromptModel) ErrorText() string { return m.errText }
 
 // Value returns the trimmed goal text entered by the user.
 func (m *PromptModel) Value() string {
