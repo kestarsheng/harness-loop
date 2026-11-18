@@ -321,7 +321,7 @@ func (b *OrchestratorBridge) DispatchCStage(ctx context.Context, ec Orchestrator
 		} else if res != nil {
 			// Record how the consumption figure was obtained next to the usage
 			// itself, so an estimate is never mistaken for billed tokens.
-			_ = b.taskEmitter(ec).EmitType(ctx, orchestrator.EmitContext{
+			reportEmitFailure(ec.TaskID, event.SubtaskTokenUsage, b.taskEmitter(ec).EmitType(ctx, orchestrator.EmitContext{
 				SubtaskID: st.SubtaskID, DagID: st.DagID, DagNodeID: st.DagNodeID,
 				ParallelSetID: st.ParallelSetID,
 			}, event.SubtaskTokenUsage, orchestrator.SeverityInfo, map[string]any{
@@ -330,7 +330,7 @@ func (b *OrchestratorBridge) DispatchCStage(ctx context.Context, ec Orchestrator
 				"token_source":    res.TokenSource,
 				"model_id":        res.ModelID,
 				"duration_ms":     res.DurationMS,
-			})
+			}))
 		}
 	}
 	return running, nil
@@ -563,9 +563,9 @@ func (b *OrchestratorBridge) emitSecurityViolation(ctx context.Context, ec Orche
 	if b == nil || b.emitter == nil {
 		return
 	}
-	_ = b.taskEmitter(ec).EmitType(ctx, orchestrator.EmitContext{}, "security.violation", orchestrator.SeverityError, map[string]any{
+	reportEmitFailure(ec.TaskID, event.SecurityViolation, b.taskEmitter(ec).EmitType(ctx, orchestrator.EmitContext{}, "security.violation", orchestrator.SeverityError, map[string]any{
 		"reason": reason, "stage": ec.Stage,
-	})
+	}))
 }
 
 func extractJSON(raw []byte) []byte {

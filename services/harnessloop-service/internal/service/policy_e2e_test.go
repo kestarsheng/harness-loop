@@ -58,9 +58,9 @@ type scriptedCall struct {
 
 // policyScriptedAgent 按 stage 回放脚本化的 tool_call，并统计自己实际发出了多少次。
 type policyScriptedAgent struct {
-	mu      sync.Mutex
-	scripts map[string][]scriptedCall
-	emitted int
+	mu       sync.Mutex
+	scripts  map[string][]scriptedCall
+	emitted  int
 	perStage map[string]int
 }
 
@@ -110,35 +110,17 @@ func (a *policyScriptedAgent) Emitted() int {
 
 // policyEventStore 是 event.Publisher 的落库端，与 cmd/main.go 的 eventSink 同形。
 //
-// 这里多做一件事：按数据库 watermark 校正事件 seq。原因是 event.Publisher 用
-// 内存里的 SeqAllocator（每个 task 从 1 开始），而 runtime 的 stage.transition /
-// task.failed 走的是 repository 直接写库、seq 取 DB 的 max+1，两者各算各的，
-// 于是同一条任务上会出现 seq 撞车，撞车的事件被 (task_id, seq) 唯一键丢掉。
-// 本测试要验的是「决策 → 事件」的内容对应，不是 seq 分配器，所以在落库前把
-// seq 对齐到 DB watermark；产品侧这个丢事件问题在报告里单列，不在这里掩盖。
+// 这里刻意**不再**做任何 seq 校正。T-P2-32 之前 event.Publisher 用内存里的
+// SeqAllocator（每个任务从 1 开始），runtime 的 stage.transition / task.failed
+// 又直接写库取 DB 的 max+1，两条写者撞 (task_id, seq) 唯一键，撞车的事件被丢，
+// 本测试曾经靠「落库前把 seq 对齐到 DB watermark」绕过。现在 seq 的唯一分配者
+// 是 repository.EventRepo.Append，校正逻辑成了反向指标，必须消失。
 type policyEventStore struct {
 	repo *repository.EventRepo
-	db   *pgindex.DB
 	t    *testing.T
 }
 
 func (s policyEventStore) Append(ctx context.Context, events []*event.Event) error {
-	if s.db != nil {
-		for _, e := range events {
-			if e == nil {
-				continue
-			}
-			var maxSeq int64
-			if err := s.db.Pool().QueryRow(ctx,
-				`SELECT COALESCE(MAX(seq),0) FROM hlp_event.events WHERE task_id = $1`, e.TaskID,
-			).Scan(&maxSeq); err != nil && s.t != nil {
-				s.t.Logf("event sink seq watermark query failed: %v", err)
-			}
-			if e.Seq <= maxSeq {
-				e.Seq = maxSeq + 1
-			}
-		}
-	}
 	_, err := s.repo.Append(ctx, "", "", events)
 	if err != nil && s.t != nil {
 		s.t.Logf("event sink append failed (%d events): %v", len(events), err)
@@ -235,7 +217,7 @@ func newPolicyE2E(t *testing.T, scripts map[string][]scriptedCall, opts ...polic
 	checkpointRepo := repository.NewCheckpointRepo(db)
 	auditRepo := repository.NewAuditRepo(db)
 
-	publisher := event.NewPublisher(policyEventStore{repo: eventRepo, db: db, t: t}, event.NewMemoryIdempotency(1000), event.NewMemoryBuffer())
+	publisher := event.NewPublisher(policyEventStore{repo: eventRepo, t: t}, event.NewMemoryIdempotency(1000), event.NewMemoryBuffer())
 	emitter := orchestrator.NewPublisherEmitter(publisher, orchestrator.EmitContext{TenantID: "platform", ProjectID: "platform"})
 
 	manager := agentapproval.NewApprovalFlowManager()
@@ -342,9 +324,8 @@ func (e *policyE2EEnv) runTask(t *testing.T, taskID, workspace string) string {
 }
 
 // flushQuietly 触发一次 publisher 落库。事件是异步投递的，直接读表会拿到
-// 「还没写进去」的假阴性，因此读事件前先 flush。Flush 可能重投已入库事件
-// （events 表的 (task_id, seq) 唯一键会报 23505），这里不把它当成失败：
-// 事件仍然已经落库，后续断言照样成立。
+// 「还没写进去」的假阴性，因此读事件前先 flush。Flush 重投已入库事件时由
+// event_id 主键幂等吃掉（ON CONFLICT DO NOTHING），不会撞 (task_id, seq)。
 func (e *policyE2EEnv) flushQuietly() {
 	if e.publisher == nil {
 		return
@@ -434,6 +415,28 @@ func (e *policyE2EEnv) taskEvents(t *testing.T, taskID string) []*event.Event {
 	return rows
 }
 
+// assertContiguousSeq 断言某任务事件的 seq 从 1 开始连续、不重号。
+// seq 由事件库单一分配时这是恒等式；一旦有人重新自己编号，就会出现重号
+// （后写的那条被唯一键丢掉 → 事件缺失）或空洞。
+func assertContiguousSeq(t *testing.T, events []*event.Event) {
+	t.Helper()
+	seen := make(map[int64]bool, len(events))
+	for _, ev := range events {
+		if ev.Seq <= 0 {
+			t.Fatalf("event %s has no assigned seq", ev.EventID)
+		}
+		if seen[ev.Seq] {
+			t.Fatalf("duplicate seq %d on task %s (event %s)", ev.Seq, ev.TaskID, ev.EventID)
+		}
+		seen[ev.Seq] = true
+	}
+	for i := 1; i <= len(events); i++ {
+		if !seen[int64(i)] {
+			t.Fatalf("seq gap at %d (events=%d): %v", i, len(events), seen)
+		}
+	}
+}
+
 // TestPolicyAuditPositiveOneToOne 正向用例：允许的工具调用 → 审计条数 == 调用次数。
 func TestPolicyAuditPositiveOneToOne(t *testing.T) {
 	e := newPolicyE2E(t, map[string][]scriptedCall{
@@ -455,6 +458,12 @@ func TestPolicyAuditPositiveOneToOne(t *testing.T) {
 	if status != string(repository.TaskCompleted) {
 		t.Fatalf("positive task status = %s, want completed", status)
 	}
+
+	// 终态事件必须真的落库：T-P2-32 之前 task.completed 会被 seq 撞键吞掉。
+	if completed := e.waitForEvent(t, taskID, event.TaskCompleted); completed == nil {
+		t.Fatalf("no task.completed event recorded for task %s", taskID)
+	}
+	assertContiguousSeq(t, e.taskEvents(t, taskID))
 
 	rows := e.auditRows(t, taskID)
 	emitted := e.agent.Emitted()

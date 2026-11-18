@@ -20,6 +20,19 @@ type recordingSink struct {
 func (s *recordingSink) Append(_ context.Context, events []*event.Event) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// 假事件库自己分配 seq：T-P2-32 之后编号权属于存储端，发布器不再自己 +1。
+	for _, e := range events {
+		if e.Seq > 0 {
+			continue
+		}
+		var max int64
+		for _, prev := range s.events {
+			if prev.TaskID == e.TaskID && prev.Seq > max {
+				max = prev.Seq
+			}
+		}
+		e.Seq = max + 1
+	}
 	s.events = append(s.events, events...)
 	return nil
 }

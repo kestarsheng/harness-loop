@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"agent-platform/pkg/harnessloop/event"
 	"agent-platform/pkg/harnessloop/modelregistry"
 	"agent-platform/pkg/harnessloop/orchestrator"
 	"agent-platform/pkg/harnessloop/retry"
@@ -389,7 +390,7 @@ func (b *ModelBridge) emit(ec ModelStageContext, ev modelregistry.ModelEvent) {
 		TenantID: ec.TenantID, ProjectID: ec.ProjectID, TaskID: ec.TaskID,
 		Stage: ec.Stage, Attempt: ec.AttemptNo,
 	}
-	_ = b.emitter.EmitModelEvent(context.Background(), ectx, ev)
+	reportEmitFailure(ec.TaskID, event.EventType(ev.Type), b.emitter.EmitModelEvent(context.Background(), ectx, ev))
 }
 
 type selectionRecorder struct {

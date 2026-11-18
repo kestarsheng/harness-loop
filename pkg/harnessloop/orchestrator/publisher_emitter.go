@@ -37,9 +37,9 @@ type EmitContext struct {
 }
 
 // PublisherEmitter adapts orchestrator and modelregistry event shapes to
-// pkg/harnessloop/event. Seq is deliberately left at zero: the shared
-// event.Publisher allocates it per task, so every component writes into one
-// monotonic sequence instead of inventing its own.
+// pkg/harnessloop/event. Seq is deliberately left at zero: 事件库是任务内 seq
+// 的唯一分配者（repository.EventRepo.Append 在写入事务里分配并回填），
+// 每个组件都写进同一条单调序列，而不是各自发明编号。
 type PublisherEmitter struct {
 	publisher EventPublisher
 	base      EmitContext

@@ -155,6 +155,20 @@ type psSink struct {
 func (s *psSink) Append(_ context.Context, events []*event.Event) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// 假事件库要自己分配 seq：T-P2-32 之后 event.Publisher 不再给事件编号，
+	// 编号权属于存储端（生产实现是 repository.EventRepo.Append 的 RETURNING）。
+	for _, e := range events {
+		if e.Seq > 0 {
+			continue
+		}
+		var max int64
+		for _, prev := range s.events {
+			if prev.TaskID == e.TaskID && prev.Seq > max {
+				max = prev.Seq
+			}
+		}
+		e.Seq = max + 1
+	}
 	s.events = append(s.events, events...)
 	return nil
 }
@@ -1092,7 +1106,6 @@ func TestPolicySuiteApprovalConcurrentDecision(t *testing.T) {
 		readers.Wait()
 	}
 }
-
 
 // 9.11 审批性能口径：Await 挂起 → 外部提交决策 → Await 返回放行的耗时。
 func TestPolicySuiteApprovalLatency(t *testing.T) {

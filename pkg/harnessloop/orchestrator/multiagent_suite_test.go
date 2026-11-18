@@ -82,6 +82,20 @@ type maSuiteSink struct {
 func (s *maSuiteSink) Append(_ context.Context, events []*event.Event) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// 假事件库要自己分配 seq：T-P2-32 之后 event.Publisher 不再给事件编号，
+	// 编号权属于存储端（生产实现是 repository.EventRepo.Append 的 RETURNING）。
+	for _, e := range events {
+		if e.Seq > 0 {
+			continue
+		}
+		var max int64
+		for _, prev := range s.events {
+			if prev.TaskID == e.TaskID && prev.Seq > max {
+				max = prev.Seq
+			}
+		}
+		e.Seq = max + 1
+	}
 	s.events = append(s.events, events...)
 	return nil
 }
@@ -178,8 +192,8 @@ func maSuitePlanNode(id, role string) PlanNode {
 			Paths: []string{"artifacts/" + id + "/*.json"},
 		},
 		Acceptance: []AcceptanceSpec{
-			{Type: "tests_pass", Expr: "go test ./...",},
-			{Type: "build_pass", Expr: "go build ./...",},
+			{Type: "tests_pass", Expr: "go test ./..."},
+			{Type: "build_pass", Expr: "go build ./..."},
 		},
 		Splittable: maSuiteBool(true),
 	}
@@ -1171,6 +1185,7 @@ func (f *maSuiteTransport) SendHandoff(_ context.Context, envelope HandoffEnvelo
 	f.envelopes = append(f.envelopes, envelope)
 	return nil
 }
+
 // 9.9 并发性能口径：12 节点并行集在 8 并发上限下完成一次 Dispatch 的耗时。
 // design 9.1 的调度门槛为 P95 ≤ 300ms；本用例留档实测区间。
 func TestMultiAgentDispatchLatency(t *testing.T) {

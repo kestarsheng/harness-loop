@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"time"
 
 	"agent-platform/pkg/harnessloop/event"
@@ -204,7 +205,12 @@ func (b *PolicyBridge) Write(ctx context.Context, rec policy.AuditRecord) error 
 		rec.Layer = policy.LayerSystem
 	}
 	if b.writer != nil {
-		_ = b.writer.AppendToolDecision(ctx, rec)
+		if err := b.writer.AppendToolDecision(ctx, rec); err != nil {
+			// 审计面写失败不能连带吞掉事件面：记日志后继续发事件，人至少还能
+			// 从事件流看到这次拒绝（反过来则什么都看不到）。
+			log.Printf("[policy] audit append failed: task_id=%s rule=%s decision=%s err=%v",
+				rec.TaskID, rec.RuleID, rec.Decision, err)
+		}
 	}
 	switch rec.Decision {
 	case policy.EffectDeny:
@@ -215,6 +221,8 @@ func (b *PolicyBridge) Write(ctx context.Context, rec policy.AuditRecord) error 
 	return nil
 }
 
+// emit 发一条决策事件。失败不得静默：tool.denied 曾经就是这样丢的，
+// 于是「审计有记录、事件流没有」两面对不上。
 func (b *PolicyBridge) emit(ctx context.Context, rec policy.AuditRecord, typ event.EventType, severity event.Severity) {
 	if b.emitter == nil {
 		return
@@ -223,13 +231,13 @@ func (b *PolicyBridge) emit(ctx context.Context, rec policy.AuditRecord, typ eve
 		TenantID: rec.TenantID, ProjectID: rec.ProjectID, TaskID: rec.TaskID,
 		Stage: rec.Stage, Attempt: rec.Attempt,
 	})
-	_ = emitter.EmitType(ctx, orchestrator.EmitContext{}, typ, severity, map[string]any{
+	reportEmitFailure(rec.TaskID, typ, emitter.EmitType(ctx, orchestrator.EmitContext{}, typ, severity, map[string]any{
 		"tool":     rec.Tool,
 		"decision": string(rec.Decision),
 		"rule_id":  rec.RuleID,
 		"layer":    string(rec.Layer),
 		"code":     rec.Code,
-	})
+	}))
 }
 
 func (b *PolicyBridge) beginApproval(ctx context.Context, req policy.Request, tags []string) (string, string) {
@@ -266,15 +274,17 @@ func (b *PolicyBridge) crossTenant(ctx context.Context, in ToolCallInput) (Prefl
 		Tool: in.Tool, Decision: policy.EffectDeny, RuleID: "security.cross_tenant",
 		Layer: policy.LayerSystem, Code: "E_CROSS_TENANT_DENIED",
 	}
-	_ = b.Write(ctx, rec)
+	if err := b.Write(ctx, rec); err != nil {
+		reportEmitFailure(in.TaskID, event.ToolDenied, err)
+	}
 	if b.emitter != nil {
 		em := b.emitter.For(orchestrator.EmitContext{
 			TenantID: in.TenantID, ProjectID: in.ProjectID, TaskID: in.TaskID, Stage: in.Stage, Attempt: in.Attempt,
 		})
-		_ = em.EmitType(ctx, orchestrator.EmitContext{}, event.SecurityViolation, event.SeverityError, map[string]any{
+		reportEmitFailure(in.TaskID, event.SecurityViolation, em.EmitType(ctx, orchestrator.EmitContext{}, event.SecurityViolation, event.SeverityError, map[string]any{
 			"reason": "cross tenant tool access denied", "expected_tenant": tenantID,
 			"task_id": in.TaskID, "tool": in.Tool, "rule_id": "security.cross_tenant",
-		})
+		}))
 	}
 	return PreflightResult{
 		Allowed: false, Layer: policy.LayerSystem, RuleID: "security.cross_tenant",

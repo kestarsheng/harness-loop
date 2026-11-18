@@ -237,7 +237,7 @@ func (i *MemoryInjector) publishDegraded(ctx context.Context, opts InjectOptions
 	if len(payload) > event.MaxPayloadBytes {
 		payload = []byte(`{"fallback":"markdown"}`)
 	}
-	_ = i.events.Publish(ctx, &event.Event{
+	if err := i.events.Publish(ctx, &event.Event{
 		EventID:       fmt.Sprintf("degraded-%s-%s-%d", opts.TenantID, opts.Stage, time.Now().UnixNano()),
 		EventType:     event.MemoryIndexDegraded,
 		SchemaVersion: event.CurrentSchemaVersion,
@@ -248,7 +248,9 @@ func (i *MemoryInjector) publishDegraded(ctx context.Context, opts InjectOptions
 		TenantID:      opts.TenantID,
 		ProjectID:     opts.ProjectID,
 		Payload:       payload,
-	})
+	}); err != nil {
+		reportEmitFailure(opts.ProjectID, event.MemoryIndexDegraded, err)
+	}
 }
 
 type MDFallback struct {

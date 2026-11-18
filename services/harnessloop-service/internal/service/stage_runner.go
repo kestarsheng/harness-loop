@@ -302,7 +302,7 @@ func (r *StageRunner) publish(ctx context.Context, in StageRunInput, category, r
 		"category":   category,
 		"reason":     reason,
 	})
-	_ = r.events.Publish(ctx, &event.Event{
+	if err := r.events.Publish(ctx, &event.Event{
 		EventID:       fmt.Sprintf("%s-%s-error", in.TaskID, in.Stage),
 		EventType:     event.Error,
 		SchemaVersion: event.CurrentSchemaVersion,
@@ -314,7 +314,9 @@ func (r *StageRunner) publish(ctx context.Context, in StageRunInput, category, r
 		ProjectID:     in.ProjectID,
 		AgentID:       in.EntryAgent,
 		Payload:       payload,
-	})
+	}); err != nil {
+		reportEmitFailure(in.TaskID, event.Error, err)
+	}
 }
 
 func ClassifyStageError(err error, streamErr string) retry.Classification {

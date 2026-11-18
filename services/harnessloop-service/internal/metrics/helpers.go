@@ -107,3 +107,31 @@ func (h *Harness) IndexDuration(mode string, d time.Duration) {
 	h.Reg.Histogram(MetricIndexDurationSeconds, "Index build duration in seconds.",
 		map[string]string{"mode": mode}, DefaultBuckets).Observe(d.Seconds())
 }
+
+// EventPublishFailed 记录一次「事件落库失败、已进缓冲等待重投」。eventType 与
+// reason 都是低基数标签（reason 见 event.FailureReason）。
+func (h *Harness) EventPublishFailed(eventType, reason string) {
+	if h == nil {
+		return
+	}
+	if eventType == "" {
+		eventType = "unknown"
+	}
+	if reason == "" {
+		reason = "sink_error"
+	}
+	h.Reg.Counter(MetricEventPublishFailedTotal, "Event publish failures after buffering.",
+		map[string]string{"event_type": eventType, "reason": reason}).Inc()
+}
+
+// EventSeqConflict 记录一次 seq 分配撞键（正常路径为 0，滚动升级期间才会出现）。
+func (h *Harness) EventSeqConflict(source string) {
+	if h == nil {
+		return
+	}
+	if source == "" {
+		source = "event_repo"
+	}
+	h.Reg.Counter(MetricEventSeqConflictTotal, "Event seq allocation conflicts.",
+		map[string]string{"source": source}).Inc()
+}
