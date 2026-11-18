@@ -7,7 +7,7 @@
 | 状态 | 待评审 |
 | 上游文档 | `spec.md` v1.1（170 条 REQ + 38 条 DFX）、`design.md` v1.2（12 章，5 项锁定决策） |
 | 代码基线 | `agent-platform` @ `4a05ccb`，Go 1.22 |
-| 任务规模 | 97 个任务（P0 27 / P1 36 / P2 34） |
+| 任务规模 | 100 个任务（P0 27 / P1 36 / P2 37） |
 | 已锁定决策 | A 方案记忆事实源、PG 仅承载索引与事件（D2）、RAG 复用 Go knowledge-service（D3）、runtime 复用 `pkg/llm` + cobra/Bubble Tea（D4）、新增 :50008（D6/D14）、自研模板摘要唯一通道（D13）、多 Agent 8/20/20/2（U13-A）、审批一期留 agent-service（U17-A）、阶段模型默认继承（U18-A）、子任务验收复用父验收器（U19-A） |
 
 > 阅读约定：每个任务给出「目标 → 关联需求 → 设计章节 → 依赖 → 文件 → 实施要点 → 验收标准 → 复杂度」。`[N]` 表示新增文件，`[M]` 表示改造存量文件。验收标准优先给出可直接执行的命令或断言。本文件不含实现代码。
@@ -1289,7 +1289,43 @@
 | 验收标准 | 复现 `accepted 0/3` 场景 → 父任务**不得** `completed`；`accepted 3/3` → `completed`；带失败完成时终态可辨；DB 与事件一致；`go test ./services/harnessloop-service/... ./pkg/harnessloop/orchestrator/...` 全绿。 |
 | 复杂度 | S（0.5 天） |
 
-> P2 合计：实施 29 个 + 测试 5 个 = **34 个任务**。
+### T-P2-30 agent 侧工具循环（活栈真实触发）
+
+| 字段 | 内容 |
+|---|---|
+| 目标 | 真实任务在 harness loop 中必须产生 `tool_call` 并调用 MCP `read_file`/`run_command`，让权限闸门在活栈上有真实输入。 |
+| 关联需求 | REQ-156~170、REQ-139；design 4.15 |
+| 依赖 | T-P2-28（工具落点可用） |
+| 涉及文件 | [M] `services/agent-service/internal/**`、[M] `pkg/agent/engine_stream.go`、[M] `pkg/llm/**`（流式 tool_calls 解析） |
+| 实施要点 | 1) 阶段/子任务执行中产生 `tool_call` chunk，不得只回文本；2) `content` 与 `tool_calls` 配对正确（`AGENT_LLM_EMIT_TOOL_CALL_MESSAGES` 语义）；3) 工具结果回填后继续循环直到 `stage_finish`；4) 活栈真实任务必须触发 ≥1 次工具调用；5) 禁止用测试注入或伪造 audit 冒充活栈。 |
+| 验收标准 | 活栈 `tenant-policy` 真实任务 `audit>0` 且与工具调用逐条对应；活栈探针输出 `must_trigger=true`；`go test ./services/agent-service/... ./pkg/agent/... ./pkg/llm/...` 全绿；build/depcheck 0。 |
+| 复杂度 | M（1~2 天） |
+
+### T-P2-31 策略集注入与审批可达
+
+| 字段 | 内容 |
+|---|---|
+| 目标 | 生产代码注入 tenant/role/task 三层策略集，使 `require_approval` 在真实任务中可达；四层解析不再只跑 system 层。 |
+| 关联需求 | REQ-156~170；design 4.15.3 |
+| 依赖 | T-P2-30 |
+| 涉及文件 | [M] `services/harnessloop-service/internal/service/{policy_bridge,runtime}.go`、[M] `pkg/harnessloop/policy/**` |
+| 实施要点 | 1) 从配置/存储装配 `TenantPolicy/RolePolicy/TaskPolicy`（当前 grep 零命中）；2) `require_approval` 走 `ApprovalGate`，工单批准/驳回闭环；3) 高危命令不得被 exec 白名单提前拒绝到不了 Classify（调整判定顺序或白名单策略）；4) 审计 rule 与决策一一对应。 |
+| 验收标准 | 真实任务触发 `require_approval` → 工单 → 批准放行/驳回 `E_APPROVAL_REJECTED`；审计 rule 对齐；四层命中可辨；测试全绿。 |
+| 复杂度 | M（1 天） |
+
+### T-P2-32 事件 seq 单写者与错误可见
+
+| 字段 | 内容 |
+|---|---|
+| 目标 | 消除 `event.Publisher` 内存 `SeqAllocator` 与 repository `max+1` 双写者；emit 失败不得被 `_ =` 吞，事件不得静默丢失。 |
+| 关联需求 | REQ-105、REQ-106、DFX-P-07 |
+| 依赖 | 无（影响全局，优先做） |
+| 涉及文件 | [M] `pkg/harnessloop/event/**`、[M] `services/harnessloop-service/internal/{repository,service}/**` |
+| 实施要点 | 1) 明确 seq 单一分配者（租户级或任务级契约），另一方改为读取/回填；2) 所有 `_ = emit/publish` 改为可见错误（日志 + 指标），不得吞；3) 唯一键冲突时重试或跳过但不丢事件；4) 复跑 50 并发任务事件收集率。 |
+| 验收标准 | 50 并发任务事件收集率 **100%**；`task.completed`/`tool.denied` 不再缺失；emit 失败有日志与指标；`go test ./pkg/harnessloop/event/... ./services/harnessloop-service/...` 全绿。 |
+| 复杂度 | M（0.5~1 天） |
+
+> P2 合计：实施 32 个 + 测试 5 个 = **37 个任务**。
 
 ---
 
