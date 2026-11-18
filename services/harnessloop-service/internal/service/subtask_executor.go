@@ -144,8 +144,13 @@ func (e *AgentSubtaskExecutor) Execute(ctx context.Context, ec OrchestratorStage
 	result.DurationMS = durationMS
 	// Usage belongs to the run even when it ends in an error: a failed subtask
 	// still burned prompt+partial-reply tokens, and the parent budget must see it.
+	// A provider usage block is authoritative; only a zero reading falls back to
+	// the character estimate, and the source is recorded so estimates are never
+	// mistaken for billed tokens.
 	st.ConsumedTokens = usageTokens(maxTokens, req.Message, content.String())
+	st.TokenSource = tokenSource(maxTokens)
 	result.ConsumedTokens = st.ConsumedTokens
+	result.TokenSource = st.TokenSource
 	if err != nil {
 		subtaskStatus = "failed"
 		status := agentStatus
@@ -191,11 +196,9 @@ func (e *AgentSubtaskExecutor) Execute(ctx context.Context, ec OrchestratorStage
 // otherwise estimates from prompt+reply at 4 characters per token — the same
 // heuristic pkg/agent applies when an LLM response has no usage block.
 //
-// Why the fallback: agent-service's ExecuteStream never fills Step.TokensUsed
-// (it only fills Step for tool events) and drops StreamEvent.Tokens, so every
-// subtask recorded tokens=0 even though the agent really consumed tokens. The
-// estimate keeps budget accounting non-zero until the agent-service/proto
-// mapping reports real usage.
+// A non-zero observed value only exists when agent-service forwarded a real
+// provider usage block through Step.TokensUsed; tokenSource() labels it
+// accordingly so budgets can distinguish billed tokens from estimates.
 func usageTokens(observed int64, prompt, reply string) int64 {
 	if observed > 0 {
 		return observed
@@ -209,6 +212,14 @@ func usageTokens(observed int64, prompt, reply string) int64 {
 		tokens = 1
 	}
 	return tokens
+}
+
+// tokenSource classifies how ConsumedTokens was obtained.
+func tokenSource(observed int64) string {
+	if observed > 0 {
+		return "actual"
+	}
+	return "estimate"
 }
 
 func subtaskSessionID(taskID, subtaskID string) string {

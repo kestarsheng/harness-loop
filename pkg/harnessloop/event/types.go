@@ -76,6 +76,7 @@ const (
 	SubtaskStarted        EventType = "subtask.started"
 	SubtaskHandoffWaiting EventType = "subtask.handoff_waiting"
 	SubtaskAccepted       EventType = "subtask.accepted"
+	SubtaskTokenUsage     EventType = "subtask.token_usage"
 	SubtaskRejected       EventType = "subtask.rejected"
 	SubtaskFailed         EventType = "subtask.failed"
 	SubtaskCancelled      EventType = "subtask.cancelled"
@@ -123,7 +124,7 @@ var knownTypes = map[EventType]struct{}{
 	IndexQueued: {}, IndexUpdated: {}, IndexFailed: {}, IndexRebuilt: {},
 	ToolStarted: {}, ToolResult: {}, ToolProgress: {}, ToolDenied: {},
 	SubtaskPlanCreated: {}, SubtaskQueued: {}, SubtaskStarted: {}, SubtaskHandoffWaiting: {},
-	SubtaskAccepted: {}, SubtaskRejected: {}, SubtaskFailed: {}, SubtaskCancelled: {}, SubtaskCircuitOpen: {},
+	SubtaskAccepted: {}, SubtaskTokenUsage: {}, SubtaskRejected: {}, SubtaskFailed: {}, SubtaskCancelled: {}, SubtaskCircuitOpen: {},
 	HandoffCreated: {}, HandoffAccepted: {}, HandoffRejected: {},
 	AggregationCompleted: {}, AggregationConflict: {},
 	ModelSelected: {}, ModelSwitched: {}, ModelFallback: {}, ModelCapabilityRejected: {},

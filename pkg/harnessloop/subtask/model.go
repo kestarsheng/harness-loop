@@ -51,9 +51,12 @@ type Subtask struct {
 	HandoffID          string          `json:"handoff_id,omitempty"`
 	AllocTokens        int64           `json:"alloc_tokens"`
 	ConsumedTokens     int64           `json:"consumed_tokens"`
-	ConsumedCost       float64         `json:"consumed_cost"`
-	CreatedAt          time.Time       `json:"created_at"`
-	UpdatedAt          time.Time       `json:"updated_at"`
+	// TokenSource records whether ConsumedTokens came from the provider's usage
+	// block ("actual") or from a local estimate ("estimate").
+	TokenSource  string    `json:"token_source,omitempty"`
+	ConsumedCost float64   `json:"consumed_cost"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 var ErrInvalidSubtask = errors.New("subtask: invalid subtask")

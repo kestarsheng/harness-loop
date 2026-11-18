@@ -125,6 +125,56 @@ func TestChatStreamNormalizesDeltas(t *testing.T) {
 	}
 }
 
+func TestChatStreamParsesUsageFrame(t *testing.T) {
+	var requestBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		frames := []string{
+			`data: {"choices":[{"delta":{"content":"hi"}}]}`,
+			// The usage frame carries no choices; it must not be dropped.
+			`data: {"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}}`,
+			`data: [DONE]`,
+		}
+		for _, f := range frames {
+			_, _ = fmt.Fprintf(w, "%s\n\n", f)
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+	}))
+	defer srv.Close()
+
+	client := NewOpenAIClient(Config{BaseURL: srv.URL, Model: "m"})
+	ch, err := client.ChatStream(context.Background(), &ChatRequest{Messages: []Message{{Role: "user", Content: "hi"}}})
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+
+	var usage *Usage
+	for chunk := range ch {
+		if chunk.Error != nil {
+			t.Fatalf("stream chunk error: %v", chunk.Error)
+		}
+		if chunk.Usage != nil {
+			usage = chunk.Usage
+		}
+	}
+	if usage == nil {
+		t.Fatal("usage frame was dropped")
+	}
+	if usage.PromptTokens != 7 || usage.CompletionTokens != 3 || usage.TotalTokens != 10 {
+		t.Errorf("usage = %+v", usage)
+	}
+	opts, _ := requestBody["stream_options"].(map[string]any)
+	if opts["include_usage"] != true {
+		t.Errorf("stream_options.include_usage = %v, want true", opts["include_usage"])
+	}
+}
+
 func TestChatClassifiesTimeoutAndCancel(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(300 * time.Millisecond)

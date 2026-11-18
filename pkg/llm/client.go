@@ -88,13 +88,25 @@ type ChatResponse struct {
 	Cost         float64    `json:"cost"`
 }
 
+// Usage reports the provider's token accounting for one request. Streaming
+// responses only expose it in the final chunk when stream_options.include_usage
+// is enabled.
+type Usage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
+}
+
 // ChatStreamChunk represents a streaming chat chunk
 type ChatStreamChunk struct {
 	Content       string    `json:"content"`
 	ToolCall      *ToolCall `json:"tool_call,omitempty"`
 	ToolCallIndex int       `json:"tool_call_index,omitempty"` // stream index for aggregating multi-tool-call deltas
-	Done          bool      `json:"done"`
-	Error         error     `json:"error,omitempty"`
+	// Usage is set on the trailing usage chunk. The chunk has no choices, so
+	// consumers must read it before skipping empty-choice frames.
+	Usage *Usage `json:"usage,omitempty"`
+	Done  bool   `json:"done"`
+	Error error  `json:"error,omitempty"`
 }
 
 // CallMetrics records metrics for a single LLM call

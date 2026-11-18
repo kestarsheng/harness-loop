@@ -100,6 +100,50 @@ func TestAgentSubtaskExecutorReportsArtifactsAndConclusion(t *testing.T) {
 	}
 }
 
+func TestAgentSubtaskExecutorUsesActualUsageWhenStreamReportsIt(t *testing.T) {
+	streamer := &fakeAgentStreamer{chunks: []*agentpb.ExecuteStreamChunk{
+		{Type: "response", Content: "done"},
+		{Type: "final", Content: "", Step: &agentpb.AgentExecutionRecord{TokensUsed: 42}},
+	}}
+	executor := NewAgentSubtaskExecutor(streamer, SubtaskExecutorConfig{EntryAgent: "default"})
+	st := newTestSubtask("sub-actual")
+	st.OutputContract = nil
+	ec := OrchestratorStageContext{TenantID: "tenant-a", ProjectID: "proj-a", TaskID: "task-1", Stage: "c"}
+
+	res, err := executor.Execute(context.Background(), ec, st)
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if st.ConsumedTokens != 42 || st.TokenSource != "actual" {
+		t.Errorf("consumed_tokens=%d token_source=%q, want 42/actual", st.ConsumedTokens, st.TokenSource)
+	}
+	if res.TokenSource != "actual" || res.ConsumedTokens != 42 {
+		t.Errorf("result tokens=%d source=%q", res.ConsumedTokens, res.TokenSource)
+	}
+}
+
+func TestAgentSubtaskExecutorEstimatesWhenStreamOmitsUsage(t *testing.T) {
+	streamer := &fakeAgentStreamer{chunks: []*agentpb.ExecuteStreamChunk{
+		{Type: "response", Content: "a reply without a usage block"},
+		{Type: "final", Content: ""},
+	}}
+	executor := NewAgentSubtaskExecutor(streamer, SubtaskExecutorConfig{EntryAgent: "default"})
+	st := newTestSubtask("sub-estimate")
+	st.OutputContract = nil
+	ec := OrchestratorStageContext{TenantID: "tenant-a", ProjectID: "proj-a", TaskID: "task-1", Stage: "c"}
+
+	res, err := executor.Execute(context.Background(), ec, st)
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if st.ConsumedTokens <= 0 {
+		t.Fatalf("estimate = %d, want > 0", st.ConsumedTokens)
+	}
+	if st.TokenSource != "estimate" || res.TokenSource != "estimate" {
+		t.Errorf("token_source=%q result=%q, want estimate", st.TokenSource, res.TokenSource)
+	}
+}
+
 func TestAgentSubtaskExecutorFailsOnMissingArtifact(t *testing.T) {
 	streamer := &fakeAgentStreamer{chunks: []*agentpb.ExecuteStreamChunk{{Type: "response", Content: "done"}}}
 	executor := NewAgentSubtaskExecutor(streamer, SubtaskExecutorConfig{})

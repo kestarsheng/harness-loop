@@ -71,13 +71,21 @@ type LLMStreamingClient interface {
 	ChatStream(ctx context.Context, req *LLMRequest) (<-chan LLMStreamChunk, error)
 }
 
+// TokenUsage mirrors the provider's usage block for one LLM call.
+type TokenUsage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
+}
+
 // LLMStreamChunk represents an incremental token from the LLM
 type LLMStreamChunk struct {
-	Content       string    `json:"content"`
-	ToolCall      *ToolCall `json:"tool_call,omitempty"`
-	ToolCallIndex int       `json:"tool_call_index,omitempty"` // stream index for aggregating multi-tool-call deltas
-	Done          bool      `json:"done"`
-	Error         error     `json:"error,omitempty"`
+	Content       string      `json:"content"`
+	ToolCall      *ToolCall   `json:"tool_call,omitempty"`
+	ToolCallIndex int         `json:"tool_call_index,omitempty"` // stream index for aggregating multi-tool-call deltas
+	Usage         *TokenUsage `json:"usage,omitempty"`
+	Done          bool        `json:"done"`
+	Error         error       `json:"error,omitempty"`
 }
 
 // RunStream executes the agent loop with real-time event streaming
@@ -235,7 +243,7 @@ func (e *Engine) executeLoopStream(ctx context.Context, execCtx *ExecutionContex
 				AgentID:   currentAgent.ID,
 				AgentName: currentAgent.Name,
 				Content:   llmResp.Content,
-				Tokens:    llmResp.TotalTokens,
+				Tokens:    execCtx.TotalTokens,
 				Done:      true,
 			})
 
@@ -506,6 +514,7 @@ func (e *Engine) callLLMStreaming(ctx context.Context, req *LLMRequest, callback
 	// Collect the full response while forwarding tokens
 	var fullContent string
 	var totalTokens int
+	var usage *TokenUsage
 	var toolAcc *streamToolCallAccumulator
 	if e.config.StreamToolCalls {
 		toolAcc = newStreamToolCallAccumulator()
@@ -517,6 +526,9 @@ func (e *Engine) callLLMStreaming(ctx context.Context, req *LLMRequest, callback
 		}
 		if chunk.Done {
 			break
+		}
+		if chunk.Usage != nil {
+			usage = chunk.Usage
 		}
 		if chunk.Content != "" {
 			fullContent += chunk.Content
@@ -541,7 +553,13 @@ func (e *Engine) callLLMStreaming(ctx context.Context, req *LLMRequest, callback
 		}
 	}
 
-	totalTokens = len(fullContent) / 4 // rough estimate; real counting needs usage data from the last chunk
+	// Prefer the provider's usage block; the character heuristic is only a
+	// fallback for gateways that ignore stream_options.include_usage.
+	if usage != nil && usage.TotalTokens > 0 {
+		totalTokens = usage.TotalTokens
+	} else {
+		totalTokens = len(fullContent) / 4
+	}
 
 	return &LLMResponse{
 		Content:     fullContent,
