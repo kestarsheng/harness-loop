@@ -304,3 +304,8 @@ func TestOrchestratorBridgeSharesTenantGateWithAdmission(t *testing.T) {
 		t.Fatalf("another tenant must have its own pool: %v", err)
 	}
 }
+
+// aggErrCode 造一个带稳定错误码的编排层错误，供分类断言使用。
+func aggErrCode(code string) error {
+	return &subtask.CodedError{Code: code, Detail: "test"}
+}

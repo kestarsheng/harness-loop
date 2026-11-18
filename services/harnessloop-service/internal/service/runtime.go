@@ -18,6 +18,7 @@ import (
 	"agent-platform/pkg/harnessloop/fsm"
 	"agent-platform/pkg/harnessloop/orchestrator"
 	"agent-platform/pkg/harnessloop/retry"
+	"agent-platform/pkg/harnessloop/subtask"
 	"agent-platform/pkg/harnessloop/tracing"
 	"agent-platform/pkg/llm"
 	"agent-platform/services/harnessloop-service/internal/metrics"
@@ -357,22 +358,30 @@ func (r *Runtime) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 			return nil, fmt.Errorf("runtime: finish attempt: %w", err)
 		}
 		aggregation, aggErr := r.runOrchestration(ctx, in, task.WorkspaceRoot, stage, attempt, stageRes)
+		var verdict acceptance.Verdict
 		// T-P2-29：子任务没收口时，父任务连 d 阶段验收都不该开始——否则
 		// "父任务 completed"会变成子任务 running 的遮羞布。
+		//
+		// 但"没收口"不是终态：它是 d 阶段的一次验收失败，必须和模型验收失败
+		// 走同一条回退路径（d→c，必要时 d→b），由验收预算决定何时才允许
+		// failed。直接 finalize(failed) 会把一次可重试的执行失败升级成不可恢复
+		// 的终态——fail-fast 子任务一失败，父任务就再没有重跑的机会。
 		if gateErr := r.dStageClosure(stage, aggregation, aggErr); gateErr != nil {
-			r.publishError(ctx, in, stage, attempt, retry.System, gateErr.Error())
-			fmt.Printf("[orchestrator] d-stage closure gate blocked completion: %v\n", gateErr)
-			return r.finalize(ctx, in, result, ReasonFailed, stage, string(stage), string(retry.System), 0, gateErr.Error(), task.Version)
-		}
-
-		accSpan := r.Tracer.StartAcceptance(stageSpan, string(stage), attemptNo, "")
-		verdict := r.evaluate(ctx, in, task, aggregation, stage, attempt, stageRes)
-		accSpan.SetAttr("verdict", string(verdict.Verdict))
-		accSpan.End()
-		r.Metrics.Acceptance(string(stage), string(verdict.Verdict), string(verdict.VerifiedBy))
-		attempt.AcceptanceID = verdict.AcceptanceID
-		if verdict.AcceptanceID != "" {
-			_ = r.Attempts.AttachAcceptance(ctx, attempt.AttemptID, verdict.AcceptanceID)
+			verdict = dStageClosureVerdict(stage, gateErr)
+			r.publishError(ctx, in, stage, attempt, rollbackCategory(verdict), gateErr.Error())
+			r.Metrics.Acceptance(string(stage), string(verdict.Verdict), string(verdict.VerifiedBy))
+			fmt.Printf("[orchestrator] d-stage closure gate failed, scheduling rollback to %s: %v\n",
+				verdict.RollbackTarget, gateErr)
+		} else {
+			accSpan := r.Tracer.StartAcceptance(stageSpan, string(stage), attemptNo, "")
+			verdict = r.evaluate(ctx, in, task, aggregation, stage, attempt, stageRes)
+			accSpan.SetAttr("verdict", string(verdict.Verdict))
+			accSpan.End()
+			r.Metrics.Acceptance(string(stage), string(verdict.Verdict), string(verdict.VerifiedBy))
+			attempt.AcceptanceID = verdict.AcceptanceID
+			if verdict.AcceptanceID != "" {
+				_ = r.Attempts.AttachAcceptance(ctx, attempt.AttemptID, verdict.AcceptanceID)
+			}
 		}
 
 		if verdict.Verdict == acceptance.VerdictPass {
@@ -656,6 +665,48 @@ func (r *Runtime) dStageClosure(stage fsm.Stage, report *orchestrator.Aggregatio
 	return nil
 }
 
+// closureErrorCode unwraps the stable error code out of the gate error. The
+// d-stage gate wraps the aggregator error with %w, and orchestrator.ErrorCode
+// only does a direct type assertion, so the unwrap has to happen here.
+func closureErrorCode(err error) string {
+	var coded *subtask.CodedError
+	if errors.As(err, &coded) {
+		return coded.Code
+	}
+	return orchestrator.ErrorCode(err)
+}
+
+// dStageClosureVerdict turns a closure violation into an ordinary d-stage
+// acceptance failure. The returned verdict is deliberately shaped like one
+// produced by the acceptance layer (fail + failed_criteria + rollback_target)
+// so the runtime routes it through rollbackCategory/retry.Budget instead of
+// short-circuiting to a terminal failure.
+//
+// 回退目标是"谁能修好这次收口失败"：执行层没产出可用产物（0 accepted、
+// 子任务还挂在 pending/running、产物校验不过）回 c 重跑；DAG 版本已经不属于
+// 这个父任务，说明计划本身错了，回 b 重新规划。两种情况都只是"再试一次"，
+// 只有验收预算耗尽才允许 failed。
+func dStageClosureVerdict(stage fsm.Stage, gateErr error) acceptance.Verdict {
+	criterion := "impl_gap"
+	if closureErrorCode(gateErr) == orchestrator.CodeAggregationDagMismatch {
+		criterion = "plan_gap"
+	}
+	target := defaultRollbackTarget(stage)
+	if criterion == "plan_gap" {
+		target = string(fsm.StagePlan)
+	}
+	if !fsm.IsLegalTarget(stage, fsm.Stage(target)) {
+		target = defaultRollbackTarget(stage)
+	}
+	return acceptance.Verdict{
+		Verdict:        acceptance.VerdictFail,
+		Reason:         gateErr.Error(),
+		FailedCriteria: []acceptance.FailedCriterion{{CriterionID: "subtasks_closed", Category: criterion}},
+		RollbackTarget: target,
+		VerifiedBy:     acceptance.VerifiedByProgram,
+	}
+}
+
 func (r *Runtime) evaluate(ctx context.Context, in RunInput, task *repository.TaskRun, aggregation *orchestrator.AggregationReport, stage fsm.Stage, attempt fsm.Attempt, out *StageRunResult) acceptance.Verdict {
 	criteria, channel := acceptanceCriteriaForTask(task, stage)
 	if len(criteria) > 0 && channel != acceptance.VerifiedByProgram {
@@ -855,9 +906,17 @@ func (r *Runtime) saveCheckpoint(ctx context.Context, in RunInput, task *reposit
 }
 
 func (r *Runtime) transitionEvents(in RunInput, from, to fsm.Stage, attempt fsm.Attempt) []repository.EventInsert {
-	payload := []byte(fmt.Sprintf(`{"from":%q,"to":%q,"attempt_id":%q}`, from, to, attempt.AttemptID))
+	// event_id 是 hlp_event.events 的主键，必须逐次唯一：d→c 回退可以发生多次
+	// （每次收口失败一次），沿用 task-from-to 会在第二次回退时撞主键，把一次
+	// 可恢复的回退变成 Transfer 报错、任务卡在 running。
+	id := fmt.Sprintf("%s-%s-%s", in.TaskID, from, to)
+	if attempt.AttemptNo > 0 {
+		id = fmt.Sprintf("%s-%d", id, attempt.AttemptNo)
+	}
+	payload := []byte(fmt.Sprintf(`{"from":%q,"to":%q,"attempt_id":%q,"attempt_no":%d}`,
+		from, to, attempt.AttemptID, attempt.AttemptNo))
 	return []repository.EventInsert{{
-		EventID:   fmt.Sprintf("%s-%s-%s", in.TaskID, from, to),
+		EventID:   id,
 		Seq:       0,
 		EventType: "stage.transition",
 		Severity:  "info",

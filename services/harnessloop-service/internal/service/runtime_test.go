@@ -28,6 +28,7 @@ type memTasks struct {
 	task      *repository.TaskRun
 	transfers []fsm.Stage
 	statuses  []repository.TaskStatus
+	inserts   []repository.EventInsert
 }
 
 func newMemTasks() *memTasks {
@@ -63,6 +64,7 @@ func (m *memTasks) Transfer(ctx context.Context, tenantID, taskID string, to fsm
 	m.task.CurrentStage = to
 	m.task.Version++
 	m.transfers = append(m.transfers, to)
+	m.inserts = append(m.inserts, events...)
 	cp := *m.task
 	return &cp, nil
 }
@@ -786,8 +788,66 @@ func terminalPayloadOf(t *testing.T, events *captureEvents, typ event.EventType)
 	return nil
 }
 
-// 0/3 accepted：父任务不得 completed，DB 与事件都必须是 failed。
-func TestRuntimeDStageClosureBlocksZeroAccepted(t *testing.T) {
+// transitionCounts 统计 stage.transition 事件行的 from→to 次数（"d->c"）。
+func transitionCounts(t *testing.T, tasks *memTasks) map[string]int {
+	t.Helper()
+	tasks.mu.Lock()
+	inserts := append([]repository.EventInsert(nil), tasks.inserts...)
+	tasks.mu.Unlock()
+	out := map[string]int{}
+	for _, e := range inserts {
+		if e.EventType != "stage.transition" {
+			continue
+		}
+		var payload struct {
+			From string `json:"from"`
+			To   string `json:"to"`
+		}
+		if err := json.Unmarshal(e.Payload, &payload); err != nil {
+			t.Fatalf("decode transition payload %s: %v", e.EventID, err)
+		}
+		out[payload.From+"->"+payload.To]++
+	}
+	return out
+}
+
+// gate 首次失败不是终态：d 阶段收口失败先回退 c，让排队中的子任务继续跑，
+// 拿到 slot 后 d 再收敛为 completed——父任务一次都不能 failed。
+//
+// 场景用租户闸门 1 个 slot 造出来：3 个子任务每轮只能启动 1 个，d 阶段必然
+// 看到 pending 子任务，于是回退 c 两次，第三轮 3/3 accepted 收口。
+func TestRuntimeDStageClosureRollsBackThenCompletes(t *testing.T) {
+	rt, tasks, events := orchestratedRuntime(t, "fail-fast", &scriptedExecutor{})
+	rt.Orchestrator.withQuota(orchestrator.QuotaConfig{MaxAgentsPerTenant: 1})
+
+	res, err := rt.Run(context.Background(), terminalInput())
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.TerminalReason != ReasonCompleted {
+		t.Fatalf("terminal reason = %q, want %q (a recoverable closure gap must not fail the parent)",
+			res.TerminalReason, ReasonCompleted)
+	}
+	counts := transitionCounts(t, tasks)
+	if counts["d->c"] == 0 {
+		t.Fatalf("closure gate must roll d→c before giving up, transitions = %+v", counts)
+	}
+	if events.count(event.TaskFailed) != 0 {
+		t.Fatalf("a recoverable closure gap must not emit task.failed")
+	}
+	if events.count(event.TaskCompleted) != 1 {
+		t.Fatalf("task.completed = %d, want 1", events.count(event.TaskCompleted))
+	}
+	tasks.mu.Lock()
+	status := tasks.task.Status
+	tasks.mu.Unlock()
+	if status != repository.TaskCompleted {
+		t.Fatalf("db status = %s, want completed", status)
+	}
+}
+
+// 回退不是无限续命：验收预算耗尽后必须 failed，且 d→c 每次都留痕。
+func TestRuntimeDStageClosureExhaustsThenFails(t *testing.T) {
 	exec := &scriptedExecutor{fail: map[string]bool{"n1": true, "n2": true, "n3": true}}
 	rt, tasks, events := orchestratedRuntime(t, "fail-fast", exec)
 
@@ -796,10 +856,13 @@ func TestRuntimeDStageClosureBlocksZeroAccepted(t *testing.T) {
 		t.Fatalf("run: %v", err)
 	}
 	if res.TerminalReason != ReasonFailed {
-		t.Fatalf("terminal reason = %q, want %q (0/3 accepted must not complete)", res.TerminalReason, ReasonFailed)
+		t.Fatalf("terminal reason = %q, want %q after the acceptance budget is exhausted", res.TerminalReason, ReasonFailed)
 	}
-	if !strings.Contains(res.LastError, "subtasks_not_closed") {
-		t.Fatalf("last error must name the closure violation, got %q", res.LastError)
+	counts := transitionCounts(t, tasks)
+	want := rt.Policy.AcceptanceMaxFails
+	if counts["d->c"] != want {
+		t.Fatalf("d→c rollbacks = %d, want %d (every failed d attempt must roll back, the last one only after the budget is gone): %+v",
+			counts["d->c"], want, counts)
 	}
 	tasks.mu.Lock()
 	status, reason := tasks.task.Status, tasks.task.TerminalReason
@@ -808,14 +871,41 @@ func TestRuntimeDStageClosureBlocksZeroAccepted(t *testing.T) {
 		t.Fatalf("db status/reason = %s/%s, want failed/failed", status, reason)
 	}
 	if events.count(event.TaskCompleted) != 0 {
-		t.Fatalf("a parent with 0/3 accepted subtasks must not emit task.completed")
+		t.Fatalf("a parent that never closed its subtasks must not emit task.completed")
 	}
 	if payload := terminalPayloadOf(t, events, event.TaskFailed); payload["terminal_reason"] != ReasonFailed {
 		t.Fatalf("task.failed payload = %+v", payload)
 	}
 }
 
-// 3/3 accepted：父任务 completed，且没有 failed_subtasks。
+// 0 accepted 且子任务全部 failed：先回退 c 重跑，耗尽后才 failed。
+func TestRuntimeDStageClosureBlocksZeroAccepted(t *testing.T) {
+	exec := &scriptedExecutor{fail: map[string]bool{"n1": true, "n2": true, "n3": true}}
+	rt, tasks, events := orchestratedRuntime(t, "fail-fast", exec)
+
+	res, err := rt.Run(context.Background(), terminalInput())
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	counts := transitionCounts(t, tasks)
+	if counts["d->c"] == 0 {
+		t.Fatalf("0/3 accepted must roll back to c first, transitions = %+v", counts)
+	}
+	if res.TerminalReason != ReasonFailed {
+		t.Fatalf("terminal reason = %q, want %q", res.TerminalReason, ReasonFailed)
+	}
+	if !strings.Contains(res.LastError, "subtasks_not_closed") {
+		t.Fatalf("last error must name the closure violation, got %q", res.LastError)
+	}
+	if events.count(event.TaskCompleted) != 0 {
+		t.Fatalf("a parent with 0/3 accepted subtasks must not emit task.completed")
+	}
+	if events.count(event.TaskFailed) != 1 {
+		t.Fatalf("task.failed = %d, want exactly 1", events.count(event.TaskFailed))
+	}
+}
+
+// 3/3 accepted：一次收敛，父任务 completed，且没有任何回退。
 func TestRuntimeDStageClosureCompletesAllAccepted(t *testing.T) {
 	rt, tasks, events := orchestratedRuntime(t, "tolerate", &scriptedExecutor{})
 
@@ -828,6 +918,9 @@ func TestRuntimeDStageClosureCompletesAllAccepted(t *testing.T) {
 	}
 	if len(res.FailedSubtasks) != 0 {
 		t.Fatalf("a clean 3/3 run must not report failed subtasks: %+v", res.FailedSubtasks)
+	}
+	if counts := transitionCounts(t, tasks); counts["d->c"] != 0 {
+		t.Fatalf("a clean run must not roll back, transitions = %+v", counts)
 	}
 	tasks.mu.Lock()
 	status, reason := tasks.task.Status, tasks.task.TerminalReason
@@ -857,6 +950,10 @@ func TestRuntimeCompletesWithToleratedFailedSubtasks(t *testing.T) {
 	if res.TerminalReason != ReasonCompletedWithFailedSubtask {
 		t.Fatalf("terminal reason = %q, want %q", res.TerminalReason, ReasonCompletedWithFailedSubtask)
 	}
+	if counts := transitionCounts(t, tasks); counts["d->c"] != 0 {
+		// tolerate 已经收口了，回退只该发生在"没收敛"的场景；半成功不是失败。
+		t.Fatalf("tolerated half-success must not roll back, transitions = %+v", counts)
+	}
 	if len(res.FailedSubtasks) != 1 || res.FailedSubtasks[0].DagNodeID != "n3" {
 		t.Fatalf("failed subtasks = %+v, want n3", res.FailedSubtasks)
 	}
@@ -880,5 +977,46 @@ func TestRuntimeCompletesWithToleratedFailedSubtasks(t *testing.T) {
 	entry, _ := failed[0].(map[string]any)
 	if entry["subtask_id"] == "" || entry["status"] != "failed" {
 		t.Fatalf("failed_subtasks[0] = %+v", entry)
+	}
+}
+
+// 收口失败的分类决定回退目标：执行层缺口回 c（重跑），计划版本错位回 b
+// （重新规划）。两者都必须落在合法转移上——否则 d 阶段会卡在没有出路的回退。
+func TestDStageClosureVerdictRoutesByCause(t *testing.T) {
+	cases := []struct {
+		name    string
+		gateErr error
+		want    string
+		reason  string
+	}{
+		{
+			name:    "execution gap rolls back to c",
+			gateErr: fmt.Errorf("subtasks_not_closed: d-stage aggregation failed: %w", aggErrCode(orchestrator.CodeAggregationNoAccepted)),
+			want:    string(fsm.StageExecute),
+			reason:  "impl_gap",
+		},
+		{
+			name:    "dag mismatch rolls back to b",
+			gateErr: fmt.Errorf("subtasks_not_closed: d-stage aggregation failed: %w", aggErrCode(orchestrator.CodeAggregationDagMismatch)),
+			want:    string(fsm.StagePlan),
+			reason:  "plan_gap",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			v := dStageClosureVerdict(fsm.StageVerify, tc.gateErr)
+			if v.Verdict != acceptance.VerdictFail {
+				t.Fatalf("verdict = %s, want fail (a closure gap is an acceptance failure, not a terminal state)", v.Verdict)
+			}
+			if v.RollbackTarget != tc.want {
+				t.Fatalf("rollback target = %s, want %s", v.RollbackTarget, tc.want)
+			}
+			if !fsm.IsLegalTarget(fsm.StageVerify, fsm.Stage(v.RollbackTarget)) {
+				t.Fatalf("%s is not a legal target from d", v.RollbackTarget)
+			}
+			if len(v.FailedCriteria) != 1 || v.FailedCriteria[0].Category != tc.reason {
+				t.Fatalf("failed criteria = %+v, want %s", v.FailedCriteria, tc.reason)
+			}
+		})
 	}
 }
