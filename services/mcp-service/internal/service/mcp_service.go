@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -302,6 +303,25 @@ func (s *MCPService) registerBuiltInTools() {
 	s.tools["visualization"] = vizTool
 	s.toolExec["visualization"] = tools.NewVisualizationTool()
 
+	// File tools. These are the only built-in tools that touch the task
+	// workspace, so their root comes from the per-call policy context
+	// (__policy_context__.workspace_root) and never from the process cwd.
+	// MCP_WORKSPACE_ROOT is only a fallback for callers outside the harness.
+	fileRoot := os.Getenv("MCP_WORKSPACE_ROOT")
+	s.tools["file_read"] = model.Tool{
+		Name:        "file_read",
+		Description: "Read a file from the task workspace. The path is relative to the workspace root.",
+		InputSchema: `{"type":"object","properties":{"path":{"type":"string","description":"Path relative to the task workspace root"}},"required":["path"]}`,
+	}
+	s.toolExec["file_read"] = tools.NewFileReadTool(fileRoot)
+
+	s.tools["file_write"] = model.Tool{
+		Name:        "file_write",
+		Description: "Write a file into the task workspace. The path is relative to the workspace root; parent directories are created. Paths that escape the workspace are refused.",
+		InputSchema: `{"type":"object","properties":{"path":{"type":"string","description":"Path relative to the task workspace root, e.g. cmd/server/healthz.go"},"content":{"type":"string","description":"Full file content to write"}},"required":["path","content"]}`,
+	}
+	s.toolExec["file_write"] = tools.NewFileWriteTool(fileRoot)
+
 	// Code execution tool is intentionally NOT registered.
 	// NewCodeExecTool is a non-functional stub ("Code execution is disabled for
 	// security") and the project has decided not to ship code execution. Leaving
@@ -340,6 +360,8 @@ func builtinPermissionTags(name string) []string {
 }
 
 var explicitPermissionTags = map[string][]string{
+	"file_read":        {"fs.read"},
+	"file_write":       {"fs.write"},
 	"knowledge_search": {"net.read"},
 	"web_search":       {"net.read"},
 	"calculator":       {"compute"},

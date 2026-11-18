@@ -3,12 +3,19 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
+
+	"agent-platform/pkg/harnessloop/policy"
+	"agent-platform/pkg/harnessloop/policy/sandbox"
+	"agent-platform/services/mcp-service/internal/audit"
 )
 
 // Executor is the interface for tool execution
@@ -294,14 +301,16 @@ func (t *FileReadTool) GetInfo() ToolInfo {
 	}
 }
 
-// FileReadTool reads file contents
+// FileReadTool reads files from the task workspace
 type FileReadTool struct {
-	AllowedDir string
+	// FallbackRoot is used when a call carries no workspace root. It exists for
+	// non-harness callers; harness calls always carry the task workspace.
+	FallbackRoot string
 }
 
 // NewFileReadTool creates a new file read tool
-func NewFileReadTool(allowedDir string) *FileReadTool {
-	return &FileReadTool{AllowedDir: allowedDir}
+func NewFileReadTool(fallbackRoot string) *FileReadTool {
+	return &FileReadTool{FallbackRoot: fallbackRoot}
 }
 
 // Execute executes the file read tool
@@ -309,20 +318,32 @@ func (t *FileReadTool) Execute(ctx context.Context, args map[string]interface{})
 	return t.ExecuteWithConfig(ctx, args, nil)
 }
 
-// ExecuteWithConfig executes the file read tool with config
+// ExecuteWithConfig resolves the path against the per-call workspace root and
+// reads it. Escapes are refused by policy/sandbox.
 func (t *FileReadTool) ExecuteWithConfig(ctx context.Context, args map[string]interface{}, config map[string]interface{}) (string, error) {
 	path, _ := args["path"].(string)
 	if path == "" {
 		return "", fmt.Errorf("path is required")
 	}
 
-	// Security check - only allow reading from allowed directory
-	// TODO: Implement actual file reading with proper security
-	return fmt.Sprintf(`File Read Request:
-Path: %s
+	root := WorkspaceRootFromConfig(config)
+	if root == "" {
+		root = t.FallbackRoot
+	}
+	abs, err := resolveWorkspacePath(root, path)
+	if err != nil {
+		audit.Deny("file_read", codeForPathError(err), path, root, err.Error())
+		return "", err
+	}
+	raw, err := os.ReadFile(abs)
+	if err != nil {
+		return "", fmt.Errorf("read %s: %w", relPathForResult(root, abs), err)
+	}
+	return fmt.Sprintf(`File: %s
+Workspace root: %s
+Bytes: %d
 
-Note: File reading is restricted for security.
-Configure allowed directories to enable this feature.`, path), nil
+%s`, relPathForResult(root, abs), root, len(raw), string(raw)), nil
 }
 
 // GetInfo returns tool information for LLM
@@ -347,14 +368,16 @@ func (t *FileWriteTool) GetInfo() ToolInfo {
 	}
 }
 
-// FileWriteTool writes to files
+// FileWriteTool writes files into the task workspace
 type FileWriteTool struct {
-	AllowedDir string
+	// FallbackRoot is used when a call carries no workspace root. It exists for
+	// non-harness callers; harness calls always carry the task workspace.
+	FallbackRoot string
 }
 
 // NewFileWriteTool creates a new file write tool
-func NewFileWriteTool(allowedDir string) *FileWriteTool {
-	return &FileWriteTool{AllowedDir: allowedDir}
+func NewFileWriteTool(fallbackRoot string) *FileWriteTool {
+	return &FileWriteTool{FallbackRoot: fallbackRoot}
 }
 
 // Execute executes the file write tool
@@ -362,7 +385,10 @@ func (t *FileWriteTool) Execute(ctx context.Context, args map[string]interface{}
 	return t.ExecuteWithConfig(ctx, args, nil)
 }
 
-// ExecuteWithConfig executes the file write tool with config
+// ExecuteWithConfig writes content below the per-call workspace root. The
+// path is resolved by policy/sandbox, so `../x`, absolute paths and UNC paths
+// are refused and audited; the file is then asserted to be on disk before the
+// tool reports success.
 func (t *FileWriteTool) ExecuteWithConfig(ctx context.Context, args map[string]interface{}, config map[string]interface{}) (string, error) {
 	path, _ := args["path"].(string)
 	content, _ := args["content"].(string)
@@ -371,15 +397,47 @@ func (t *FileWriteTool) ExecuteWithConfig(ctx context.Context, args map[string]i
 		return "", fmt.Errorf("path is required")
 	}
 
-	// Security check - only allow writing to allowed directory
-	// TODO: Implement actual file writing with proper security
-	return fmt.Sprintf(`File Write Request:
-Path: %s
-Content Length: %d characters
-
-Note: File writing is restricted for security.
-Configure allowed directories to enable this feature.`, path, len(content)), nil
+	root := WorkspaceRootFromConfig(config)
+	if root == "" {
+		root = t.FallbackRoot
+	}
+	abs, err := resolveWorkspacePath(root, path)
+	if err != nil {
+		audit.Deny("file_write", codeForPathError(err), path, root, err.Error())
+		return "", err
+	}
+	bytesWritten, hash, err := writeWorkspaceFile(abs, []byte(content))
+	if err != nil {
+		return "", err
+	}
+	result, err := json.Marshal(map[string]interface{}{
+		"status":         "written",
+		"path":           relPathForResult(root, abs),
+		"workspace_root": root,
+		"bytes":          bytesWritten,
+		"sha256":         hash,
+	})
+	if err != nil {
+		return "", err
+	}
+	return string(result), nil
 }
+
+// codeForPathError maps a sandbox rejection onto the error vocabulary the rest
+// of the platform already speaks, so tool results, audit records and policy
+// denials can be grepped the same way.
+func codeForPathError(err error) string {
+	if errors.Is(err, sandbox.ErrPathEscape) {
+		return policy.CodePathEscape
+	}
+	if errors.Is(err, sandbox.ErrUnsafePath) {
+		return codeUnsafePath
+	}
+	return policy.CodeToolDenied
+}
+
+// codeUnsafePath mirrors sandbox.ErrUnsafePath, which policy does not re-export.
+const codeUnsafePath = "E_UNSAFE_PATH"
 
 // GetInfo returns tool information for LLM
 func (t *DataAnalysisTool) GetInfo() ToolInfo {
