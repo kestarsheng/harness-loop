@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"agent-platform/pkg/harnessloop/compaction"
 	"agent-platform/pkg/harnessloop/event"
 	"agent-platform/pkg/harnessloop/fsm"
+	"agent-platform/pkg/harnessloop/orchestrator"
 	"agent-platform/pkg/harnessloop/retry"
 	"agent-platform/pkg/memoryfile"
 	"agent-platform/services/harnessloop-service/internal/repository"
@@ -721,5 +723,162 @@ func TestRuntimeCompactionSkippedWhenNoTrigger(t *testing.T) {
 	}
 	if events.count(event.CompactionTriggered) != 0 {
 		t.Fatal("no trigger must not emit compaction events")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// T-P2-29 · 父任务终态必须等子任务收口
+// ---------------------------------------------------------------------------
+
+// orchestratedRuntime 造一个开桥的 runtime：b 阶段吐三节点计划，c 阶段由
+// scriptedExecutor 伪造子任务结局，d 阶段走真实汇聚。
+const (
+	terminalTenant  = "tenant-terminal"
+	terminalProject = "proj-terminal"
+)
+
+// terminalInput 固定使用联调租户 tenant-terminal。
+func terminalInput() RunInput {
+	in := runtimeInput()
+	in.TenantID = terminalTenant
+	in.ProjectID = terminalProject
+	return in
+}
+
+func orchestratedRuntime(t *testing.T, strategy string, exec SubtaskExecutor) (*Runtime, *memTasks, *captureEvents) {
+	t.Helper()
+	plan := testTriNodePlan(strategy)
+	stages := &stubStages{fn: func(call int, _ context.Context) (*StageRunResult, error) {
+		res := &StageRunResult{FinishReceived: true, Decision: retry.FinishDecision{Action: retry.ActionDone}}
+		if call == 2 {
+			// 第 2 次调用是 b 阶段：把 DAG 放进 stage_finish 的 summary。
+			res.FinishArgs = fsm.StageFinishArgs{Summary: plan}
+		}
+		return res, nil
+	}}
+	rt, tasks, events, _ := newTestRuntime(stages)
+	tasks.mu.Lock()
+	tasks.task.TenantID = terminalTenant
+	tasks.task.ProjectID = terminalProject
+	tasks.mu.Unlock()
+	sink := &modelEventSink{}
+	pub := event.NewPublisher(sink, nil, nil)
+	emitter := orchestrator.NewPublisherEmitter(pub, orchestrator.EmitContext{})
+	rt.Orchestrator = NewOrchestratorBridge(true, emitter, exec)
+	return rt, tasks, events
+}
+
+func terminalPayloadOf(t *testing.T, events *captureEvents, typ event.EventType) map[string]any {
+	t.Helper()
+	events.mu.Lock()
+	defer events.mu.Unlock()
+	for _, e := range events.events {
+		if e.EventType != typ {
+			continue
+		}
+		out := map[string]any{}
+		if err := json.Unmarshal(e.Payload, &out); err != nil {
+			t.Fatalf("decode %s payload: %v", typ, err)
+		}
+		return out
+	}
+	t.Fatalf("no %s event was published", typ)
+	return nil
+}
+
+// 0/3 accepted：父任务不得 completed，DB 与事件都必须是 failed。
+func TestRuntimeDStageClosureBlocksZeroAccepted(t *testing.T) {
+	exec := &scriptedExecutor{fail: map[string]bool{"n1": true, "n2": true, "n3": true}}
+	rt, tasks, events := orchestratedRuntime(t, "fail-fast", exec)
+
+	res, err := rt.Run(context.Background(), terminalInput())
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.TerminalReason != ReasonFailed {
+		t.Fatalf("terminal reason = %q, want %q (0/3 accepted must not complete)", res.TerminalReason, ReasonFailed)
+	}
+	if !strings.Contains(res.LastError, "subtasks_not_closed") {
+		t.Fatalf("last error must name the closure violation, got %q", res.LastError)
+	}
+	tasks.mu.Lock()
+	status, reason := tasks.task.Status, tasks.task.TerminalReason
+	tasks.mu.Unlock()
+	if status != repository.TaskFailed || reason != ReasonFailed {
+		t.Fatalf("db status/reason = %s/%s, want failed/failed", status, reason)
+	}
+	if events.count(event.TaskCompleted) != 0 {
+		t.Fatalf("a parent with 0/3 accepted subtasks must not emit task.completed")
+	}
+	if payload := terminalPayloadOf(t, events, event.TaskFailed); payload["terminal_reason"] != ReasonFailed {
+		t.Fatalf("task.failed payload = %+v", payload)
+	}
+}
+
+// 3/3 accepted：父任务 completed，且没有 failed_subtasks。
+func TestRuntimeDStageClosureCompletesAllAccepted(t *testing.T) {
+	rt, tasks, events := orchestratedRuntime(t, "tolerate", &scriptedExecutor{})
+
+	res, err := rt.Run(context.Background(), terminalInput())
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.TerminalReason != ReasonCompleted {
+		t.Fatalf("terminal reason = %q, want %q", res.TerminalReason, ReasonCompleted)
+	}
+	if len(res.FailedSubtasks) != 0 {
+		t.Fatalf("a clean 3/3 run must not report failed subtasks: %+v", res.FailedSubtasks)
+	}
+	tasks.mu.Lock()
+	status, reason := tasks.task.Status, tasks.task.TerminalReason
+	tasks.mu.Unlock()
+	if status != repository.TaskCompleted || reason != ReasonCompleted {
+		t.Fatalf("db status/reason = %s/%s, want completed/completed", status, reason)
+	}
+	payload := terminalPayloadOf(t, events, event.TaskCompleted)
+	if payload["terminal_reason"] != ReasonCompleted {
+		t.Fatalf("task.completed payload = %+v", payload)
+	}
+	if _, ok := payload["failed_subtasks"]; ok {
+		t.Fatalf("a clean run must not publish failed_subtasks: %+v", payload)
+	}
+}
+
+// tolerate 下确有失败但已收口：completed_with_failed_subtasks，报告与事件都要
+// 列出 failed_subtasks[]，DB 与事件必须一致。
+func TestRuntimeCompletesWithToleratedFailedSubtasks(t *testing.T) {
+	exec := &scriptedExecutor{fail: map[string]bool{"n3": true}}
+	rt, tasks, events := orchestratedRuntime(t, "tolerate", exec)
+
+	res, err := rt.Run(context.Background(), terminalInput())
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.TerminalReason != ReasonCompletedWithFailedSubtask {
+		t.Fatalf("terminal reason = %q, want %q", res.TerminalReason, ReasonCompletedWithFailedSubtask)
+	}
+	if len(res.FailedSubtasks) != 1 || res.FailedSubtasks[0].DagNodeID != "n3" {
+		t.Fatalf("failed subtasks = %+v, want n3", res.FailedSubtasks)
+	}
+	tasks.mu.Lock()
+	status, reason := tasks.task.Status, tasks.task.TerminalReason
+	tasks.mu.Unlock()
+	if status != repository.TaskCompleted {
+		t.Fatalf("tolerated half-success keeps status completed, got %s", status)
+	}
+	if reason != ReasonCompletedWithFailedSubtask {
+		t.Fatalf("db terminal_reason = %q, want %q", reason, ReasonCompletedWithFailedSubtask)
+	}
+	payload := terminalPayloadOf(t, events, event.TaskCompleted)
+	if payload["terminal_reason"] != ReasonCompletedWithFailedSubtask {
+		t.Fatalf("event terminal_reason = %v, want %s", payload["terminal_reason"], ReasonCompletedWithFailedSubtask)
+	}
+	failed, ok := payload["failed_subtasks"].([]any)
+	if !ok || len(failed) != 1 {
+		t.Fatalf("event must carry failed_subtasks[]: %+v", payload)
+	}
+	entry, _ := failed[0].(map[string]any)
+	if entry["subtask_id"] == "" || entry["status"] != "failed" {
+		t.Fatalf("failed_subtasks[0] = %+v", entry)
 	}
 }

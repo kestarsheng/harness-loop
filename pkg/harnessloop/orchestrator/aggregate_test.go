@@ -79,21 +79,44 @@ func TestAggregateMissingReport(t *testing.T) {
 	assertCode(t, aggregator.RequireForAcceptance(nil), CodeAggregationMissing)
 }
 
-func TestAggregateRejectsNonAcceptedProduct(t *testing.T) {
+// T-P2-29 point 1：running/pending 子任务意味着子任务没收口，d 阶段不得返回 complete。
+func TestAggregateBlocksOpenSubtask(t *testing.T) {
 	root := t.TempDir()
 	hash := writeArtifact(t, root, "out/a.txt", "content")
-	emitter := NewMemoryEmitter()
-	aggregator := NewAggregator(FSVerifier{Root: root}, emitter)
+	aggregator := NewAggregator(FSVerifier{Root: root}, NewMemoryEmitter())
 	st := testSubtask("task-1", "dag-1", "st-a", 0, 1, "p1", "coder", "out/*.txt")
 	st.Status = subtask.StatusRunning
 	st.ArtifactRefs = []subtask.ArtifactRef{{Path: "out/a.txt", Hash: hash}}
+	report, err := aggregator.Aggregate(context.Background(), AggregationRequest{
+		ParentTaskID: "task-1", DagID: "dag-1", TenantID: "tenant-1", ProjectID: "project-1",
+		Subtasks: []*subtask.Subtask{st},
+	})
+	assertCode(t, err, CodeAggregationNotTerminal)
+	if report == nil || report.Complete {
+		t.Fatalf("an open subtask must leave the report incomplete: %+v", report)
+	}
+	if report.Summary.NonTerminal != 1 || report.Items[0].Reason != "subtask is not terminal" {
+		t.Fatalf("unexpected report: %+v", report)
+	}
+	if err := aggregator.RequireForAcceptance(report); err == nil {
+		t.Fatalf("d-stage acceptance must not start on an incomplete report")
+	}
+}
+
+// 跨租户/跨父任务的子任务才是安全违规；running 只是"还没收口"，两者不能混为一谈。
+func TestAggregateRejectsForeignSubtask(t *testing.T) {
+	emitter := NewMemoryEmitter()
+	aggregator := NewAggregator(nil, emitter)
+	st := testSubtask("task-2", "dag-1", "st-a", 0, 1, "p1", "coder", "out/*.txt")
+	st.Status = subtask.StatusAccepted
+	st.AcceptanceID = "acc-st-a"
 	_, err := aggregator.Aggregate(context.Background(), AggregationRequest{
 		ParentTaskID: "task-1", DagID: "dag-1", TenantID: "tenant-1", ProjectID: "project-1",
 		Subtasks: []*subtask.Subtask{st},
 	})
 	assertCode(t, err, CodeSubtaskNotAccepted)
 	if len(emitter.Find(EventSecurityViolation)) != 1 {
-		t.Fatalf("expected security.violation for non-accepted product")
+		t.Fatalf("expected security.violation for a foreign parent's subtask")
 	}
 }
 
@@ -151,15 +174,20 @@ func TestAggregateSamePathConflict(t *testing.T) {
 	}
 }
 
-func TestAggregateReportsFailedAndCancelled(t *testing.T) {
+// T-P2-29 point 3：tolerate 策略下确有失败但已完成 → 报告 complete，但必须列出
+// failed_subtasks[]，并由上层落成 terminal_reason=completed_with_failed_subtasks。
+func TestAggregateReportsToleratedFailures(t *testing.T) {
 	root := t.TempDir()
 	hash := writeArtifact(t, root, "out/a.txt", "content")
 	aggregator := NewAggregator(FSVerifier{Root: root}, NewMemoryEmitter())
 	ok := acceptedSubtask("st-ok", "st-ok", 0, subtask.ArtifactRef{Path: "out/a.txt", Hash: hash})
+	ok.FailureStrategy = subtask.StrategyTolerate
 	failed := testSubtask("task-1", "dag-1", "st-failed", 1, 1, "p1", "coder", "out/*.txt")
 	failed.Status = subtask.StatusFailed
+	failed.FailureStrategy = subtask.StrategyTolerate
 	cancelled := testSubtask("task-1", "dag-1", "st-cancelled", 2, 1, "p1", "coder", "out/*.txt")
 	cancelled.Status = subtask.StatusCancelled
+	cancelled.FailureStrategy = subtask.StrategyTolerate
 	report, err := aggregator.Aggregate(context.Background(), AggregationRequest{
 		ParentTaskID: "task-1", DagID: "dag-1", TenantID: "tenant-1", ProjectID: "project-1",
 		Subtasks: []*subtask.Subtask{ok, failed, cancelled},
@@ -172,6 +200,91 @@ func TestAggregateReportsFailedAndCancelled(t *testing.T) {
 	}
 	if len(report.Items) != 3 {
 		t.Fatalf("failed/cancelled items must not be filtered out: %+v", report.Items)
+	}
+	if !report.Complete || !report.CompletedWithFailures {
+		t.Fatalf("a tolerated failure must still be a complete report: complete=%v with_failures=%v",
+			report.Complete, report.CompletedWithFailures)
+	}
+	if len(report.FailedSubtasks) != 2 {
+		t.Fatalf("failed_subtasks must list every non-accepted child: %+v", report.FailedSubtasks)
+	}
+	if report.FailedSubtasks[0].SubtaskID != "st-failed" || report.FailedSubtasks[0].Status != subtask.StatusFailed {
+		t.Fatalf("unexpected failed_subtasks[0]: %+v", report.FailedSubtasks[0])
+	}
+	if err := aggregator.RequireForAcceptance(report); err != nil {
+		t.Fatalf("a tolerated half-success may still start d-stage acceptance: %v", err)
+	}
+}
+
+// 0/3 accepted：即使所有子任务都到达终态，父任务也不得 completed。
+func TestAggregateBlocksZeroAccepted(t *testing.T) {
+	aggregator := NewAggregator(nil, NewMemoryEmitter())
+	var batch []*subtask.Subtask
+	for i, id := range []string{"st-a", "st-b", "st-c"} {
+		st := testSubtask("task-1", "dag-1", id, i, 1, "p1", "coder", "out/*.txt")
+		st.Status = subtask.StatusFailed
+		st.FailureStrategy = subtask.StrategyTolerate
+		batch = append(batch, st)
+	}
+	report, err := aggregator.Aggregate(context.Background(), AggregationRequest{
+		ParentTaskID: "task-1", DagID: "dag-1", TenantID: "tenant-1", ProjectID: "project-1",
+		Subtasks: batch,
+	})
+	assertCode(t, err, CodeAggregationNoAccepted)
+	if report.Complete {
+		t.Fatalf("0 accepted must not be a complete report: %+v", report)
+	}
+	if err := aggregator.RequireForAcceptance(report); err == nil {
+		t.Fatalf("0 accepted must not pass the d-stage gate")
+	}
+}
+
+// fail-fast 下的失败不能被 tolerate 的"完成"话术掩盖。
+func TestAggregateBlocksUntoleratedFailure(t *testing.T) {
+	root := t.TempDir()
+	hash := writeArtifact(t, root, "out/a.txt", "content")
+	aggregator := NewAggregator(FSVerifier{Root: root}, NewMemoryEmitter())
+	ok := acceptedSubtask("st-ok", "st-ok", 0, subtask.ArtifactRef{Path: "out/a.txt", Hash: hash})
+	ok.FailureStrategy = subtask.StrategyFailFast
+	failed := testSubtask("task-1", "dag-1", "st-failed", 1, 1, "p1", "coder", "out/*.txt")
+	failed.Status = subtask.StatusFailed
+	failed.FailureStrategy = subtask.StrategyFailFast
+	report, err := aggregator.Aggregate(context.Background(), AggregationRequest{
+		ParentTaskID: "task-1", DagID: "dag-1", TenantID: "tenant-1", ProjectID: "project-1",
+		Subtasks: []*subtask.Subtask{ok, failed},
+	})
+	assertCode(t, err, CodeAggregationIncomplete)
+	if report.Complete || report.CompletedWithFailures {
+		t.Fatalf("a fail-fast failure must not be reported as completed: %+v", report)
+	}
+	if len(report.FailedSubtasks) != 1 || report.FailedSubtasks[0].SubtaskID != "st-failed" {
+		t.Fatalf("failed_subtasks must still name the failed child: %+v", report.FailedSubtasks)
+	}
+}
+
+// 3/3 accepted：happy path，报告 complete 且没有 failed_subtasks。
+func TestAggregateAllAcceptedIsCleanComplete(t *testing.T) {
+	root := t.TempDir()
+	aggregator := NewAggregator(FSVerifier{Root: root}, NewMemoryEmitter())
+	var batch []*subtask.Subtask
+	for i, id := range []string{"st-a", "st-b", "st-c"} {
+		rel := "out/" + id + ".txt"
+		hash := writeArtifact(t, root, rel, "content-"+id)
+		batch = append(batch, acceptedSubtask(id, id, i, subtask.ArtifactRef{Path: rel, Hash: hash}))
+	}
+	report, err := aggregator.Aggregate(context.Background(), AggregationRequest{
+		ParentTaskID: "task-1", DagID: "dag-1", TenantID: "tenant-1", ProjectID: "project-1",
+		Subtasks: batch,
+	})
+	if err != nil {
+		t.Fatalf("3/3 accepted must aggregate cleanly: %v", err)
+	}
+	if !report.Complete || report.CompletedWithFailures || len(report.FailedSubtasks) != 0 {
+		t.Fatalf("unexpected report: complete=%v with_failures=%v failed=%+v",
+			report.Complete, report.CompletedWithFailures, report.FailedSubtasks)
+	}
+	if report.Summary.Accepted != 3 || report.Summary.NonTerminal != 0 {
+		t.Fatalf("unexpected summary: %+v", report.Summary)
 	}
 }
 

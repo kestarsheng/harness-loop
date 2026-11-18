@@ -33,6 +33,11 @@ const (
 	ReasonCompleted = "completed"
 	ReasonAborted   = "aborted"
 	ReasonFailed    = "failed"
+	// ReasonCompletedWithFailedSubtask is the tolerated half-success: every
+	// subtask reached a terminal state, at least one was accepted, and the
+	// failures all sit in tolerate sets (T-P2-29 point 3). The DB status stays
+	// "completed", the terminal reason is what distinguishes it from a clean run.
+	ReasonCompletedWithFailedSubtask = "completed_with_failed_subtasks"
 )
 
 type TaskStore interface {
@@ -97,6 +102,9 @@ type RunResult struct {
 	RetryCount     int
 	LastError      string
 	CheckpointID   string
+	// FailedSubtasks lists the children a tolerated half-success finished with
+	// (T-P2-29). It is empty for a clean completed run.
+	FailedSubtasks []orchestrator.FailedSubtaskRef
 }
 
 type AbortResult struct {
@@ -348,7 +356,14 @@ func (r *Runtime) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 		if err := r.Attempts.Finish(ctx, attempt.AttemptID, r.now()); err != nil {
 			return nil, fmt.Errorf("runtime: finish attempt: %w", err)
 		}
-		aggregation := r.runOrchestration(ctx, in, task.WorkspaceRoot, stage, attempt, stageRes)
+		aggregation, aggErr := r.runOrchestration(ctx, in, task.WorkspaceRoot, stage, attempt, stageRes)
+		// T-P2-29：子任务没收口时，父任务连 d 阶段验收都不该开始——否则
+		// "父任务 completed"会变成子任务 running 的遮羞布。
+		if gateErr := r.dStageClosure(stage, aggregation, aggErr); gateErr != nil {
+			r.publishError(ctx, in, stage, attempt, retry.System, gateErr.Error())
+			fmt.Printf("[orchestrator] d-stage closure gate blocked completion: %v\n", gateErr)
+			return r.finalize(ctx, in, result, ReasonFailed, stage, string(stage), string(retry.System), 0, gateErr.Error(), task.Version)
+		}
 
 		accSpan := r.Tracer.StartAcceptance(stageSpan, string(stage), attemptNo, "")
 		verdict := r.evaluate(ctx, in, task, aggregation, stage, attempt, stageRes)
@@ -373,7 +388,13 @@ func (r *Runtime) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 			budget.OnStageEnter()
 			entryReason = fsm.EntryInitial
 			if target == fsm.StageDone {
-				return r.finalize(ctx, in, result, ReasonCompleted, target, "", "", 0, "", task.Version)
+				reason := ReasonCompleted
+				if aggregation != nil && aggregation.CompletedWithFailures {
+					// tolerate 策略下确有失败但全部收口：完成，但不假装干净。
+					reason = ReasonCompletedWithFailedSubtask
+					result.FailedSubtasks = aggregation.FailedSubtasks
+				}
+				return r.finalize(ctx, in, result, reason, target, "", "", 0, "", task.Version)
 			}
 			continue
 		}
@@ -448,7 +469,7 @@ func (r *Runtime) Abort(ctx context.Context, tenantID, taskID string, epoch int6
 			res.Timestamp = updated.UpdatedAt
 		}
 		r.aborted[taskID] = true
-		r.publishTerminal(ctx, tenantID, task.ProjectID, taskID, ReasonAborted)
+		r.publishTerminal(ctx, tenantID, task.ProjectID, taskID, ReasonAborted, nil)
 	}
 	r.aborts[key] = res
 	return res, nil
@@ -549,7 +570,9 @@ func (r *Runtime) finalize(ctx context.Context, in RunInput, res *RunResult, rea
 			return nil, fmt.Errorf("runtime: finalize status: %w", err)
 		}
 	}
-	r.publishTerminal(ctx, in.TenantID, in.ProjectID, in.TaskID, reason)
+	// DB 与事件用同一份 terminal_reason（含 failed_subtasks），避免"库里 completed、
+	// 事件里 completed_with_failed_subtasks"这种两边不一致（T-P2-29 验收）。
+	r.publishTerminal(ctx, in.TenantID, in.ProjectID, in.TaskID, reason, res.FailedSubtasks)
 	r.Metrics.TaskTerminal(string(status))
 
 	res.TerminalReason = reason
@@ -564,11 +587,13 @@ func (r *Runtime) finalize(ctx context.Context, in RunInput, res *RunResult, rea
 }
 
 // runOrchestration bridges b/c/d stage completion into the orchestration layer.
-// It is best-effort: a plan that cannot be parsed or a missing executor never
-// aborts the parent stage, preserving the pre-flag behaviour.
-func (r *Runtime) runOrchestration(ctx context.Context, in RunInput, workspaceRoot string, stage fsm.Stage, attempt fsm.Attempt, res *StageRunResult) *orchestrator.AggregationReport {
+// It is best-effort for the parent stage — a plan that cannot be parsed or a
+// missing executor never aborts the parent stage, preserving the pre-flag
+// behaviour — but the d-stage report and its error are returned so the caller
+// can enforce the "children must be closed" invariant (T-P2-29).
+func (r *Runtime) runOrchestration(ctx context.Context, in RunInput, workspaceRoot string, stage fsm.Stage, attempt fsm.Attempt, res *StageRunResult) (*orchestrator.AggregationReport, error) {
 	if r.Orchestrator == nil || !r.Orchestrator.Enabled() || res == nil {
-		return nil
+		return nil, nil
 	}
 	ec := OrchestratorStageContext{
 		TenantID: in.TenantID, ProjectID: in.ProjectID, TaskID: in.TaskID,
@@ -594,8 +619,39 @@ func (r *Runtime) runOrchestration(ctx context.Context, in RunInput, workspaceRo
 	case fsm.StageExecute:
 		_, _ = r.Orchestrator.DispatchCStage(runCtx, ec)
 	case fsm.StageVerify:
-		report, _ := r.Orchestrator.AggregateDStage(runCtx, ec)
-		return report
+		return r.Orchestrator.AggregateDStage(runCtx, ec)
+	}
+	return nil, nil
+}
+
+// dStageClosure is the parent terminal invariant of T-P2-29: a parent may only
+// leave d as completed when every child reached a terminal state and at least
+// one child was accepted. A missing DAG (nothing was ever planned) is not a
+// violation — there are no children to close — and the pre-orchestration
+// single-agent path keeps working unchanged.
+func (r *Runtime) dStageClosure(stage fsm.Stage, report *orchestrator.AggregationReport, aggErr error) error {
+	if r.Orchestrator == nil || !r.Orchestrator.Enabled() || stage != fsm.StageVerify {
+		return nil
+	}
+	if errors.Is(aggErr, ErrNoDagPlanned) {
+		return nil
+	}
+	if aggErr != nil {
+		return fmt.Errorf("subtasks_not_closed: d-stage aggregation failed: %w", aggErr)
+	}
+	if report == nil {
+		return errors.New("subtasks_not_closed: d-stage produced no aggregation report")
+	}
+	if report.Summary.NonTerminal > 0 {
+		return fmt.Errorf("subtasks_not_closed: %d of %d subtasks are still pending/running",
+			report.Summary.NonTerminal, report.Summary.Total)
+	}
+	if !report.Complete {
+		return fmt.Errorf("subtasks_not_closed: aggregation report is incomplete (%d conflicts, %d/%d accepted)",
+			len(report.Conflicts), report.Summary.Accepted, report.Summary.Total)
+	}
+	if report.Summary.Accepted == 0 {
+		return fmt.Errorf("subtasks_not_closed: 0 of %d subtasks were accepted", report.Summary.Total)
 	}
 	return nil
 }
@@ -810,7 +866,7 @@ func (r *Runtime) transitionEvents(in RunInput, from, to fsm.Stage, attempt fsm.
 	}}
 }
 
-func (r *Runtime) publishTerminal(ctx context.Context, tenantID, projectID, taskID, reason string) {
+func (r *Runtime) publishTerminal(ctx context.Context, tenantID, projectID, taskID, reason string, failed []orchestrator.FailedSubtaskRef) {
 	if r.Events == nil {
 		return
 	}
@@ -829,11 +885,15 @@ func (r *Runtime) publishTerminal(ctx context.Context, tenantID, projectID, task
 	case ReasonCompleted:
 		typ = event.TaskCompleted
 		severity = event.SeverityInfo
+	case ReasonCompletedWithFailedSubtask:
+		// 完成，但确实有子任务失败：事件类型仍是 task.completed（父任务真的
+		// 走完了），严重级别降为 warn，并把失败子任务列在 payload 里。
+		typ = event.TaskCompleted
+		severity = event.SeverityWarn
 	case ReasonAborted:
 		typ = event.TaskAborted
 		severity = event.SeverityWarn
 	}
-	payload := []byte(fmt.Sprintf(`{"terminal_reason":%q}`, reason))
 	_ = r.Events.Publish(ctx, &event.Event{
 		EventID:       fmt.Sprintf("%s-%s", taskID, reason),
 		EventType:     typ,
@@ -843,8 +903,22 @@ func (r *Runtime) publishTerminal(ctx context.Context, tenantID, projectID, task
 		Severity:      severity,
 		TenantID:      tenantID,
 		ProjectID:     projectID,
-		Payload:       payload,
+		Payload:       terminalPayload(reason, failed),
 	})
+}
+
+// terminalPayload keeps the historical {"terminal_reason":...} shape and adds
+// failed_subtasks only when the parent finished with tolerated failures.
+func terminalPayload(reason string, failed []orchestrator.FailedSubtaskRef) []byte {
+	payload := map[string]any{"terminal_reason": reason}
+	if len(failed) > 0 {
+		payload["failed_subtasks"] = failed
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return []byte(fmt.Sprintf(`{"terminal_reason":%q}`, reason))
+	}
+	return raw
 }
 
 func (r *Runtime) publishError(ctx context.Context, in RunInput, stage fsm.Stage, attempt fsm.Attempt, category retry.Category, reason string) {

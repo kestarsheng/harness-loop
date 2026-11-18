@@ -38,6 +38,10 @@ const (
 	CodeReplanSameDag          = "E_REPLAN_SAME_DAG"
 	CodeCrossStageDenied       = "E_CROSS_STAGE_DENIED"
 	CodeAggregationDagMismatch = "E_AGGREGATION_DAG_MISMATCH"
+
+	// T-P2-29：子任务没收口，父任务不得终态。
+	CodeAggregationNotTerminal = "E_AGGREGATION_NOT_TERMINAL"
+	CodeAggregationNoAccepted  = "E_AGGREGATION_NO_ACCEPTED"
 )
 
 func newError(code, format string, args ...any) error {

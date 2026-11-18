@@ -331,17 +331,22 @@ func TestMultiAgentChildFailureKeepsParentStage(t *testing.T) {
 	agg := NewAggregator(maSuiteFakeVerifier{}, env.emitter)
 	failed := maSuiteSubtask(env.taskID, "dag-suite", "ma-st-fail", 0, 1, "ps-1", "coder")
 	failed.Status = subtask.StatusFailed
+	// 9.9 要求「汇聚视图回写失败项」；T-P2-29 追加一条更强的约束：0 accepted
+	// 的报告不得被当成可完成父任务的报告。两者不冲突——视图照旧记录失败项，
+	// 但报告必须显式 incomplete。
 	report, err := agg.Aggregate(context.Background(), AggregationRequest{
 		ParentTaskID: env.taskID, DagID: "dag-suite", TenantID: env.tenant, ProjectID: env.project,
 		Subtasks: []*subtask.Subtask{failed},
 	})
-	// 9.9 只要求「汇聚视图回写失败项」，不要求 failed 终态导致整份报告不可用；
-	// 因此这里断言视图内容，而不是 err 非空。
-	if err != nil {
-		t.Fatalf("aggregate terminal failure rows: %v", err)
+	maSuiteCode(t, err, CodeAggregationNoAccepted)
+	if report == nil || report.Complete {
+		t.Fatalf("a report with 0/1 accepted must not be complete: %+v", report)
 	}
-	if report == nil || report.Summary.Failed != 1 || report.Items[0].Verdict != "fail" {
+	if report.Summary.Failed != 1 || report.Items[0].Verdict != "fail" {
 		t.Fatalf("aggregation view did not record the failure: %+v", report)
+	}
+	if len(report.FailedSubtasks) != 1 || report.FailedSubtasks[0].SubtaskID != st.SubtaskID {
+		t.Fatalf("failed_subtasks must name the failed child: %+v", report.FailedSubtasks)
 	}
 	if got := maSuiteTaskStage(t, env.db, env.taskID); got != "b" {
 		t.Fatalf("aggregation changed parent stage to %q", got)
@@ -995,6 +1000,9 @@ func TestMultiAgentAggregationMissingReport(t *testing.T) {
 	maSuiteCode(t, agg.RequireForAcceptance(&AggregationReport{}), CodeAggregationMissing)
 }
 
+// T-P2-29：pending/running 子任务不是安全违规，而是"还没收口"——父任务因此
+// 不得终态。跨租户/跨父任务的子任务才算 security.violation（见
+// TestAggregateRejectsForeignSubtask）。
 func TestMultiAgentAggregationRejectsNonAccepted(t *testing.T) {
 	env := maSuiteNewEnv(t, "ma-task-aggregate")
 	agg := NewAggregator(maSuiteFakeVerifier{}, env.emitter)
@@ -1003,18 +1011,15 @@ func TestMultiAgentAggregationRejectsNonAccepted(t *testing.T) {
 		ParentTaskID: env.taskID, DagID: "dag-suite", TenantID: env.tenant, ProjectID: env.project,
 		Subtasks: []*subtask.Subtask{pending},
 	})
-	maSuiteCode(t, err, CodeSubtaskNotAccepted)
+	maSuiteCode(t, err, CodeAggregationNotTerminal)
 	if report == nil || report.Complete {
-		t.Fatalf("non-accepted subtask must make the report incomplete: %+v", report)
+		t.Fatalf("non-terminal subtask must make the report incomplete: %+v", report)
 	}
-	var violation bool
-	for _, e := range env.sink.snapshot() {
-		if e.EventType == event.SecurityViolation {
-			violation = true
-		}
+	if report.Summary.NonTerminal != 1 {
+		t.Fatalf("pending subtask must be counted as non-terminal: %+v", report.Summary)
 	}
-	if !violation {
-		t.Fatal("non-accepted artifact must emit security.violation")
+	if err := agg.RequireForAcceptance(report); err == nil {
+		t.Fatal("d-stage acceptance must not start while a child is still open")
 	}
 }
 
