@@ -13,7 +13,8 @@ param(
     [switch]$KeepDb,
     [switch]$Install,
     [switch]$Rebuild,
-    [switch]$NoBuild
+    [switch]$NoBuild,
+    [switch]$Demo
 )
 
 $ErrorActionPreference = 'Stop'
@@ -57,6 +58,7 @@ else {
     if ($Install) { $bashArgs += '--install' }
     if ($Rebuild) { $bashArgs += '--rebuild' }
     if ($NoBuild) { $bashArgs += '--no-build' }
+    if ($Demo) { $bashArgs += '--demo' }
     if ($KeepDb) { Write-Host "[warn] -KeepDb 只对 -Down 生效" -ForegroundColor Yellow }
 }
 

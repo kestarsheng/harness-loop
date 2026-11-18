@@ -8,7 +8,8 @@ postgres:
   slow_query_ms: 500
 
 agent:
-  target: "127.0.0.1:50002"
+  # agent-service gRPC（端口矩阵固定 50006，与 knowledge-service 的 50002 区分）
+  target: "127.0.0.1:50006"
   entry_agent: "default"
   stage_model: "qwen-plus"
   timeout_seconds: 600
@@ -45,6 +46,6 @@ feature_flags:
 
 memory:
   # memory-service gRPC address; empty disables recall and degrades to markdown
-  addr: "memory-service:50003"
+  addr: "127.0.0.1:50003"
   # long-term memory home; empty uses ~/.harness
   harness_home: ""

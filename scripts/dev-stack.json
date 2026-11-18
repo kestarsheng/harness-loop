@@ -1,0 +1,182 @@
+{
+  "version": 1,
+  "description": "本地开发栈声明式契约：14 项 = 4 个数据容器 + 9 个微服务 + vite。dev-up.sh / dev-down.sh 与 T-P2-21 的 harness-cli 自举共用此文件，任何启停项必须与脚本逐项一致。",
+  "tenant": "tenant-devfull",
+  "defaults": {
+    "dev_dir": ".harness/dev",
+    "bin_dir": ".harness/dev/bin",
+    "conf_dir": ".harness/dev/conf",
+    "log_dir": ".harness/dev/logs",
+    "run_dir": ".harness/dev/run"
+  },
+  "items": [
+    {
+      "name": "postgres",
+      "kind": "container",
+      "port": 55432,
+      "command": "docker compose -f docker/docker-compose.data.yaml up -d postgres",
+      "config_template": null,
+      "health": { "type": "exec", "command": "pg_isready -h 127.0.0.1 -p 55432 -U agent -d agent_platform" },
+      "required": true
+    },
+    {
+      "name": "mongo",
+      "kind": "container",
+      "port": 27017,
+      "command": "docker compose -f docker/docker-compose.data.yaml up -d mongo",
+      "config_template": null,
+      "health": { "type": "port", "address": "127.0.0.1:27017" },
+      "required": true
+    },
+    {
+      "name": "qdrant",
+      "kind": "container",
+      "port": 6333,
+      "command": "docker compose -f docker/docker-compose.data.yaml up -d qdrant",
+      "config_template": null,
+      "health": { "type": "http", "url": "http://127.0.0.1:6333/healthz", "expect_status": 200 },
+      "required": true
+    },
+    {
+      "name": "redis",
+      "kind": "container",
+      "port": 56379,
+      "command": "docker run -d --name hlp-dev-redis -p 56379:6379 redis:7-alpine",
+      "config_template": null,
+      "health": { "type": "port", "address": "127.0.0.1:56379" },
+      "required": true
+    },
+    {
+      "name": "memory",
+      "kind": "process",
+      "port": 50003,
+      "command": ".harness/dev/bin/memory-service",
+      "config_template": "services/memory-service/config.example.yaml",
+      "config_output": ".harness/dev/conf/memory.yaml",
+      "env": {
+        "CONFIG_PATH": ".harness/dev/conf/memory.yaml",
+        "HARNESS_MEM_PG_DSN": "postgres://agent:agent_dev_password@127.0.0.1:55432/agent_platform?sslmode=disable",
+        "HARNESS_MEM_TENANT": "tenant-devfull",
+        "HARNESS_MEM_PROJECT": "default"
+      },
+      "health": { "type": "port", "address": "127.0.0.1:50003" },
+      "required": true
+    },
+    {
+      "name": "knowledge",
+      "kind": "process",
+      "port": 50002,
+      "command": ".harness/dev/bin/knowledge-service",
+      "config_template": "services/knowledge-service/config.example.yaml",
+      "config_output": ".harness/dev/conf/knowledge.yaml",
+      "env": { "CONFIG_PATH": ".harness/dev/conf/knowledge.yaml" },
+      "health": { "type": "port", "address": "127.0.0.1:50002" },
+      "required": true
+    },
+    {
+      "name": "chat",
+      "kind": "process",
+      "port": 50001,
+      "command": ".harness/dev/bin/chat-service",
+      "config_template": "services/chat-service/config.example.yaml",
+      "config_output": ".harness/dev/conf/chat.yaml",
+      "env": {
+        "CONFIG_PATH": ".harness/dev/conf/chat.yaml",
+        "MCP_SERVICE_ADDR": "127.0.0.1:50005"
+      },
+      "health": { "type": "port", "address": "127.0.0.1:50001" },
+      "required": true
+    },
+    {
+      "name": "a2a",
+      "kind": "process",
+      "port": 50004,
+      "command": ".harness/dev/bin/a2a-service",
+      "config_template": "services/a2a-service/config.example.yaml",
+      "config_output": ".harness/dev/conf/a2a.yaml",
+      "env": {
+        "CONFIG_PATH": ".harness/dev/conf/a2a.yaml",
+        "AGENT_SERVICE_ADDR": "127.0.0.1:50006"
+      },
+      "health": { "type": "port", "address": "127.0.0.1:50004" },
+      "required": true
+    },
+    {
+      "name": "mcp",
+      "kind": "process",
+      "port": 50005,
+      "command": ".harness/dev/bin/mcp-service",
+      "config_template": "services/mcp-service/config.example.yaml",
+      "config_output": ".harness/dev/conf/mcp.yaml",
+      "env": { "CONFIG_PATH": ".harness/dev/conf/mcp.yaml" },
+      "health": { "type": "port", "address": "127.0.0.1:50005" },
+      "required": true
+    },
+    {
+      "name": "harness-service",
+      "kind": "process",
+      "pid_name": "harness-svc",
+      "port": 50007,
+      "command": ".harness/dev/bin/harness-service",
+      "config_template": "services/harness-service/config.example.yaml",
+      "config_output": ".harness/dev/conf/harness-service.yaml",
+      "env": { "CONFIG_PATH": ".harness/dev/conf/harness-service.yaml" },
+      "health": { "type": "port", "address": "127.0.0.1:50007" },
+      "required": true
+    },
+    {
+      "name": "agent",
+      "kind": "process",
+      "port": 50006,
+      "http_port": 50009,
+      "command": ".harness/dev/bin/agent-service",
+      "config_template": "services/agent-service/config.example.yaml",
+      "config_output": ".harness/dev/conf/agent.yaml",
+      "env": {
+        "CONFIG_PATH": ".harness/dev/conf/agent.yaml",
+        "PORT": "50006",
+        "HTTP_PORT": "50009",
+        "MONGODB_URL": "mongodb://127.0.0.1:27017",
+        "STORE_PATH": ".harness/dev/agent-contexts.db"
+      },
+      "health": { "type": "port", "address": "127.0.0.1:50006" },
+      "required": true
+    },
+    {
+      "name": "harnessloop",
+      "kind": "process",
+      "port": 50013,
+      "command": ".harness/dev/bin/harnessloop-service -config .harness/dev/conf/harnessloop.yaml",
+      "config_template": "services/harnessloop-service/config.example.yaml",
+      "config_output": ".harness/dev/conf/harnessloop.yaml",
+      "env": {
+        "HARNESSLOOP_AGENT_TARGET": "127.0.0.1:50006",
+        "HARNESSLOOP_MEMORY_ADDR": "127.0.0.1:50003",
+        "HARNESSLOOP_APPROVAL_ADDR": "http://127.0.0.1:50009"
+      },
+      "health": { "type": "port", "address": "127.0.0.1:50013" },
+      "required": true
+    },
+    {
+      "name": "gateway",
+      "kind": "process",
+      "port": 9000,
+      "command": ".harness/dev/bin/gateway",
+      "config_template": "services/gateway/config.example.yaml",
+      "config_output": ".harness/dev/conf/gateway.yaml",
+      "env": { "CONFIG_PATH": ".harness/dev/conf/gateway.yaml" },
+      "health": { "type": "http", "url": "http://127.0.0.1:9000/health", "expect_status": 200 },
+      "required": true
+    },
+    {
+      "name": "vite",
+      "kind": "frontend",
+      "port": 5174,
+      "command": "node frontend/node_modules/vite/bin/vite.js --port 5174 --strictPort",
+      "config_template": null,
+      "env": { "VITE_API_URL": "http://localhost:9000" },
+      "health": { "type": "http", "url": "http://localhost:5174/", "expect_status": 200 },
+      "required": true
+    }
+  ]
+}

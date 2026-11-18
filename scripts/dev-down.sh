@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# 停止本地开发栈：按 .harness/dev/run/*.pid 逐个停止，默认连带停掉 PG 容器。
+# 停止本地开发栈：按 .harness/dev/run/*.pid 逐个停止，默认连带停掉数据容器。
 #
 # 用法：
 #   scripts/dev-down.sh [--keep-db] [-h]
 #
-#   --keep-db   保留 PostgreSQL / MongoDB 容器（只停业务进程）
+#   --keep-db   保留 PostgreSQL / MongoDB / Qdrant 容器（只停业务进程）
 #
+# 清理范围：9 个微服务 + vite + redis 容器；数据容器按 --keep-db 决定。
 # 幂等：没有 PID 文件或进程已退出时直接跳过；端口最终必须释放。
 
 set -uo pipefail
@@ -26,27 +27,20 @@ while [ $# -gt 0 ]; do
 done
 
 # 停业务进程：顺序与启动相反；端口用于兜底反查 PID
-SERVICES=(vite gateway harnessloop agent harness-svc mcp)
-service_port() {
-  case "$1" in
-    vite) echo "$VITE_PORT" ;;
-    gateway) echo "$GATEWAY_PORT" ;;
-    harnessloop) echo "$HARNESSLOOP_PORT" ;;
-    agent) echo "$AGENT_PORT" ;;
-    harness-svc) echo "$HARNESS_SVC_PORT" ;;
-    mcp) echo "$MCP_PORT" ;;
-  esac
-}
+SERVICES=(vite gateway harnessloop agent harness-svc mcp a2a chat knowledge memory)
+service_port() { service_port_of "$1"; }
 
 report_ports() {
   local p
-  for p in "$VITE_PORT" "$GATEWAY_PORT" "$HARNESSLOOP_PORT" "$AGENT_PORT" "$AGENT_HTTP_PORT" "$HARNESS_SVC_PORT" "$MCP_PORT"; do
+  for p in "$VITE_PORT" "$GATEWAY_PORT" "$HARNESSLOOP_PORT" "$AGENT_PORT" "$AGENT_HTTP_PORT" \
+           "$HARNESS_SVC_PORT" "$MCP_PORT" "$A2A_PORT" "$A2A_HTTP_PORT" "$CHAT_PORT" \
+           "$KNOWLEDGE_PORT" "$MEMORY_PORT"; do
     if port_open_any "$p"; then
       c_err "端口 $p 仍在监听"
       return 1
     fi
   done
-  c_ok "端口已释放：${AGENT_PORT} / ${AGENT_HTTP_PORT} / ${MCP_PORT} / ${HARNESS_SVC_PORT} / ${HARNESSLOOP_PORT} / ${GATEWAY_PORT} / ${VITE_PORT}"
+  c_ok "业务端口已释放：${CHAT_PORT} / ${KNOWLEDGE_PORT} / ${MEMORY_PORT} / ${A2A_PORT}(${A2A_HTTP_PORT}) / ${MCP_PORT} / ${AGENT_PORT}(${AGENT_HTTP_PORT}) / ${HARNESS_SVC_PORT} / ${HARNESSLOOP_PORT} / ${GATEWAY_PORT} / ${VITE_PORT}"
   return 0
 }
 
@@ -86,11 +80,11 @@ main() {
   fi
 
   if [ "$KEEP_DB" = 1 ]; then
-    c_ok "保留数据容器（--keep-db）"
+    c_ok "保留数据容器 PG / Mongo / Qdrant（--keep-db）"
   elif command -v docker >/dev/null 2>&1; then
     c_step "停止数据容器（docker compose -f docker/docker-compose.data.yaml down）"
     if docker compose -f "$COMPOSE_FILE" down >"$LOG_DIR/pg-compose-down.log" 2>&1; then
-      c_ok "数据容器已停止（具名卷 pgdata/mongodata 保留）"
+      c_ok "数据容器已停止（具名卷 pgdata/mongodata/qdrant-data 保留）"
     else
       c_err "docker compose down 失败"
       sed 's/^/    /' "$LOG_DIR/pg-compose-down.log" >&2

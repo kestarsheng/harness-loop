@@ -20,16 +20,27 @@ RUN_DIR="$DEV_DIR/run"
 CONF_DIR="$DEV_DIR/conf"
 
 # ---- 端口 / 数据库 ---------------------------------------------------------
+# 统一端口矩阵（与 scripts/dev-stack.json 逐项一致）：
+#   gateway 9000 / chat 50001 / knowledge 50002 / memory 50003 / a2a 50004 /
+#   mcp 50005 / agent 50006（HTTP 50009）/ harness 50007 / harnessloop 50013 /
+#   PG 55432 / Mongo 27017 / Redis 56379 / Qdrant 6333 / vite 5174
 PG_PORT="${HLP_PG_PORT:-55432}"
-AGENT_PORT="${HLP_AGENT_PORT:-50002}"
+CHAT_PORT="${HLP_CHAT_PORT:-50001}"
+KNOWLEDGE_PORT="${HLP_KNOWLEDGE_PORT:-50002}"
+MEMORY_PORT="${HLP_MEMORY_PORT:-50003}"
+A2A_PORT="${HLP_A2A_PORT:-50004}"
+A2A_HTTP_PORT="${HLP_A2A_HTTP_PORT:-50014}"
+AGENT_PORT="${HLP_AGENT_PORT:-50006}"
 AGENT_HTTP_PORT="${HLP_AGENT_HTTP_PORT:-50009}"
 MCP_PORT="${HLP_MCP_PORT:-50005}"
 HARNESS_SVC_PORT="${HLP_HARNESS_SVC_PORT:-50007}"
-REDIS_PORT="${HLP_REDIS_PORT:-56379}"
-REDIS_CONTAINER="${HLP_REDIS_CONTAINER:-hlp-dev-redis}"
 HARNESSLOOP_PORT="${HLP_HARNESSLOOP_PORT:-50013}"
 GATEWAY_PORT="${HLP_GATEWAY_PORT:-9000}"
 VITE_PORT="${HLP_VITE_PORT:-5174}"
+REDIS_PORT="${HLP_REDIS_PORT:-56379}"
+REDIS_CONTAINER="${HLP_REDIS_CONTAINER:-hlp-dev-redis}"
+MONGO_PORT="${HLP_MONGO_PORT:-27017}"
+QDRANT_PORT="${HLP_QDRANT_PORT:-6333}"
 
 PG_USER="${HLP_PG_USER:-agent}"
 PG_PASSWORD="${HLP_PG_PASSWORD:-agent_dev_password}"
@@ -38,6 +49,8 @@ PG_DSN="${HLP_PG_DSN:-postgres://${PG_USER}:${PG_PASSWORD}@127.0.0.1:${PG_PORT}/
 
 COMPOSE_FILE="$ROOT/docker/docker-compose.data.yaml"
 PG_CONTAINER="${HLP_PG_CONTAINER:-hlp-pg-test}"
+MONGO_CONTAINER="${HLP_MONGO_CONTAINER:-hlp-mongo}"
+QDRANT_CONTAINER="${HLP_QDRANT_CONTAINER:-hlp-qdrant}"
 
 MONITOR_PATH="/harness-loop/monitor"
 # vite 默认只绑定 localhost（IPv6 / ::1），因此前端探活统一走 localhost 而非 127.0.0.1
@@ -173,6 +186,34 @@ pg_ready() {
   else
     port_open "$PG_PORT"
   fi
+}
+
+mongo_ready() {
+  port_open "$MONGO_PORT"
+}
+
+# Qdrant 的 /healthz 在 1.x 返回 200；容器刚启动时先无响应，用 HTTP 探活更准确。
+qdrant_ready() {
+  http_is_200 "http://127.0.0.1:${QDRANT_PORT}/healthz" 2 \
+    || http_is_200 "http://127.0.0.1:${QDRANT_PORT}/"
+}
+
+qdrant_collections_url() { printf 'http://127.0.0.1:%s/collections' "$QDRANT_PORT"; }
+
+# 服务名 -> 主监听端口（用于失败回滚与 dev-down 兜底反查）。
+service_port_of() {
+  case "$1" in
+    vite) echo "$VITE_PORT" ;;
+    gateway) echo "$GATEWAY_PORT" ;;
+    harnessloop) echo "$HARNESSLOOP_PORT" ;;
+    agent) echo "$AGENT_PORT" ;;
+    harness-svc) echo "$HARNESS_SVC_PORT" ;;
+    mcp) echo "$MCP_PORT" ;;
+    a2a) echo "$A2A_PORT" ;;
+    chat) echo "$CHAT_PORT" ;;
+    knowledge) echo "$KNOWLEDGE_PORT" ;;
+    memory) echo "$MEMORY_PORT" ;;
+  esac
 }
 
 # ---- 进程启停 --------------------------------------------------------------
