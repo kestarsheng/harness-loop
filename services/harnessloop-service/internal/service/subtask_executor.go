@@ -22,9 +22,26 @@ import (
 // needs. The parent task, tenant and workspace come from the stage context.
 type SubtaskExecutorConfig struct {
 	EntryAgent string
+	// RoleAgents 把计划里的 role 直接映射到 agent id。为空时退回 defaultRoleAgents。
+	RoleAgents map[string]string
 	UserID     string
 	Model      string
 	Timeout    time.Duration
+}
+
+// defaultRoleAgents sends each sub任务 straight to the agent that executes it.
+//
+// 不能统一走 main-agent：入口 agent 的 handoff 工具集分发之后仍然留在上下文里，
+// 模型到了 coder-agent 又会再调一次 handoff(coder-agent)，被 handoff 守卫
+// （pkg/agent/handoff.go 的 CanHandoffTo）拒绝，子任务直接 failed。
+var defaultRoleAgents = map[string]string{
+	"coder":      "coder-agent",
+	"tester":     "coder-agent",
+	"writer":     "coder-agent",
+	"verifier":   "analyst-agent",
+	"analyst":    "analyst-agent",
+	"researcher": "researcher-agent",
+	"browser":    "browser-agent",
 }
 
 // AgentSubtaskExecutor runs a scheduled subtask through agent-service's
@@ -52,6 +69,24 @@ func NewAgentSubtaskExecutor(agents AgentStreamer, cfg SubtaskExecutorConfig) *A
 	return &AgentSubtaskExecutor{agents: agents, cfg: cfg}
 }
 
+// entryAgentFor picks the agent that runs this subtask: explicit role mapping
+// first, then the parent task's entry agent.
+func (e *AgentSubtaskExecutor) entryAgentFor(st *subtask.Subtask) string {
+	role := ""
+	if st != nil {
+		role = strings.ToLower(strings.TrimSpace(st.Role))
+	}
+	if role != "" {
+		if id := e.cfg.RoleAgents[role]; id != "" {
+			return id
+		}
+		if id := defaultRoleAgents[role]; id != "" {
+			return id
+		}
+	}
+	return e.cfg.EntryAgent
+}
+
 func (e *AgentSubtaskExecutor) Execute(ctx context.Context, ec OrchestratorStageContext, st *subtask.Subtask) (*SubtaskResult, error) {
 	if e == nil || e.agents == nil {
 		return nil, fmt.Errorf("subtask executor: agent-service streamer is not configured")
@@ -71,12 +106,14 @@ func (e *AgentSubtaskExecutor) Execute(ctx context.Context, ec OrchestratorStage
 	subtaskSpan := e.Tracer.StartSubtaskFromContext(runCtx, st.SubtaskID, st.DagID, st.Depth, st.Role, st.ParentTaskID)
 	defer subtaskSpan.End()
 
+	entryAgent := e.entryAgentFor(st)
+
 	req := &agentpb.ExecuteStreamRequest{
 		SessionId:       subtaskSessionID(ec.TaskID, st.SubtaskID),
 		TenantId:        firstNonEmpty(st.TenantID, ec.TenantID),
 		UserId:          e.cfg.UserID,
 		Message:         subtaskPrompt(st),
-		EntryAgent:      e.cfg.EntryAgent,
+		EntryAgent:      entryAgent,
 		Goal:            subtaskGoal(st),
 		SuccessCriteria: strings.Join(st.AcceptanceCriteria, "\n"),
 		ContextVars: map[string]string{
@@ -86,7 +123,7 @@ func (e *AgentSubtaskExecutor) Execute(ctx context.Context, ec OrchestratorStage
 			VarProjectID:         ec.ProjectID,
 			VarTenantID:          firstNonEmpty(st.TenantID, ec.TenantID),
 			VarWorkspaceRoot:     ec.WorkspaceRoot,
-			VarAgentID:           e.cfg.EntryAgent,
+			VarAgentID:           entryAgent,
 			"__subtask_id__":     st.SubtaskID,
 			"__parent_task_id__": st.ParentTaskID,
 			"__subtask_role__":   st.Role,
@@ -232,6 +269,10 @@ func subtaskSessionID(taskID, subtaskID string) string {
 func subtaskPrompt(st *subtask.Subtask) string {
 	var b strings.Builder
 	b.WriteString("你正在执行父任务的一个子任务，请只完成本子任务并给出可核验的结论。\n")
+	// 「角色: coder」会被模型读成路由指令：它再调一次 handoff(coder-agent)，
+	// 而 handoff 守卫按 agent 注册表校验，自 handoff 一律拒绝，子任务随即 failed。
+	// 分发已经完成，这里必须明确禁止再次 handoff。
+	b.WriteString("你已经是被分发到位、负责执行本子任务的 agent：不要再调用任何 handoff 工具，直接使用你手上的工具完成工作。\n")
 	fmt.Fprintf(&b, "角色: %s\n子任务ID: %s\n父任务ID: %s\n", st.Role, st.SubtaskID, st.ParentTaskID)
 	if len(st.InputContract) > 0 {
 		fmt.Fprintf(&b, "输入契约: %s\n", marshalContract(st.InputContract))

@@ -168,6 +168,18 @@ func (p *Plan) BuildSubtasks(parentTaskID, tenantID, projectID string) ([]*subta
 	for _, edge := range p.Edges {
 		depends[edge.To] = append(depends[edge.To], edge.From)
 	}
+	// edges 用的是 DAG 的 node_id，而 subtask 会拿到新生成的 ULID。两套 id 必须先
+	// 建映射再翻译依赖：scheduler.Enqueue 只按 SubtaskID 认依赖，直接把 node_id 写进
+	// DependsOn 会让任何带边的计划在入队时判 E_DAG_INCOMPLETE（单节点计划没有边，
+	// 所以这个洞一直没被触发）。
+	subtaskIDs := make(map[string]string, len(p.Nodes))
+	for _, node := range flattenNodes(p.Nodes) {
+		id, err := newSubtaskID()
+		if err != nil {
+			return nil, err
+		}
+		subtaskIDs[node.NodeID] = id
+	}
 
 	var out []*subtask.Subtask
 	index := 0
@@ -186,7 +198,16 @@ func (p *Plan) BuildSubtasks(parentTaskID, tenantID, projectID string) ([]*subta
 			}
 			setID = set.SetID
 		}
-		deps := append([]string(nil), depends[node.NodeID]...)
+		// 依赖一律换成 SubtaskID；未知的 node_id 原样保留，让下游按「未知依赖」报错，
+		// 而不是在这里悄悄丢掉一条边。
+		deps := make([]string, 0, len(depends[node.NodeID])+len(node.InputContract.Requires))
+		for _, dep := range depends[node.NodeID] {
+			if id, ok := subtaskIDs[dep]; ok {
+				deps = append(deps, id)
+				continue
+			}
+			deps = append(deps, dep)
+		}
 		deps = append(deps, node.InputContract.Requires...)
 		criteria := make([]string, 0, len(node.Acceptance))
 		for _, item := range node.Acceptance {
@@ -196,9 +217,13 @@ func (p *Plan) BuildSubtasks(parentTaskID, tenantID, projectID string) ([]*subta
 				criteria = append(criteria, item.Type)
 			}
 		}
-		subtaskID, err := newSubtaskID()
-		if err != nil {
-			return err
+		subtaskID := subtaskIDs[node.NodeID]
+		if subtaskID == "" {
+			var err error
+			subtaskID, err = newSubtaskID()
+			if err != nil {
+				return err
+			}
 		}
 		row := &subtask.Subtask{
 			SubtaskID:          subtaskID,

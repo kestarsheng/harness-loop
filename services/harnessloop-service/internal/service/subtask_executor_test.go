@@ -89,7 +89,9 @@ func TestAgentSubtaskExecutorReportsArtifactsAndConclusion(t *testing.T) {
 	if got, _ := st.OutputContract["conclusion"].(string); got == "" {
 		t.Fatal("conclusion must be written back onto the subtask")
 	}
-	if streamer.req == nil || streamer.req.EntryAgent != "default" {
+	// role=coder 的子任务直接落到 coder-agent：走 main-agent 分发会触发二次
+	// handoff，被守卫拒绝后子任务必 failed（见 entryAgentFor）。
+	if streamer.req == nil || streamer.req.EntryAgent != "coder-agent" {
 		t.Fatalf("request = %+v", streamer.req)
 	}
 	if streamer.req.TenantId != "tenant-a" || streamer.req.Goal != "write the result file" {

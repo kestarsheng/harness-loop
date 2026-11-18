@@ -260,12 +260,22 @@ func (r *Runtime) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 			RequiresToolCall: in.RequiresToolCall,
 			Timeout:          in.StageTimeout,
 		}
+		// b 阶段的模型钉死在 stageModelPin 里：模型策略开关关掉时也要走同一个模型，
+		// 否则 b 阶段跟着全局 stage_model 走，弱模型产不出 DAG 就只能降级单节点。
+		pinnedModel, pinnedWindow, pinned := stageModelPin(stage)
+		if pinned {
+			stageInput.StageModel = pinnedModel
+			stageInput.ModelWindow = pinnedWindow
+		}
 		if r.Models != nil && r.Models.Enabled() {
 			choice, modelErr := r.Models.SelectForStage(ctx, ModelStageRequest{
 				ModelStageContext: ModelStageContext{
 					TenantID: in.TenantID, ProjectID: in.ProjectID, TaskID: in.TaskID,
 					Stage: string(stage), AttemptNo: attemptNo,
 				},
+				// 显式 ModelID 记为 resolved_from=explicit；models.yaml 的
+				// stage_overrides.b 优先级更高（override），两者指向同一个模型。
+				ModelID:          pinnedModel,
 				RequireToolCall:  in.RequiresToolCall,
 				TaskBudgetTokens: task.BudgetTokens,
 			})
@@ -450,6 +460,82 @@ func (r *Runtime) isAborted(taskID string) bool {
 	return r.aborted[taskID]
 }
 
+// planArtifact returns the b-stage payload most likely to be a SubtaskPlan/v1.
+// stage_finish 的 summary 是协议规定的结构化字段，但模型对「总结」的理解很稳定：
+// 它会把 DAG 写进 content、把散文写进 summary。两处都按「扫出第一个能被 ParsePlan
+// 接受的 JSON 对象」来找；都不行时仍返回 summary，让下游报出真实的解析错误。
+func planArtifact(res *StageRunResult) []byte {
+	if res == nil {
+		return nil
+	}
+	summary := []byte(res.FinishArgs.Summary)
+	if plan, ok := firstParseablePlan(summary); ok {
+		return plan
+	}
+	if plan, ok := firstParseablePlan([]byte(res.Content)); ok {
+		return plan
+	}
+	if len(summary) > 0 {
+		return summary
+	}
+	return []byte(res.Content)
+}
+
+// firstParseablePlan walks every balanced {...} object in text and returns the
+// first one ParsePlan accepts. b 阶段的 content 常是「计划 JSON + [stage_finish]
+// {...}」两段相邻的 JSON，按首尾大括号整段截取会拼成非法 JSON。
+func firstParseablePlan(text []byte) ([]byte, bool) {
+	for i := 0; i < len(text); i++ {
+		if text[i] != '{' {
+			continue
+		}
+		end := matchClosingBrace(text, i)
+		if end <= i {
+			continue
+		}
+		obj := text[i : end+1]
+		if _, err := orchestrator.ParsePlan(obj); err == nil {
+			return obj, true
+		}
+	}
+	return nil, false
+}
+
+// matchClosingBrace returns the index of the brace closing the one at start, or
+// -1 when the object is unterminated. Strings and escapes are skipped so braces
+// inside JSON strings never move the depth.
+func matchClosingBrace(text []byte, start int) int {
+	depth := 0
+	inString := false
+	escaped := false
+	for i := start; i < len(text); i++ {
+		ch := text[i]
+		if inString {
+			switch {
+			case escaped:
+				escaped = false
+			case ch == '\\':
+				escaped = true
+			case ch == '"':
+				inString = false
+			}
+			continue
+		}
+		switch ch {
+		case '"':
+			inString = true
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
 func (r *Runtime) finalize(ctx context.Context, in RunInput, res *RunResult, reason string, stage fsm.Stage, failedStage, categoryName string, retries int, lastErr string, version int64) (*RunResult, error) {
 	status := repository.TaskCompleted
 	switch reason {
@@ -497,10 +583,9 @@ func (r *Runtime) runOrchestration(ctx context.Context, in RunInput, workspaceRo
 	switch stage {
 	case fsm.StagePlan:
 		// StageMode 下 content 是 `[stage_finish] {...}` 协议文本，结构化产物在 summary。
-		raw := []byte(res.FinishArgs.Summary)
-		if len(raw) == 0 {
-			raw = []byte(res.Content)
-		}
+		// 但模型经常把 DAG 写在 content、把散文写在 summary（或反过来），只认 summary
+		// 就会重新掉回「b accepted 但 subtasks=0」的单节点降级。
+		raw := planArtifact(res)
 		if _, err := r.Orchestrator.PlanBStage(runCtx, ec, raw); err != nil {
 			// 设计上 b 阶段规划失败不阻塞父阶段，但绝不静默：
 			// 否则表现为「b accepted 但 subtasks=0」，无法定位。
@@ -927,12 +1012,76 @@ func rollbackCategory(v acceptance.Verdict) retry.Category {
 	return retry.Runtime
 }
 
+// planStagePlanExample is the sample DAG embedded in the b-stage instruction.
+//
+// 示例必须是 3 节点、带真实依赖边与并行集：单节点示例会被模型当成合格答案照抄，
+// 而单节点计划与 singleNodePlan 降级无法区分，验收侧只能算降级、不能算拆成。
+// 示例本身必须能通过 orchestrator.Plan.Validate（单测 TestPlanStageExampleIsValidPlan 守着）。
+const planStagePlanExample = `{
+  "dag_id": "dag-1",
+  "nodes": [
+    {"node_id": "n1", "role": "coder", "input_contract": {"type": "workspace", "paths": ["."]}, "output_contract": {"type": "files", "paths": ["cmd/server/healthz.go"]}, "acceptance": [{"type": "file_exists", "expr": "cmd/server/healthz.go"}]},
+    {"node_id": "n2", "role": "coder", "input_contract": {"type": "file_set", "paths": ["cmd/server/healthz.go"]}, "output_contract": {"type": "files", "paths": ["cmd/server/healthz_test.go"]}, "acceptance": [{"type": "file_exists", "expr": "cmd/server/healthz_test.go"}]},
+    {"node_id": "n3", "role": "writer", "input_contract": {"type": "file_set", "paths": ["cmd/server/healthz.go"]}, "output_contract": {"type": "files", "paths": ["docs/healthz.md"]}, "acceptance": [{"type": "file_exists", "expr": "docs/healthz.md"}]}
+  ],
+  "edges": [{"from": "n1", "to": "n2"}, {"from": "n1", "to": "n3"}],
+  "parallel_sets": [{"set_id": "p1", "nodes": ["n2", "n3"], "failure_strategy": "tolerate", "tolerate_ratio": 0.5}]
+}`
+
 // planStageInstruction asks the b-stage agent for the SubtaskPlan/v1 artifact.
 // 没有这段指令时 agent 只回普通总结，PlanBStage 因 rawPlan 无法解析而静默跳过，
 // 结果就是「b 阶段 accepted 但 subtasks=0」。
-const planStageInstruction = `你是规划阶段（b）。请只输出一个 SubtaskPlan/v1 JSON，不要输出解释文字：
-{"dag_id":"dag-1","nodes":[{"node_id":"n1","role":"coder","input_contract":{"type":"workspace","paths":["."]},"output_contract":{"type":"files","paths":["main.go"]},"acceptance":[{"type":"file_exists","expr":"main.go"}]}],"edges":[],"parallel_sets":[{"set_id":"p1","nodes":["n1"],"failure_strategy":"tolerate","tolerate_ratio":0.5}]}
-约束：nodes 至少 1 个、最多 20 个；深度不超过 2；每个 parallel_set 必须声明 failure_strategy（fail-fast|tolerate|retry）；节点依赖用 edges 表达。`
+//
+// 指令只接受 3 节点示例 + 拆分判据：b 阶段的目标是把目标拆成可独立验收的多个子任务，
+// 一个节点就交付全部内容的计划等于没拆，只能算降级（fallback）而不算达标。
+const planStageInstruction = `你是规划阶段（b）。你的唯一产出是一个 SubtaskPlan/v1 JSON：不要解释文字、不要总结、不要用 Markdown 代码块包裹。
+
+【先判断怎么拆】按下面的判据决定拆成几个节点，能拆就必须拆到 3 个及以上：
+
+必须拆的情况：
+1. 目标包含 2 个以上彼此独立、可分别验收的交付物（不同文件/模块/端点）；
+2. 目标同时包含「实现」和「验证」两类工作（写代码 / 写测试 / 写文档），验证类工作和实现类工作必须各自成节点；
+3. 目标里有可并行推进的独立单元（不同目录、不同接口），且每个单元能单独声明自己的验收。
+
+不许拆的情况：
+1. 改动集中在单个具体文件、且只有一条确定性验收（tests_pass / build_pass）——这是原子修改；
+2. 节点带跨文件一致性约束（consistency_group）或人工审批点；
+3. 拆出来的子任务无法各自写清 input_contract / output_contract / acceptance——拆了也验不了。
+
+节点数量：1 到 20；能拆就 >= 3 个。宁少拆、不错拆；宁可 3 个节点各自验收清楚，也不要 6 个节点互相踩文件。
+
+【示例】目标「新增 /healthz 端点、补单测、写运行文档」的合格产出是 3 节点 + 2 条依赖边 + 1 个并行集：
+
+` + planStagePlanExample + `
+
+【输出顺序】先把上面的 JSON 本体原样输出（不要放进代码块、不要加注释），再调用 stage_finish；summary 只写一句话说明拆成了几个节点，不要在里面重复 JSON。
+
+【硬约束】
+- 每个节点必须有 role、input_contract（type + paths）、output_contract（type + paths）、acceptance（至少 1 条）。
+- 节点间的先后关系只能用 edges 表达（from 为前置、to 为后继），DAG 不得成环。
+- 嵌套最多一层（children 之下不能再有 children），节点总数含 children 不超过 20。
+- 每个 parallel_set 内的节点之间不得存在依赖路径，且必须声明 failure_strategy（fail-fast|tolerate|retry）；用 tolerate 时 tolerate_ratio 必须落在 (0,0.5]。
+- 多节点计划必须给出 edges 或 parallel_sets，否则整份计划按不完整驳回。
+- acceptance.type 用 file_exists | tests_pass | build_pass，expr 写实际可执行的路径或命令。`
+
+// b 阶段的模型绑定。pkg/config/harness_loop/models.yaml 里 stage_overrides.b
+// 声明同一个模型（hot reload 可改，改完无需重启）；这里的常量是模型策略门关掉
+// 时的兜底，两条路径必须指同一个模型，否则同一份提示词会在两个模型上跑出两种行为。
+const (
+	planStageModel       = "qwen3.7-max"
+	planStageModelWindow = 32768
+)
+
+// stageModelPin reports the model a stage must use regardless of the global
+// stage_model. Only the b stage is pinned today: it is the only stage whose
+// output is a machine-readable DAG, and a weak default silently degrades to the
+// single-node fallback.
+func stageModelPin(stage fsm.Stage) (model string, window int, ok bool) {
+	if stage != fsm.StagePlan {
+		return "", 0, false
+	}
+	return planStageModel, planStageModelWindow, true
+}
 
 func stageMessage(stage fsm.Stage, attemptNo int) string {
 	base := fmt.Sprintf("stage=%s attempt=%d", stage, attemptNo)
