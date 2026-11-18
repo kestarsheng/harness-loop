@@ -48,6 +48,26 @@ func (a ExecAllowlist) Allows(cmd string) bool {
 	return false
 }
 
+// HasEscapingArgs 报告命令实参里是否出现越出工作区的目标：绝对路径、上跳目录、
+// shell 元字符。这类命令不给审批留口子——批准之后也收不了场，必须硬拒。
+func HasEscapingArgs(args []string) bool {
+	for _, arg := range args {
+		if arg == "" {
+			continue
+		}
+		if filepath.IsAbs(arg) || strings.HasPrefix(arg, "/") || strings.HasPrefix(arg, `\`) || strings.HasPrefix(arg, "~") {
+			return true
+		}
+		if arg == ".." || strings.HasPrefix(arg, "../") || strings.HasPrefix(arg, `..\`) {
+			return true
+		}
+		if strings.ContainsAny(arg, ";|&><`$\n\r") {
+			return true
+		}
+	}
+	return false
+}
+
 func (a ExecAllowlist) Check(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("%w: empty command", ErrExecDenied)

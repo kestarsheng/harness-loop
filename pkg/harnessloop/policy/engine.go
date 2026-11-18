@@ -38,9 +38,15 @@ type ToolArgs struct {
 }
 
 type PolicySet struct {
-	AllowTools []string
-	DenyTools  []string
-	Rules      []Rule
+	AllowTools []string `yaml:"allow_tools" json:"allow_tools"`
+	DenyTools  []string `yaml:"deny_tools" json:"deny_tools"`
+	Rules      []Rule   `yaml:"rules" json:"rules"`
+}
+
+// Empty 报告这份策略集是不是「什么都没配」。装配层要区分「没配」与「配了空表」：
+// 前者跳过该层，后者按 deny-by-default 处理。
+func (p PolicySet) Empty() bool {
+	return len(p.AllowTools) == 0 && len(p.DenyTools) == 0 && len(p.Rules) == 0
 }
 
 type Effect string
@@ -52,12 +58,12 @@ const (
 )
 
 type Rule struct {
-	ID               string
-	Tool             string
-	Tags             []string
-	Stages           []string
-	Effect           Effect
-	RequiresApproval bool
+	ID               string   `yaml:"id" json:"id"`
+	Tool             string   `yaml:"tool" json:"tool"`
+	Tags             []string `yaml:"tags" json:"tags"`
+	Stages           []string `yaml:"stages" json:"stages"`
+	Effect           Effect   `yaml:"effect" json:"effect"`
+	RequiresApproval bool     `yaml:"requires_approval" json:"requires_approval"`
 }
 
 type Request struct {
@@ -93,6 +99,11 @@ type Decision struct {
 	RequiresApproval bool
 	CacheHit         bool
 	DurationUS       int64
+
+	// PolicySource 记录这条决策是哪一层用哪份策略集判出来的，形如
+	// "task:snapshot" / "tenant:config" / "system:engine"。审计与事件都带它，
+	// 四层命中才有办法在事后逐条对上。
+	PolicySource string
 }
 
 func (d Decision) Error() string {

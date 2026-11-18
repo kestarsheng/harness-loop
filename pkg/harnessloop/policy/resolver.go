@@ -21,6 +21,8 @@ type Resolver struct {
 	cache           *DecisionCache
 	audit           AuditSink
 	approval        *ApprovalGate
+	layers          *LayerStore
+	classifier      *HighRiskClassifier
 	policyVersion   atomic.Int64
 	approvalVersion atomic.Int64
 
@@ -33,9 +35,25 @@ func NewResolver(engine *Engine) *Resolver {
 		engine = NewEngine()
 	}
 	return &Resolver{
-		engine: engine,
-		cache:  NewDecisionCache(10000, 60*time.Second),
+		engine:     engine,
+		cache:      NewDecisionCache(10000, 60*time.Second),
+		classifier: NewHighRiskClassifier(DefaultApprovalConfig()),
 	}
+}
+
+// SetLayerStore 挂上四层策略集的装配点。没挂时退回「只有 system 层」的老行为。
+func (r *Resolver) SetLayerStore(store *LayerStore) {
+	r.layers = store
+}
+
+func (r *Resolver) LayerStore() *LayerStore {
+	return r.layers
+}
+
+// SetApprovalConfig 让 resolver 与审批闸门用同一份高危配置，否则会出现
+// 「闸门认为不危险、解析器认为危险」的两套口径。
+func (r *Resolver) SetApprovalConfig(cfg ApprovalConfig) {
+	r.classifier = NewHighRiskClassifier(cfg)
 }
 
 func (r *Resolver) Engine() *Engine {
@@ -82,6 +100,9 @@ func (r *Resolver) ApprovalVersion() int64 {
 
 func (r *Resolver) Decide(ctx context.Context, req Request) Decision {
 	start := time.Now()
+	// 三层策略集必须在算缓存键之前装好：键里含 tenant/role/task 三份策略集，
+	// 装晚了就会用「没装配」的键去查「装配后」的结果。
+	sets := r.fillLayers(&req)
 	tags := r.tagsFor(req.Tool)
 
 	if r.cacheable(req, tags) && r.cache != nil {
@@ -92,48 +113,95 @@ func (r *Resolver) Decide(ctx context.Context, req Request) Decision {
 			r.writeAudit(ctx, req, tags, cached)
 			return cached
 		}
-		d := r.resolve(ctx, req, tags)
+		d := r.resolve(ctx, req, tags, sets)
 		r.cache.Put(key, d)
 		d.DurationUS = time.Since(start).Microseconds()
 		r.writeAudit(ctx, req, tags, d)
 		return d
 	}
 
-	d := r.resolve(ctx, req, tags)
+	d := r.resolve(ctx, req, tags, sets)
 	d.DurationUS = time.Since(start).Microseconds()
 	r.writeAudit(ctx, req, tags, d)
 	return d
 }
 
-func (r *Resolver) resolve(ctx context.Context, req Request, tags []string) Decision {
-	sys := r.engine.SystemDecide(ctx, req)
-	if !sys.Allowed {
-		sys.Effect = EffectDeny
-		return sys
+// fillLayers 把 tenant/role/task 三层装进 req：调用方显式传入的优先（记 inline），
+// 缺的从 LayerStore 装配（tenant/role 来自配置，task 可能来自任务快照）。
+//
+// 返回的 LayerSets 只用于给决策打 policy_source，不参与判定本身。
+func (r *Resolver) fillLayers(req *Request) LayerSets {
+	assembled := LayerSets{TenantSource: LayerSourceNone, RoleSource: LayerSourceNone, TaskSource: LayerSourceNone}
+	if r.layers != nil {
+		assembled = r.layers.Resolve(req.TenantID, req.RoleName, req.AgentID, req.TaskID)
 	}
 
-	var pending *Decision
-	var earliest *Decision
-	for _, layer := range []struct {
+	out := LayerSets{TenantSource: LayerSourceNone, RoleSource: LayerSourceNone, TaskSource: LayerSourceNone}
+	if req.Tenant != nil {
+		out.Tenant, out.TenantSource = req.Tenant, LayerSourceInline
+	} else {
+		out.Tenant, out.TenantSource = assembled.Tenant, assembled.TenantSource
+	}
+	if req.Role != nil {
+		out.Role, out.RoleSource = req.Role, LayerSourceInline
+	} else {
+		out.Role, out.RoleSource = assembled.Role, assembled.RoleSource
+	}
+	if req.Task != nil {
+		out.Task, out.TaskSource = req.Task, LayerSourceInline
+	} else {
+		out.Task, out.TaskSource = assembled.Task, assembled.TaskSource
+	}
+	req.Tenant, req.Role, req.Task = out.Tenant, out.Role, out.Task
+	return out
+}
+
+func (r *Resolver) resolve(ctx context.Context, req Request, tags []string, sets LayerSets) Decision {
+	sys := r.engine.SystemDecide(ctx, req)
+
+	layers := []struct {
 		name Layer
 		set  *PolicySet
 	}{
 		{LayerTenant, req.Tenant},
 		{LayerRole, req.Role},
 		{LayerTask, req.Task},
-	} {
+	}
+
+	// 第一遍：任一层显式 deny 立即生效，而且必须排在 system 拒绝之前返回——
+	// 否则审计里四层永远记成 system，「到底是谁说不的」就查不出来了。
+	for _, layer := range layers {
+		if layer.set == nil {
+			continue
+		}
+		for _, d := range layerDecisions(layer.set, layer.name, req.Tool, tags, req.Stage) {
+			if d.Effect == EffectDeny {
+				d.PolicySource = sourceOf(sets, layer.name)
+				return d
+			}
+		}
+	}
+
+	// system 层此时只剩两类结局：放行，或者「命令不在 exec 白名单」但属于高危类
+	// （改判审批）。其余 system 拒绝是硬线，任何层的 approval 都不能越过它。
+	sysApproval, sysNeedsApproval := r.classifier.ApprovalRequiredByPolicy(sys, req, tags)
+	if !sys.Allowed && !sysNeedsApproval {
+		sys.Effect = EffectDeny
+		sys.PolicySource = systemSource()
+		return sys
+	}
+
+	var pending *Decision
+	var earliest *Decision
+	for _, layer := range layers {
 		if layer.set == nil {
 			continue
 		}
 		decisions := layerDecisions(layer.set, layer.name, req.Tool, tags, req.Stage)
 		for i := range decisions {
-			if decisions[i].Effect == EffectDeny {
-				return decisions[i]
-			}
-		}
-		for i := range decisions {
 			if decisions[i].RequiresApproval && pending == nil {
 				cp := decisions[i]
+				cp.PolicySource = sourceOf(sets, layer.name)
 				pending = &cp
 			}
 		}
@@ -141,6 +209,7 @@ func (r *Resolver) resolve(ctx context.Context, req Request, tags []string) Deci
 			for i := range decisions {
 				if decisions[i].Effect == EffectAllow && !decisions[i].RequiresApproval {
 					cp := decisions[i]
+					cp.PolicySource = sourceOf(sets, layer.name)
 					earliest = &cp
 					break
 				}
@@ -162,11 +231,17 @@ func (r *Resolver) resolve(ctx context.Context, req Request, tags []string) Deci
 		return out
 	}
 
+	// 没有更具体的层规则时，才把 exec 白名单的结论翻成审批：规则归因到 system。
+	if sysNeedsApproval {
+		sysApproval.PolicySource = systemSource()
+		return sysApproval
+	}
+
 	if req.Role != nil && layerDeclaresAllow(req.Role) && !layerAllows(req.Role, req.Tool, tags, req.Stage) {
-		return deny(req, LayerRole, "policy.role.no_match", "role does not declare an allow rule for this tool")
+		return withSource(deny(req, LayerRole, "policy.role.no_match", "role does not declare an allow rule for this tool"), sets)
 	}
 	if req.Task != nil && layerDeclaresAllow(req.Task) && !layerAllows(req.Task, req.Tool, tags, req.Stage) {
-		return deny(req, LayerTask, "policy.task.no_match", "task does not declare an allow rule for this tool")
+		return withSource(deny(req, LayerTask, "policy.task.no_match", "task does not declare an allow rule for this tool"), sets)
 	}
 
 	out := Decision{Allowed: true, Effect: EffectAllow, Tool: req.Tool, Stage: req.Stage}
@@ -174,12 +249,32 @@ func (r *Resolver) resolve(ctx context.Context, req Request, tags []string) Deci
 		out.Layer = earliest.Layer
 		out.RuleID = earliest.RuleID
 		out.Reason = earliest.Reason
+		out.PolicySource = earliest.PolicySource
 	} else {
 		out.Layer = sys.Layer
 		out.RuleID = sys.RuleID
 		out.Reason = sys.Reason
+		out.PolicySource = systemSource()
 	}
 	return out
+}
+
+// sourceOf 把「哪一层 + 该层策略集从哪来」拼成审计里的 policy_source。
+func sourceOf(sets LayerSets, l Layer) string {
+	src := sets.Source(l)
+	if src == "" || src == LayerSourceNone {
+		src = LayerSourceInline
+	}
+	return string(l) + ":" + string(src)
+}
+
+func systemSource() string { return "system:engine" }
+
+func withSource(d Decision, sets LayerSets) Decision {
+	if d.Layer != "" {
+		d.PolicySource = sourceOf(sets, d.Layer)
+	}
+	return d
 }
 
 func (r *Resolver) ValidateTenantPolicy(tenantID string, platform, tenant PolicySet) error {

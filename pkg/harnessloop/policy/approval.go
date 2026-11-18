@@ -176,26 +176,8 @@ func (g *ApprovalGate) RequestCount() int {
 	return g.requests
 }
 
-func (g *ApprovalGate) Classify(tool string, tags []string, args ToolArgs) (HighRiskKind, string) {
-	cfg := g.cfg
-	if !cfg.Enabled {
-		return HighRiskNone, ""
-	}
-	lowerTool := strings.ToLower(tool)
-	if cfg.HighRisk.Deploy && isDeployInvocation(lowerTool, args.Command) {
-		return HighRiskDeploy, "policy.approval.high_risk.deploy"
-	}
-	if cfg.HighRisk.NetworkWrite && contains(tags, TagNetwork) && isWriteMethod(args.NetworkMethod) {
-		return HighRiskNetworkWrite, "policy.approval.high_risk.network_write"
-	}
-	if cfg.HighRisk.Delete && contains(tags, TagWrite) && isDeleteInvocation(lowerTool, args.Paths, args.Command) {
-		return HighRiskDelete, "policy.approval.high_risk.delete"
-	}
-	if cfg.HighRisk.Cost && cfg.CostThreshold > 0 && args.EstimatedCost > cfg.CostThreshold {
-		return HighRiskCost, "policy.approval.high_risk.cost"
-	}
-	return HighRiskNone, ""
-}
+// Classify 见 classify.go：抽出去是为了让 resolver 能在 system 层拒绝之前
+// 也问一次「这算不算高危」，判定顺序改了但判定逻辑只有一份。
 
 func (g *ApprovalGate) Begin(ctx context.Context, req Request, tags []string) (*ApprovalTicket, error) {
 	kind, ruleID := g.Classify(req.Tool, tags, req.Args)
