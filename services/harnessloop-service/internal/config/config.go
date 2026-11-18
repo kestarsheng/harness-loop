@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -140,6 +141,30 @@ func normalizeAddress(addr string, local bool) string {
 
 func (c Config) ListenAddress() string { return c.Server.Address }
 
+// SetLocalOnly rewrites the bind address to loopback while keeping the port.
+//
+// 旧实现把 `-local` 写死成 127.0.0.1:50008：端口矩阵里 50008 不是 harnessloop
+// 的端口，本地单机起栈时它要么抢到别人的端口，要么自己 bind 失败后以 exit 1
+// 退场——两者都会表现为"服务秒退"。改成"只改主机、保留端口"后，`-local` 与
+// HARNESSLOOP_ADDRESS / 配置文件里的端口不再互相打架。
+func (c *Config) SetLocalOnly() {
+	c.Server.Address = loopbackAddress(c.Server.Address)
+	c.Server.Local = true
+}
+
+// loopbackAddress keeps the port and forces the host to 127.0.0.1.
+func loopbackAddress(addr string) string {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		addr = ":50008"
+	}
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return addr
+	}
+	return net.JoinHostPort("127.0.0.1", port)
+}
+
 func (c Config) Validate() error {
 	if c.Postgres.DSN == "" {
 		return fmt.Errorf("harnessloop config: postgres.dsn is required")
@@ -173,4 +198,51 @@ func (c Config) StageTimeout() int {
 		return 600
 	}
 	return c.Agent.TimeoutSeconds
+}
+
+// LLMEnvConfig is the optional compaction-summarizer configuration carried in
+// the environment (T-P2-36). It is not part of the yaml file on purpose: the key
+// must never be committed, and the swarm stacks inject it per-run.
+type LLMEnvConfig struct {
+	BaseURL string
+	APIKey  string
+	Model   string
+}
+
+// Configured reports whether a summarizer endpoint was requested at all.
+func (c LLMEnvConfig) Configured() bool { return strings.TrimSpace(c.BaseURL) != "" }
+
+// LoadLLMEnv reads HARNESSLOOP_LLM_{BASE_URL,API_KEY,MODEL}.
+//
+// 全空 = 功能关闭（compaction 走 L1 降级），合法；但只要给了 base_url，缺另外
+// 两个就是配置错误，并且必须把缺的变量名写出来。旧代码不校验：它用一个缺 key
+// 的 client 继续启动，故障被推到第一次摘要调用，操作者看到的是"进程秒退 +
+// stderr 一行"，正是 T-P2-36 的静默 exit(1)。
+func LoadLLMEnv(getenv func(string) string) (LLMEnvConfig, error) {
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	cfg := LLMEnvConfig{
+		BaseURL: strings.TrimSpace(getenv("HARNESSLOOP_LLM_BASE_URL")),
+		APIKey:  strings.TrimSpace(getenv("HARNESSLOOP_LLM_API_KEY")),
+		Model:   strings.TrimSpace(getenv("HARNESSLOOP_LLM_MODEL")),
+	}
+	if cfg.BaseURL == "" {
+		if cfg.APIKey != "" || cfg.Model != "" {
+			return cfg, fmt.Errorf("harnessloop llm: HARNESSLOOP_LLM_API_KEY or HARNESSLOOP_LLM_MODEL is set but HARNESSLOOP_LLM_BASE_URL is empty")
+		}
+		return cfg, nil
+	}
+	missing := make([]string, 0, 2)
+	if cfg.APIKey == "" {
+		missing = append(missing, "HARNESSLOOP_LLM_API_KEY")
+	}
+	if cfg.Model == "" {
+		missing = append(missing, "HARNESSLOOP_LLM_MODEL")
+	}
+	if len(missing) > 0 {
+		return cfg, fmt.Errorf("harnessloop llm: HARNESSLOOP_LLM_BASE_URL is set but %s is empty",
+			strings.Join(missing, " and "))
+	}
+	return cfg, nil
 }

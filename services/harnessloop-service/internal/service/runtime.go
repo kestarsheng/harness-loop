@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -193,7 +194,60 @@ func (r *Runtime) injectTaskPolicy(task *repository.TaskRun) {
 	sink.SetTaskPolicySet(task.TaskID, set)
 }
 
-func (r *Runtime) Run(ctx context.Context, in RunInput) (*RunResult, error) {
+// Run is the panic boundary of the task lifecycle.
+//
+// 任务由 handler 的 goroutine 驱动（`go h.runtime.Run(...)`），而那个 goroutine
+// 没有 recover、gRPC server 也没有拦截器：任何一次 panic 都会把进程带走，留下的
+// 只有 stderr 的栈和一条卡在 running 的任务行。orchestrator=on 恰好把请求路径
+// 从「一次 stage 调用」扩成「规划 → 调度 → 子任务执行 → 汇聚」，panic 的接触面
+// 因此成倍变大——这就是「开编排就数秒退出」的真实形态。
+//
+// 所以 panic 在这里收敛成一次普通的任务失败：进程继续服务，任务落到 failed，
+// 事件与日志里都有可查的栈。
+func (r *Runtime) Run(ctx context.Context, in RunInput) (res *RunResult, err error) {
+	defer func() {
+		rec := recover()
+		if rec == nil {
+			return
+		}
+		pe := NewPanicError("runtime.Run", rec)
+		log.Printf("harnessloop: recovered panic task=%s tenant=%s (process kept alive)\n%s",
+			in.TaskID, in.TenantID, pe.Detail())
+		r.markPanickedTask(in, pe)
+		res, err = nil, pe
+	}()
+	return r.run(ctx, in)
+}
+
+// markPanickedTask records a recovered panic as an ordinary task failure,
+// instead of leaving the row stuck in `running` where the board silently counts
+// it as still in flight. It is best effort on purpose: the panic may have
+// interrupted a CAS in flight, so a conflict is a log line, never a re-panic.
+func (r *Runtime) markPanickedTask(in RunInput, pe *PanicError) {
+	if r.Tasks == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	task, err := r.Tasks.Get(ctx, in.TenantID, in.TaskID)
+	if err != nil {
+		log.Printf("harnessloop: panic in task %s could not be persisted (reload: %v)", in.TaskID, err)
+		return
+	}
+	if task.Status != repository.TaskRunning {
+		return
+	}
+	if _, err := r.Tasks.UpdateStatus(ctx, in.TenantID, in.TaskID, repository.TaskFailed, ReasonFailed, task.Version); err != nil {
+		log.Printf("harnessloop: panic in task %s recorded, but status write-back failed: %v", in.TaskID, err)
+		return
+	}
+	if r.Metrics != nil {
+		r.Metrics.TaskTerminal(string(repository.TaskFailed))
+	}
+	r.publishTerminal(ctx, in.TenantID, in.ProjectID, in.TaskID, ReasonFailed, nil)
+}
+
+func (r *Runtime) run(ctx context.Context, in RunInput) (*RunResult, error) {
 	if r.Tasks == nil || r.Attempts == nil || r.Stages == nil {
 		return nil, fmt.Errorf("%w: tasks/attempts/stages are required", ErrRuntimeInput)
 	}
