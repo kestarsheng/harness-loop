@@ -2,7 +2,6 @@ package devstack
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -94,9 +93,26 @@ func (p *SystemProber) probeHTTP(ctx context.Context, item Item) (bool, string) 
 }
 
 // probeExec runs the declared command. pg_isready is not always installed
-// outside docker, so a missing executable falls back to a TCP probe on the
+// outside docker, so an unavailable binary falls back to a TCP probe on the
 // item's port (the same degradation scripts/dev-lib.sh uses).
+//
+// Availability is decided with exec.LookPath, not by matching error text:
+// Windows localizes "not recognized", and cmd /c returns ExitError rather than
+// exec.ErrNotFound. Execution failures of a present binary never fall back, so
+// an unready database is still reported unhealthy.
 func (p *SystemProber) probeExec(ctx context.Context, item Item) (bool, string) {
+	binary := commandBinary(item.Health.Command)
+	if binary == "" {
+		return false, "health command is empty"
+	}
+	if _, err := exec.LookPath(binary); err != nil {
+		addr := itemAddress(item)
+		if addr != "" && dialTCP(ctx, addr, p.dialTimeout()) == nil {
+			return true, fmt.Sprintf("%s reachable (health command unavailable, port fallback)", addr)
+		}
+		return false, fmt.Sprintf("health command %q unavailable and %s unreachable", item.Health.Command, addr)
+	}
+
 	cctx, cancel := context.WithTimeout(ctx, p.execTimeout())
 	defer cancel()
 	cmd := shellCommandCtx(cctx, item.Health.Command)
@@ -104,21 +120,20 @@ func (p *SystemProber) probeExec(ctx context.Context, item Item) (bool, string) 
 	if err == nil {
 		return true, strings.TrimSpace(item.Health.Command) + ": ok"
 	}
-	if isExecNotFound(err) || strings.Contains(strings.ToLower(string(out)), "is not recognized") {
-		addr := item.Health.Address
-		if addr == "" {
-			addr = itemAddress(item)
-		}
-		if addr != "" && dialTCP(ctx, addr, p.dialTimeout()) == nil {
-			return true, addr + " reachable (health command unavailable)"
-		}
-		return false, fmt.Sprintf("health command %q unavailable and %s unreachable", item.Health.Command, addr)
-	}
 	detail := strings.TrimSpace(string(out))
 	if detail == "" {
 		detail = err.Error()
 	}
 	return false, detail
+}
+
+// commandBinary returns the executable named by the first command token.
+func commandBinary(command string) string {
+	fields := strings.Fields(strings.TrimSpace(command))
+	if len(fields) == 0 {
+		return ""
+	}
+	return strings.Trim(fields[0], `"'`)
 }
 
 func (p *SystemProber) dialTimeout() time.Duration {
@@ -140,17 +155,6 @@ func (p *SystemProber) execTimeout() time.Duration {
 		return p.ExecTimeout
 	}
 	return 5 * time.Second
-}
-
-func isExecNotFound(err error) bool {
-	if errors.Is(err, exec.ErrNotFound) {
-		return true
-	}
-	var execErr *exec.Error
-	if errors.As(err, &execErr) {
-		return errors.Is(execErr.Err, exec.ErrNotFound)
-	}
-	return strings.Contains(err.Error(), "executable file not found")
 }
 
 func itemAddress(item Item) string {
