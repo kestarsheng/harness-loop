@@ -7,7 +7,7 @@
 | 状态 | 待评审 |
 | 上游文档 | `spec.md` v1.1（170 条 REQ + 38 条 DFX）、`design.md` v1.2（12 章，5 项锁定决策） |
 | 代码基线 | `agent-platform` @ `4a05ccb`，Go 1.22 |
-| 任务规模 | 104 个任务（P0 27 / P1 36 / P2 41） |
+| 任务规模 | 105 个任务（P0 27 / P1 36 / P2 42） |
 | 已锁定决策 | A 方案记忆事实源、PG 仅承载索引与事件（D2）、RAG 复用 Go knowledge-service（D3）、runtime 复用 `pkg/llm` + cobra/Bubble Tea（D4）、新增 :50008（D6/D14）、自研模板摘要唯一通道（D13）、多 Agent 8/20/20/2（U13-A）、审批一期留 agent-service（U17-A）、阶段模型默认继承（U18-A）、子任务验收复用父验收器（U19-A） |
 
 > 阅读约定：每个任务给出「目标 → 关联需求 → 设计章节 → 依赖 → 文件 → 实施要点 → 验收标准 → 复杂度」。`[N]` 表示新增文件，`[M]` 表示改造存量文件。验收标准优先给出可直接执行的命令或断言。本文件不含实现代码。
@@ -1373,7 +1373,19 @@
 | 验收标准 | 注入三变量后服务正常启动并完成一次真实任务；缺少变量时给出明确错误而非静默 exit(1)；配置测试全绿。 |
 | 复杂度 | S（0.5 天） |
 
-> P2 合计：实施 36 个 + 测试 5 个 = **41 个任务**。
+### T-P2-37 审批结论传递到执行面与工单幂等
+
+| 字段 | 内容 |
+|---|---|
+| 目标 | harness 批准后，agent/mcp 执行面真正执行该命令；同一调用在有效期内复用同一工单，消除「反复重发 → 每次新工单」的风暴。 |
+| 关联需求 | REQ-160~166；design 4.15.3 |
+| 依赖 | T-P2-31 |
+| 涉及文件 | [M] `services/agent-service/internal/**`、[M] `services/mcp-service/internal/**`、[M] `pkg/harnessloop/policy/**`（凭据签发/校验）、必要时 [M] `proto/mcp/**` |
+| 实施要点 | 1) harness 批准后签发一次性 `approval_token`（task_id + tool + args_digest + expiry + 签名）；2) agent/mcp 执行前校验 token，无 token 仍走各自白名单（fail closed），token 无效/过期拒绝；3) 同一 `(task_id, tool, args_digest)` 在有效期内复用同一工单，不重复建单；4) 审计记录 token 校验结果与工单复用情况；5) 保留执行面独立白名单作为兜底，不做「审批即跳过所有执行面校验」。 |
+| 验收标准 | 真实任务批准后 `rm scratch/probe.txt` 真的执行（文件消失）；同一调用不产生第二个工单；未批准/过期 token 被拒且留痕；`go test ./services/agent-service/... ./services/mcp-service/... ./pkg/harnessloop/policy/...` 全绿。 |
+| 复杂度 | M（1~2 天） |
+
+> P2 合计：实施 37 个 + 测试 5 个 = **42 个任务**。
 
 ---
 
