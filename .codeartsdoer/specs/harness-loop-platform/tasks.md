@@ -7,7 +7,7 @@
 | 状态 | 待评审 |
 | 上游文档 | `spec.md` v1.1（170 条 REQ + 38 条 DFX）、`design.md` v1.2（12 章，5 项锁定决策） |
 | 代码基线 | `agent-platform` @ `4a05ccb`，Go 1.22 |
-| 任务规模 | 105 个任务（P0 27 / P1 36 / P2 42） |
+| 任务规模 | 106 个任务（P0 27 / P1 36 / P2 43） |
 | 已锁定决策 | A 方案记忆事实源、PG 仅承载索引与事件（D2）、RAG 复用 Go knowledge-service（D3）、runtime 复用 `pkg/llm` + cobra/Bubble Tea（D4）、新增 :50008（D6/D14）、自研模板摘要唯一通道（D13）、多 Agent 8/20/20/2（U13-A）、审批一期留 agent-service（U17-A）、阶段模型默认继承（U18-A）、子任务验收复用父验收器（U19-A） |
 
 > 阅读约定：每个任务给出「目标 → 关联需求 → 设计章节 → 依赖 → 文件 → 实施要点 → 验收标准 → 复杂度」。`[N]` 表示新增文件，`[M]` 表示改造存量文件。验收标准优先给出可直接执行的命令或断言。本文件不含实现代码。
@@ -1197,12 +1197,12 @@
 
 | 字段 | 内容 |
 |---|---|
-| 目标 | `/harness loop start` 启动或复用看板并打印本地 URL；`/harness loop stop` 停止后原 URL 不可访问；关闭任一终端不影响其他终端与看板。 |
-| 关联需求 | REQ-171、REQ-178；design 4.11.7 行为契约 |
-| 依赖 | T-P2-21；URL 共享方案待定（先实现单实例固定 URL，`PortStrategy` 接口预留递增分支） |
+| 目标 | `/harness loop start` 以单例方式启动或复用看板并打印同一 URL；每个终端登记一个引用，`/harness loop stop` 只释放自己的引用；关闭终端不释放；任一引用存在时看板不停，全部释放后才停止且 URL 不可访问。 |
+| 关联需求 | REQ-171、REQ-178（方案 A 已定，2026-11-18）；design 4.11.7 行为契约 |
+| 依赖 | T-P2-21；方案 A 已定：单例 + 引用计数 + 显式 stop，端口不递增 |
 | 涉及文件 | [N] `internal/devstack/board.go`、[M] `internal/cli/cmd/loop.go`、[M] `scripts/dev-stack.json`（board 项） |
-| 实施要点 | 1) 看板作为后台常驻项，首个 start 拉起、后续复用；2) 打印的 URL 不带域名与 project 参数；3) stop 只停看板，不影响 agent 会话；4) 行为契约四条逐条可测；5) 待定项以接口隔离，定稿后只换实现。 |
-| 验收标准 | 无 agent 时打开 URL 为空态；第二终端 start 打印同一 URL 且不重复起；关任一终端 URL 仍 200；`stop` 后 URL 连接失败/404。 |
+| 实施要点 | 1) 单例锁 + 固定端口，第二个 start 只登记引用不重复起；2) `refs[]` 按 session 登记/释放，重复 start/stop 幂等；3) 关闭终端不自动释放（接受僵尸引用）；4) 引用非空时 stop 只打印剩余数量，引用为空才停进程并删除锁；5) 不实现端口递增。 |
+| 验收标准 | 两个终端 start → 同一 URL、只有一个实例；关闭任一终端 URL 仍 200；其中一个 stop → URL 仍 200；全部 stop → URL 不可访问；重复 start/stop 不重复计数。 |
 | 复杂度 | S（0.5~1 天） |
 
 ### T-P2-23 多节点 plan（3 节点）
@@ -1385,7 +1385,19 @@
 | 验收标准 | 真实任务批准后 `rm scratch/probe.txt` 真的执行（文件消失）；同一调用不产生第二个工单；未批准/过期 token 被拒且留痕；`go test ./services/agent-service/... ./services/mcp-service/... ./pkg/harnessloop/policy/...` 全绿。 |
 | 复杂度 | M（1~2 天） |
 
-> P2 合计：实施 37 个 + 测试 5 个 = **42 个任务**。
+### T-P2-38 sandbox 点路径语义（`read_file(".")` 必败）
+
+| 字段 | 内容 |
+|---|---|
+| 目标 | `Resolve(root, ".")` 解析为 workspace 根，不得再报 `E_UNSAFE_PATH: empty path`；子任务 `read_file(".")` / `list_dir(".")` 可用。 |
+| 关联需求 | REQ-139、REQ-160；design 4.15 |
+| 依赖 | 无 |
+| 涉及文件 | [M] `pkg/harnessloop/policy/sandbox/realpath.go`、[M] `pkg/harnessloop/policy/sandbox/sandbox_test.go` |
+| 实施要点 | 1) 区分 `.` 与空串：`.` 解析为 root，空串仍拒绝；2) `..`、绝对路径、UNC、URL 仍拒绝；3) 补 `Resolve(root, ".") == root` 与子任务 `read_file(".")` 用例；4) 不改其他调用方语义。 |
+| 验收标准 | `go test ./pkg/harnessloop/policy/sandbox/...` 全绿；子任务 c 阶段 `read_file(".")` 成功；`..` 仍被拒。 |
+| 复杂度 | S（0.5 天） |
+
+> P2 合计：实施 38 个 + 测试 5 个 = **43 个任务**。
 
 ---
 
