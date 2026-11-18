@@ -1,4 +1,4 @@
-version: 3
+version: 4
 models:
   - id: qwen3.7-max
     provider: dashscope
@@ -47,3 +47,11 @@ models:
     embedding_dim: 1024
     tags: [embedding]
     api_key_ref: env:DASHSCOPE_API_KEY
+
+# b 阶段（规划）必须产出 machine-readable 的 SubtaskPlan/v1 DAG；用弱默认模型时
+# 模型退回散文总结，Planner 解析失败后退化为单节点 fallback，只算降级不算拆成。
+# 这里把 b 钉在 qwen3.7-max，与 runtime.go 的 stageModelPin 常量保持一致。
+stage_overrides:
+  b:
+    model: qwen3.7-max
+    strategy: quality_first
