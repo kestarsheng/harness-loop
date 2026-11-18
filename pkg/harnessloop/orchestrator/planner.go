@@ -10,6 +10,13 @@ import (
 	"agent-platform/pkg/harnessloop/subtask"
 )
 
+// Plan sources reported on subtask.plan_created. A fallback plan is legal but
+// must never look like a model-produced DAG: the dashboard filters on source.
+const (
+	PlanSourceModel    = "model"
+	PlanSourceFallback = "fallback"
+)
+
 // PlanRequest is the b-stage planning input. Exactly one of Plan or RawPlan is
 // expected; RawPlan lets the caller feed the agent's finish payload untouched.
 type PlanRequest struct {
@@ -20,6 +27,13 @@ type PlanRequest struct {
 	DagID        string
 	Plan         *Plan
 	RawPlan      []byte
+	// PlanSource records who produced the plan: "model" when the b-stage agent
+	// emitted a machine-readable DAG, "fallback" when the bridge substituted
+	// singleNodePlan. An empty value is treated as "model" for existing callers.
+	PlanSource string
+	// DegradedReason explains a fallback so the event never says "degraded"
+	// without saying why.
+	DegradedReason string
 }
 
 // PlanResult contains the validated DAG and the subtask rows it expands to.
@@ -83,18 +97,27 @@ func (p *Planner) Plan(ctx context.Context, req PlanRequest) (*PlanResult, error
 		return nil, err
 	}
 
+	source := strings.TrimSpace(req.PlanSource)
+	if source == "" {
+		source = PlanSourceModel
+	}
+	payload := map[string]any{
+		"dag_id":             plan.DagID,
+		"node_count":         len(plan.Nodes),
+		"subtask_count":      len(subtasks),
+		"parallel_set_count": len(plan.ParallelSets),
+		"edge_count":         len(plan.Edges),
+		"levels":             levels,
+		"source":             source,
+	}
+	if reason := strings.TrimSpace(req.DegradedReason); reason != "" {
+		payload["degraded_reason"] = reason
+	}
 	if err := emit(ctx, p.emitter, Event{
 		Type:         EventSubtaskPlanCreated,
 		ParentTaskID: req.ParentTaskID,
 		DagID:        plan.DagID,
-		Payload: map[string]any{
-			"dag_id":             plan.DagID,
-			"node_count":         len(plan.Nodes),
-			"subtask_count":      len(subtasks),
-			"parallel_set_count": len(plan.ParallelSets),
-			"edge_count":         len(plan.Edges),
-			"levels":             levels,
-		},
+		Payload:      payload,
 	}); err != nil {
 		return nil, err
 	}

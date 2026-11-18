@@ -28,6 +28,17 @@ type scheduledItem struct {
 	viaFair      bool
 }
 
+// StatusSink persists subtask status transitions. The scheduler owns the state
+// machine, so it must be the component that tells persistence about a change;
+// letting the caller write back a "final" status hides the intermediate
+// pending→running step and makes DB and events disagree.
+//
+// from is the status the row is expected to hold right now. Implementations
+// must reject a write whose current row state does not match it (no rewinds).
+type StatusSink interface {
+	StatusChanged(ctx context.Context, st *subtask.Subtask, from subtask.Status) error
+}
+
 // Scheduler drives one parent task. It owns quota, dependency gating, queue
 // events, timeout enforcement and the class circuit breaker. Execution of the
 // subtask itself stays in the runtime.
@@ -39,6 +50,7 @@ type Scheduler struct {
 	quota     *ParentQuota
 	circuit   *CircuitBreaker
 	fair      *TenantFairness
+	status    StatusSink
 	weight    float64
 	order     []string
 	items     map[string]*scheduledItem
@@ -70,6 +82,29 @@ func NewSchedulerWithGate(cfg QuotaConfig, gate *TenantGate, emitter Emitter) *S
 		items:   make(map[string]*scheduledItem),
 		now:     time.Now,
 	}
+}
+
+// WithStatusSink attaches persistence for status transitions. A nil sink keeps
+// the scheduler purely in-memory (tests, feature-flag off).
+func (s *Scheduler) WithStatusSink(sink StatusSink) *Scheduler {
+	if s == nil {
+		return s
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.status = sink
+	return s
+}
+
+// persistLocked writes one transition before the matching event is emitted. A
+// failure leaves DB and events in the same state (nothing written, nothing
+// emitted) and the caller restores the in-memory status, so the next dispatch
+// can retry instead of running a subtask the database still calls pending.
+func (s *Scheduler) persistLocked(ctx context.Context, item *scheduledItem, from subtask.Status) error {
+	if s.status == nil || item == nil {
+		return nil
+	}
+	return s.status.StatusChanged(ctx, item.subtask, from)
 }
 
 func (s *Scheduler) SetClock(now func() time.Time) {
@@ -366,6 +401,7 @@ func (s *Scheduler) tryStartLocked(ctx context.Context, item *scheduledItem) (*s
 		}
 		return nil, false, err
 	}
+	prev := item.subtask.Status
 	item.subtask.Status = next
 	item.running = true
 	item.viaFair = viaFair
@@ -373,6 +409,14 @@ func (s *Scheduler) tryStartLocked(ctx context.Context, item *scheduledItem) (*s
 	item.deadline = item.startedAt.Add(s.effectiveTimeout())
 	item.tokens = tokens
 	item.lastQueuePos = 0
+	if err := s.persistLocked(ctx, item, prev); err != nil {
+		// Nothing was written: put the row back to pending so a later dispatch
+		// can start it again instead of running a subtask that is still pending
+		// in the database.
+		item.subtask.Status = prev
+		s.release(item)
+		return nil, false, err
+	}
 	if err := emit(ctx, s.emitter, Event{
 		Type:          EventSubtaskStarted,
 		ParentTaskID:  item.subtask.ParentTaskID,
@@ -495,12 +539,19 @@ func (s *Scheduler) MarkAccepted(ctx context.Context, subtaskID, acceptanceID st
 	if err != nil {
 		return err
 	}
-	next, err := subtask.Transition(item.subtask.Status, subtask.StatusAccepted, acceptanceID, "")
+	prev := item.subtask.Status
+	next, err := subtask.Transition(prev, subtask.StatusAccepted, acceptanceID, "")
 	if err != nil {
 		return err
 	}
+	prevAcceptanceID := item.subtask.AcceptanceID
 	item.subtask.Status = next
 	item.subtask.AcceptanceID = acceptanceID
+	if err := s.persistLocked(ctx, item, prev); err != nil {
+		item.subtask.Status = prev
+		item.subtask.AcceptanceID = prevAcceptanceID
+		return err
+	}
 	s.release(item)
 	if _, err := s.circuit.Record(ctx, item.classKey, false); err != nil {
 		return err
@@ -518,26 +569,38 @@ func (s *Scheduler) MarkAccepted(ctx context.Context, subtaskID, acceptanceID st
 
 // MarkFailed records a subtask failure and samples the circuit breaker.
 func (s *Scheduler) MarkFailed(ctx context.Context, subtaskID, category string) error {
-	return s.finish(ctx, subtaskID, subtask.StatusFailed, category, EventSubtaskFailed)
+	return s.MarkFailedWithDetail(ctx, subtaskID, category, nil)
+}
+
+// MarkFailedWithDetail records a subtask failure together with the executor's
+// diagnostics. The detail is merged into the subtask.failed payload so the
+// failure is triageable without reading container logs.
+func (s *Scheduler) MarkFailedWithDetail(ctx context.Context, subtaskID, category string, detail *SubtaskFailureDetail) error {
+	return s.finish(ctx, subtaskID, subtask.StatusFailed, category, EventSubtaskFailed, detail)
 }
 
 // MarkRejected records an exhausted self-verification.
 func (s *Scheduler) MarkRejected(ctx context.Context, subtaskID, reason string) error {
-	return s.finish(ctx, subtaskID, subtask.StatusRejected, reason, EventSubtaskRejected)
+	return s.finish(ctx, subtaskID, subtask.StatusRejected, reason, EventSubtaskRejected, nil)
 }
 
-func (s *Scheduler) finish(ctx context.Context, subtaskID string, to subtask.Status, reason, eventType string) error {
+func (s *Scheduler) finish(ctx context.Context, subtaskID string, to subtask.Status, reason, eventType string, detail *SubtaskFailureDetail) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	item, err := s.runningItem(subtaskID)
 	if err != nil {
 		return err
 	}
-	next, err := subtask.Transition(item.subtask.Status, to, "", "")
+	prev := item.subtask.Status
+	next, err := subtask.Transition(prev, to, "", "")
 	if err != nil {
 		return err
 	}
 	item.subtask.Status = next
+	if err := s.persistLocked(ctx, item, prev); err != nil {
+		item.subtask.Status = prev
+		return err
+	}
 	s.release(item)
 	if _, err := s.circuit.Record(ctx, item.classKey, true); err != nil {
 		return err
@@ -546,6 +609,9 @@ func (s *Scheduler) finish(ctx context.Context, subtaskID string, to subtask.Sta
 	if reason != "" {
 		payload["reason"] = reason
 		payload["category"] = reason
+	}
+	for k, v := range detail.Payload() {
+		payload[k] = v
 	}
 	return emit(ctx, s.emitter, Event{
 		Type:          eventType,
@@ -571,14 +637,19 @@ func (s *Scheduler) MarkCancelled(ctx context.Context, subtaskID, reason string)
 	if item.subtask.Status.Terminal() {
 		return nil
 	}
-	next, err := subtask.Transition(item.subtask.Status, subtask.StatusCancelled, "", "")
+	prev := item.subtask.Status
+	next, err := subtask.Transition(prev, subtask.StatusCancelled, "", "")
 	if err != nil {
+		return err
+	}
+	item.subtask.Status = next
+	if err := s.persistLocked(ctx, item, prev); err != nil {
+		item.subtask.Status = prev
 		return err
 	}
 	if item.running {
 		s.release(item)
 	}
-	item.subtask.Status = next
 	return emit(ctx, s.emitter, Event{
 		Type:          EventSubtaskCancelled,
 		Severity:      SeverityWarn,
@@ -605,11 +676,16 @@ func (s *Scheduler) CheckTimeouts(ctx context.Context, now time.Time) ([]Timeout
 		if now.Before(item.deadline) {
 			continue
 		}
-		next, err := subtask.Transition(item.subtask.Status, subtask.StatusFailed, "", "")
+		prev := item.subtask.Status
+		next, err := subtask.Transition(prev, subtask.StatusFailed, "", "")
 		if err != nil {
 			return out, err
 		}
 		item.subtask.Status = next
+		if err := s.persistLocked(ctx, item, prev); err != nil {
+			item.subtask.Status = prev
+			return out, err
+		}
 		s.release(item)
 		if _, err := s.circuit.Record(ctx, item.classKey, true); err != nil {
 			return out, err
@@ -627,7 +703,11 @@ func (s *Scheduler) CheckTimeouts(ctx context.Context, now time.Time) ([]Timeout
 			DagID:         item.subtask.DagID,
 			DagNodeID:     item.subtask.DagNodeID,
 			ParallelSetID: item.subtask.ParallelSetID,
-			Payload:       map[string]any{"category": "timeout"},
+			Payload: map[string]any{
+				"category":     "timeout",
+				"error":        "subtask deadline exceeded",
+				"agent_status": "timeout",
+			},
 		}); err != nil {
 			return out, err
 		}

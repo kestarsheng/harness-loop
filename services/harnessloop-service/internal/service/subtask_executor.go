@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -100,7 +101,9 @@ func (e *AgentSubtaskExecutor) Execute(ctx context.Context, ec OrchestratorStage
 	result := &SubtaskResult{AcceptanceID: fmt.Sprintf("acc-%s", st.SubtaskID)}
 	var content strings.Builder
 	var streamErr string
+	agentStatus := "success"
 	maxTokens := int64(0)
+	startedExec := time.Now()
 
 	err := e.agents.ExecuteStream(runCtx, req, func(chunk *agentpb.ExecuteStreamChunk) error {
 		if chunk == nil {
@@ -111,9 +114,23 @@ func (e *AgentSubtaskExecutor) Execute(ctx context.Context, ec OrchestratorStage
 			if chunk.Content != "" {
 				content.WriteString(chunk.Content)
 			}
+		case "final":
+			// The engine's terminal event carries the whole reply. This case was
+			// missing, so an agent that only emits `final` looked like an empty
+			// (but successful) run.
+			if chunk.Content != "" && content.Len() == 0 {
+				content.WriteString(chunk.Content)
+			}
 		case "error":
+			agentStatus = "error"
 			if chunk.Content != "" {
 				streamErr = chunk.Content
+			} else {
+				// agent-service maps StreamEvent.Content (empty on errors) and
+				// drops StreamEvent.Error, so the reason is lost at the
+				// transport. Still fail: silently accepting an errored agent run
+				// is exactly the bug this subtask closes.
+				streamErr = "agent reported an error without detail"
 			}
 		}
 		if chunk.Step != nil && int64(chunk.Step.TokensUsed) > maxTokens {
@@ -121,23 +138,46 @@ func (e *AgentSubtaskExecutor) Execute(ctx context.Context, ec OrchestratorStage
 		}
 		return nil
 	})
+	durationMS := time.Since(startedExec).Milliseconds()
+	responseLen := content.Len()
+	result.ModelID = firstNonEmpty(e.cfg.Model, "service-default")
+	result.DurationMS = durationMS
+	// Usage belongs to the run even when it ends in an error: a failed subtask
+	// still burned prompt+partial-reply tokens, and the parent budget must see it.
+	st.ConsumedTokens = usageTokens(maxTokens, req.Message, content.String())
+	result.ConsumedTokens = st.ConsumedTokens
 	if err != nil {
 		subtaskStatus = "failed"
-		return nil, fmt.Errorf("subtask %s: execute stream: %w", st.SubtaskID, err)
+		status := agentStatus
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(runCtx.Err(), context.DeadlineExceeded) {
+			status = "timeout"
+		}
+		return nil, &SubtaskExecError{
+			Reason:      fmt.Sprintf("subtask %s: execute stream: %v", st.SubtaskID, err),
+			ResponseLen: responseLen, ModelID: result.ModelID,
+			DurationMS: durationMS, AgentStatus: status, Err: err,
+		}
 	}
 	if streamErr != "" {
 		subtaskStatus = "failed"
-		return nil, fmt.Errorf("subtask %s: agent stream error: %s", st.SubtaskID, streamErr)
+		return nil, &SubtaskExecError{
+			Reason:      fmt.Sprintf("subtask %s: agent stream error: %s", st.SubtaskID, streamErr),
+			ResponseLen: responseLen, ModelID: result.ModelID,
+			DurationMS: durationMS, AgentStatus: "error",
+		}
 	}
 
 	artifacts, artErr := collectSubtaskArtifacts(ec.WorkspaceRoot, st)
 	if artErr != nil {
 		subtaskStatus = "failed"
-		return nil, fmt.Errorf("subtask %s: %w", st.SubtaskID, artErr)
+		return nil, &SubtaskExecError{
+			Reason:      fmt.Sprintf("subtask %s: %v", st.SubtaskID, artErr),
+			ResponseLen: responseLen, ModelID: result.ModelID,
+			DurationMS: durationMS, AgentStatus: "success",
+		}
 	}
 	result.Artifacts = artifacts
 	result.Conclusion = truncateConclusion(content.String())
-	st.ConsumedTokens = maxTokens
 	if result.Conclusion != "" {
 		if st.OutputContract == nil {
 			st.OutputContract = make(map[string]any)
@@ -145,6 +185,30 @@ func (e *AgentSubtaskExecutor) Execute(ctx context.Context, ec OrchestratorStage
 		st.OutputContract["conclusion"] = result.Conclusion
 	}
 	return result, nil
+}
+
+// usageTokens reports the agent's own usage when the stream carries it and
+// otherwise estimates from prompt+reply at 4 characters per token — the same
+// heuristic pkg/agent applies when an LLM response has no usage block.
+//
+// Why the fallback: agent-service's ExecuteStream never fills Step.TokensUsed
+// (it only fills Step for tool events) and drops StreamEvent.Tokens, so every
+// subtask recorded tokens=0 even though the agent really consumed tokens. The
+// estimate keeps budget accounting non-zero until the agent-service/proto
+// mapping reports real usage.
+func usageTokens(observed int64, prompt, reply string) int64 {
+	if observed > 0 {
+		return observed
+	}
+	chars := len(prompt) + len(reply)
+	if chars == 0 {
+		return 0
+	}
+	tokens := int64(chars / 4)
+	if tokens == 0 {
+		tokens = 1
+	}
+	return tokens
 }
 
 func subtaskSessionID(taskID, subtaskID string) string {
@@ -258,6 +322,12 @@ func collectSubtaskArtifacts(root string, st *subtask.Subtask) ([]subtask.Artifa
 				return nil, err
 			}
 			if ref == nil {
+				// A directory path (the fallback plan declares "." = "the whole
+				// workspace") is a directory contract, not a missing file: the
+				// directory exists but has no single hash to pin.
+				if isDirArtifact(root, rel) {
+					continue
+				}
 				if hasGlob {
 					continue
 				}
@@ -267,6 +337,18 @@ func collectSubtaskArtifacts(root string, st *subtask.Subtask) ([]subtask.Artifa
 		}
 	}
 	return refs, nil
+}
+
+// isDirArtifact reports whether rel resolves to an existing directory inside
+// the workspace. Directory contracts are satisfied by existence; they carry no
+// file hash, so the aggregator gets no ref for them.
+func isDirArtifact(root, rel string) bool {
+	full := rel
+	if root != "" {
+		full = filepath.Join(root, filepath.FromSlash(rel))
+	}
+	info, err := os.Stat(full)
+	return err == nil && info.IsDir()
 }
 
 func statArtifact(root, rel string) (*subtask.ArtifactRef, error) {
