@@ -460,6 +460,82 @@ func (r *Runtime) isAborted(taskID string) bool {
 	return r.aborted[taskID]
 }
 
+// planArtifact returns the b-stage payload most likely to be a SubtaskPlan/v1.
+// stage_finish 的 summary 是协议规定的结构化字段，但模型对「总结」的理解很稳定：
+// 它会把 DAG 写进 content、把散文写进 summary。两处都按「扫出第一个能被 ParsePlan
+// 接受的 JSON 对象」来找；都不行时仍返回 summary，让下游报出真实的解析错误。
+func planArtifact(res *StageRunResult) []byte {
+	if res == nil {
+		return nil
+	}
+	summary := []byte(res.FinishArgs.Summary)
+	if plan, ok := firstParseablePlan(summary); ok {
+		return plan
+	}
+	if plan, ok := firstParseablePlan([]byte(res.Content)); ok {
+		return plan
+	}
+	if len(summary) > 0 {
+		return summary
+	}
+	return []byte(res.Content)
+}
+
+// firstParseablePlan walks every balanced {...} object in text and returns the
+// first one ParsePlan accepts. b 阶段的 content 常是「计划 JSON + [stage_finish]
+// {...}」两段相邻的 JSON，按首尾大括号整段截取会拼成非法 JSON。
+func firstParseablePlan(text []byte) ([]byte, bool) {
+	for i := 0; i < len(text); i++ {
+		if text[i] != '{' {
+			continue
+		}
+		end := matchClosingBrace(text, i)
+		if end <= i {
+			continue
+		}
+		obj := text[i : end+1]
+		if _, err := orchestrator.ParsePlan(obj); err == nil {
+			return obj, true
+		}
+	}
+	return nil, false
+}
+
+// matchClosingBrace returns the index of the brace closing the one at start, or
+// -1 when the object is unterminated. Strings and escapes are skipped so braces
+// inside JSON strings never move the depth.
+func matchClosingBrace(text []byte, start int) int {
+	depth := 0
+	inString := false
+	escaped := false
+	for i := start; i < len(text); i++ {
+		ch := text[i]
+		if inString {
+			switch {
+			case escaped:
+				escaped = false
+			case ch == '\\':
+				escaped = true
+			case ch == '"':
+				inString = false
+			}
+			continue
+		}
+		switch ch {
+		case '"':
+			inString = true
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
 func (r *Runtime) finalize(ctx context.Context, in RunInput, res *RunResult, reason string, stage fsm.Stage, failedStage, categoryName string, retries int, lastErr string, version int64) (*RunResult, error) {
 	status := repository.TaskCompleted
 	switch reason {
@@ -507,10 +583,9 @@ func (r *Runtime) runOrchestration(ctx context.Context, in RunInput, workspaceRo
 	switch stage {
 	case fsm.StagePlan:
 		// StageMode 下 content 是 `[stage_finish] {...}` 协议文本，结构化产物在 summary。
-		raw := []byte(res.FinishArgs.Summary)
-		if len(raw) == 0 {
-			raw = []byte(res.Content)
-		}
+		// 但模型经常把 DAG 写在 content、把散文写在 summary（或反过来），只认 summary
+		// 就会重新掉回「b accepted 但 subtasks=0」的单节点降级。
+		raw := planArtifact(res)
 		if _, err := r.Orchestrator.PlanBStage(runCtx, ec, raw); err != nil {
 			// 设计上 b 阶段规划失败不阻塞父阶段，但绝不静默：
 			// 否则表现为「b accepted 但 subtasks=0」，无法定位。
@@ -978,6 +1053,8 @@ const planStageInstruction = `你是规划阶段（b）。你的唯一产出是�
 【示例】目标「新增 /healthz 端点、补单测、写运行文档」的合格产出是 3 节点 + 2 条依赖边 + 1 个并行集：
 
 ` + planStagePlanExample + `
+
+【输出顺序】先把上面的 JSON 本体原样输出（不要放进代码块、不要加注释），再调用 stage_finish；summary 只写一句话说明拆成了几个节点，不要在里面重复 JSON。
 
 【硬约束】
 - 每个节点必须有 role、input_contract（type + paths）、output_contract（type + paths）、acceptance（至少 1 条）。

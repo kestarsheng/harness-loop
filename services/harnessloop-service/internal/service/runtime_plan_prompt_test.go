@@ -109,3 +109,43 @@ func TestModelsYAMLPlansWithPinnedModel(t *testing.T) {
 		t.Fatalf("%s must support tool_call and structured_output for the b stage", planStageModel)
 	}
 }
+
+// b 阶段真实返回形如「DAG JSON + [stage_finish] {...}」，两段 JSON 相邻。
+// 按首尾大括号整段截取会拼出非法 JSON，只能逐对象扫描。
+func TestPlanArtifactPrefersParseablePlanOverProse(t *testing.T) {
+	finish := `{"attempt_id":"1","stage":"b","summary":"拆成 3 个节点"}`
+
+	mixed := &StageRunResult{
+		Content:    planStagePlanExample + "\n[stage_finish] " + finish,
+		FinishArgs: fsm.StageFinishArgs{Summary: "拆成 3 个节点"},
+	}
+	raw := planArtifact(mixed)
+	plan, err := orchestrator.ParsePlan(raw)
+	if err != nil {
+		t.Fatalf("planArtifact must recover the DAG from mixed content: %v (raw=%q)", err, string(raw))
+	}
+	if len(plan.Nodes) != 3 {
+		t.Fatalf("recovered plan must keep 3 nodes, got %d", len(plan.Nodes))
+	}
+
+	summaryPlan := &StageRunResult{FinishArgs: fsm.StageFinishArgs{Summary: planStagePlanExample}}
+	if _, err := orchestrator.ParsePlan(planArtifact(summaryPlan)); err != nil {
+		t.Fatalf("summary carrying the plan must be used as-is: %v", err)
+	}
+
+	proseOnly := &StageRunResult{
+		Content:    "我完成了规划。",
+		FinishArgs: fsm.StageFinishArgs{Summary: "我完成了规划。"},
+	}
+	if got := string(planArtifact(proseOnly)); got == "" {
+		t.Fatalf("prose-only output must still be returned so the caller can report the parse error")
+	}
+}
+
+func TestMatchClosingBraceIgnoresBracesInStrings(t *testing.T) {
+	text := []byte(`{"a":"}{","b":{"c":1}}tail`)
+	end := matchClosingBrace(text, 0)
+	if end != len(`{"a":"}{","b":{"c":1}}`)-1 {
+		t.Fatalf("brace matching must skip quoted braces, got end=%d text=%q", end, string(text))
+	}
+}
