@@ -7,7 +7,7 @@
 | 状态 | 待评审 |
 | 上游文档 | `spec.md` v1.1（170 条 REQ + 38 条 DFX）、`design.md` v1.2（12 章，5 项锁定决策） |
 | 代码基线 | `agent-platform` @ `4a05ccb`，Go 1.22 |
-| 任务规模 | 95 个任务（P0 27 / P1 36 / P2 32） |
+| 任务规模 | 97 个任务（P0 27 / P1 36 / P2 34） |
 | 已锁定决策 | A 方案记忆事实源、PG 仅承载索引与事件（D2）、RAG 复用 Go knowledge-service（D3）、runtime 复用 `pkg/llm` + cobra/Bubble Tea（D4）、新增 :50008（D6/D14）、自研模板摘要唯一通道（D13）、多 Agent 8/20/20/2（U13-A）、审批一期留 agent-service（U17-A）、阶段模型默认继承（U18-A）、子任务验收复用父验收器（U19-A） |
 
 > 阅读约定：每个任务给出「目标 → 关联需求 → 设计章节 → 依赖 → 文件 → 实施要点 → 验收标准 → 复杂度」。`[N]` 表示新增文件，`[M]` 表示改造存量文件。验收标准优先给出可直接执行的命令或断言。本文件不含实现代码。
@@ -1265,7 +1265,31 @@
 | 验收标准 | 真实流式任务下 `consumed_tokens` 等于网关返回的 usage，`token_source=actual`；估算分支未被触发；`go test ./pkg/llm/... ./services/agent-service/... ./services/harnessloop-service/...` 全绿；一次真实任务 a~e completed。 |
 | 复杂度 | M（1 天） |
 
-> P2 合计：实施 27 个 + 测试 5 个 = **32 个任务**。
+### T-P2-28 子任务产物落盘与契约校验
+
+| 字段 | 内容 |
+|---|---|
+| 目标 | `file_write` 必须落到 workspace 的约定路径，`output_contract` 校验前能真实读到产物；修掉 `output artifact "cmd/server/healthz.go" is missing`。 |
+| 关联需求 | REQ-139、REQ-141；design 4.13.6 / 4.15 |
+| 依赖 | T-P2-18 |
+| 涉及文件 | [M] `services/mcp-service/**`、[M] `pkg/harnessloop/policy/sandbox/**`、[M] `services/agent-service/internal/**`（工具执行落点）、[M] `bench/p2/**` |
+| 实施要点 | 1) 确认 MCP `file_write` 的目标根与任务 workspace 一致（沙箱 root 不是暂存目录）；2) 相对路径按 workspace 解析，禁止写到进程 cwd；3) `output_contract` 校验用同一套路径解析，校验前先落盘再断言；4) 路径逃逸仍必须拒绝（复用 `policy/sandbox`）；5) 补真实任务与负向用例（写 root 外被拒）。 |
+| 验收标准 | 真实任务 `file_write cmd/server/healthz.go` 后 workspace 存在该文件；`output artifact ... is missing` 不再出现；越权写 root 外被拒且留痕；`go test ./services/mcp-service/... ./pkg/harnessloop/policy/...` 全绿。 |
+| 复杂度 | M（1 天） |
+
+### T-P2-29 父任务终态必须等子任务收口
+
+| 字段 | 内容 |
+|---|---|
+| 目标 | 子任务未全部到达终态或未 accepted 时，父任务不得 `completed`；带失败完成必须显式标注。 |
+| 关联需求 | REQ-128、REQ-139；design 4.1.4 / 4.13.9 |
+| 依赖 | T-P2-18、T-P2-23 |
+| 涉及文件 | [M] `services/harnessloop-service/internal/service/{orchestrator_bridge,runtime}.go`、[M] `pkg/harnessloop/orchestrator/aggregate.go` |
+| 实施要点 | 1) d 阶段聚合时若存在 `running/pending` 子任务，不得返回 complete；2) `accepted` 数为 0 时父任务不得 `completed`；3) `tolerate` 策略下确有失败但已完成时，`terminal_reason=completed_with_failed_subtasks` 并在报告列 `failed_subtasks[]`；4) 不得用「父任务 completed」掩盖子任务未收口。 |
+| 验收标准 | 复现 `accepted 0/3` 场景 → 父任务**不得** `completed`；`accepted 3/3` → `completed`；带失败完成时终态可辨；DB 与事件一致；`go test ./services/harnessloop-service/... ./pkg/harnessloop/orchestrator/...` 全绿。 |
+| 复杂度 | S（0.5 天） |
+
+> P2 合计：实施 29 个 + 测试 5 个 = **34 个任务**。
 
 ---
 
