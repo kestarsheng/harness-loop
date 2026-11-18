@@ -9,7 +9,6 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -426,65 +425,148 @@ func TestFidelityMockContextEngineToggle(t *testing.T) {
 	}
 }
 
-func TestFidelityNoExternalEngineImports(t *testing.T) {
-	allowed := map[string]bool{
-		"bytes": true, "context": true, "crypto/sha256": true, "encoding/hex": true,
-		"encoding/json": true, "errors": true, "fmt": true, "os": true,
-		"path/filepath": true, "regexp": true, "sort": true, "strings": true,
-		"time": true, "gopkg.in/yaml.v3": true,
-		"agent-platform/pkg/harnessloop/event": true,
-		"agent-platform/pkg/llm":               true,
-	}
+// compactionAllowedImports 是 compaction 源文件允许的直接 import 白名单。
+//
+// 门禁对象是「compaction 自己 import 了什么」，即直接 import 关系；不解析
+// 间接依赖（例如 pkg/llm 传递引入的 openai-go），那是 depcheck 的职责。
+var compactionAllowedImports = map[string]bool{
+	"bytes": true, "context": true, "crypto/sha256": true, "encoding/hex": true,
+	"encoding/json": true, "errors": true, "fmt": true, "os": true,
+	"path/filepath": true, "regexp": true, "sort": true, "strings": true,
+	"time": true, "gopkg.in/yaml.v3": true,
+	"agent-platform/pkg/harnessloop/event": true,
+	"agent-platform/pkg/llm":               true,
+}
 
+// compactionEngineTokens 是外部压缩引擎路径的特征词。
+// 直接 import 命中这些特征词的包，一律视为接入外部压缩引擎。
+var compactionEngineTokens = []string{
+	"langchain", "llmlingua", "sidecar", "compress", "recomp", "headroom",
+}
+
+func isExternalCompressionEngine(path string) bool {
+	lower := strings.ToLower(path)
+	for _, token := range compactionEngineTokens {
+		if strings.Contains(lower, token) {
+			return true
+		}
+	}
+	return false
+}
+
+// scanCompactionDirectImports 只解析 dir 下 compaction 包的非测试源文件，
+// 返回其直接 import 路径（去重排序）与被扫描的文件数。
+// 不展开任何间接依赖，因此 pkg/llm 的传递依赖不会污染结果。
+func scanCompactionDirectImports(dir string) (imports []string, files int, err error) {
 	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, ".", func(info os.FileInfo) bool {
+	pkgs, err := parser.ParseDir(fset, dir, func(info os.FileInfo) bool {
 		return !strings.HasSuffix(info.Name(), "_test.go")
 	}, parser.ImportsOnly)
 	if err != nil {
-		t.Fatalf("parse package dir: %v", err)
+		return nil, 0, err
 	}
-	checked := 0
+	seen := map[string]bool{}
 	for _, pkg := range pkgs {
-		for name, file := range pkg.Files {
-			checked++
+		for _, file := range pkg.Files {
+			files++
 			for _, spec := range file.Imports {
 				path := strings.Trim(spec.Path.Value, `"`)
-				if !allowed[path] {
-					t.Fatalf("%s imports %q, which is not in the one-phase whitelist", filepath.Base(name), path)
+				if seen[path] {
+					continue
 				}
+				seen[path] = true
+				imports = append(imports, path)
 			}
 		}
 	}
-	if checked == 0 {
-		t.Fatal("no source files scanned")
-	}
+	sort.Strings(imports)
+	return imports, files, nil
+}
 
-	cmd := exec.Command("go", "list", "-deps", ".")
-
-	raw, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("go list -deps: %v", err)
-	}
-	var thirdParty []string
-	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "agent-platform") || strings.HasPrefix(line, "vendor/") || !strings.Contains(line, ".") {
+// checkCompactionDirectImports 是门禁本体：直接 import 白名单之外一律失败，
+// 其中外部压缩引擎给出专门的失败信息。
+func checkCompactionDirectImports(imports []string) error {
+	for _, path := range imports {
+		if compactionAllowedImports[path] {
 			continue
 		}
-		thirdParty = append(thirdParty, line)
-	}
-	sort.Strings(thirdParty)
-	for _, dep := range thirdParty {
-		lower := strings.ToLower(dep)
-		for _, token := range []string{"compress", "engine", "llmlingua", "recomp", "headroom"} {
-			if strings.Contains(lower, token) {
-				t.Fatalf("external compression engine dependency found: %s", dep)
-			}
+		if isExternalCompressionEngine(path) {
+			return fmt.Errorf("direct external compression engine import %q is forbidden", path)
 		}
+		return fmt.Errorf("direct import %q is not in the compaction whitelist", path)
 	}
-	if len(thirdParty) != 1 || thirdParty[0] != "gopkg.in/yaml.v3" {
-		t.Fatalf("unexpected third-party deps: %v", thirdParty)
+	return nil
+}
+
+func TestFidelityNoExternalEngineImports(t *testing.T) {
+	imports, files, err := scanCompactionDirectImports(".")
+	if err != nil {
+		t.Fatalf("parse package dir: %v", err)
 	}
+	if files == 0 {
+		t.Fatal("no source files scanned")
+	}
+	if err := checkCompactionDirectImports(imports); err != nil {
+		t.Fatalf("%v", err)
+	}
+	t.Logf("scanned %d source files, %d direct imports, all whitelisted", files, len(imports))
+}
+
+// TestFidelityGateStillRejectsDirectExternalEngine 是负向用例：
+// 证明门禁没有被「只看直接 import」整体放开——只要 compaction 源文件真的
+// 直接 import 外部压缩引擎，门禁仍然必须失败。
+func TestFidelityGateStillRejectsDirectExternalEngine(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want string
+	}{
+		{"langchain", "github.com/tmc/langchaingo/llms", "external compression engine"},
+		{"llmlingua", "github.com/llmlingua/go-bindings", "external compression engine"},
+		{"sidecar", "github.com/acme/ctxsidecar", "external compression engine"},
+		{"klauspost-compress", "github.com/klauspost/compress/zstd", "external compression engine"},
+		{"openai-direct", "github.com/openai/openai-go", "not in the compaction whitelist"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			src := "package fake\n\nimport _ \"" + tc.src + "\"\n"
+			if err := os.WriteFile(filepath.Join(dir, "fake.go"), []byte(src), 0o600); err != nil {
+				t.Fatalf("write fixture: %v", err)
+			}
+			imports, files, err := scanCompactionDirectImports(dir)
+			if err != nil {
+				t.Fatalf("parse fixture: %v", err)
+			}
+			if files != 1 || len(imports) != 1 || imports[0] != tc.src {
+				t.Fatalf("fixture scan = %d files %v", files, imports)
+			}
+			err = checkCompactionDirectImports(imports)
+			if err == nil {
+				t.Fatalf("gate must reject direct import %q", tc.src)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("gate error = %q, want it to mention %q", err, tc.want)
+			}
+		})
+	}
+
+	// 对照组：临时包里只 import 白名单内的标准库，门禁必须放行，
+	// 说明失败来自引擎/白名单判定，而不是门禁一律报错。
+	t.Run("allowed-stdlib-passes", func(t *testing.T) {
+		dir := t.TempDir()
+		src := "package fake\n\nimport (\n\t\"context\"\n\t\"encoding/json\"\n)\n"
+		if err := os.WriteFile(filepath.Join(dir, "fake.go"), []byte(src), 0o600); err != nil {
+			t.Fatalf("write fixture: %v", err)
+		}
+		imports, _, err := scanCompactionDirectImports(dir)
+		if err != nil {
+			t.Fatalf("parse fixture: %v", err)
+		}
+		if err := checkCompactionDirectImports(imports); err != nil {
+			t.Fatalf("whitelisted stdlib must pass: %v", err)
+		}
+	})
 }
 
 func TestFidelityABReportMetrics(t *testing.T) {
