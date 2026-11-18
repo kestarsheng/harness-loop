@@ -34,6 +34,10 @@ type AuditRecord struct {
 	ArgsSummary    map[string]any
 	PathNormalized string
 	DurationUS     int64
+
+	// PolicySource 与 Decision.PolicySource 同源：audit 行和事件行都要能回答
+	// 「这条决策命中的是哪一层、那份策略集从哪来」。
+	PolicySource string
 }
 
 type AuditSink interface {
@@ -138,6 +142,7 @@ func (d Decision) AuditRecord(req Request, tags []string, duration time.Duration
 		ArgsSummary:    argsSummary(req.Args),
 		PathNormalized: normalizedPath(req.Args.Paths),
 		DurationUS:     duration.Microseconds(),
+		PolicySource:   d.PolicySource,
 	}
 }
 

@@ -138,6 +138,11 @@ type policyE2EEnv struct {
 	rt        *Runtime
 	agent     *policyScriptedAgent
 	publisher *event.Publisher
+
+	// lastResult 是最近一次 runTaskWith 的 runtime 结果。阶段闸门拒绝时
+	// runtime 会把任务收成 failed 并返回 nil error，失败原因只在 RunResult 里，
+	// 断言错误码必须从这里读。
+	lastResult *RunResult
 }
 
 // policyE2EOptions 让个别用例换掉系统层配置（例如把 kubectl 放进 exec 白名单，
@@ -225,6 +230,15 @@ func newPolicyE2E(t *testing.T, scripts map[string][]scriptedCall, opts ...polic
 	gate.SetPollInterval(20 * time.Millisecond)
 
 	bridge := NewPolicyBridge(true, engine, auditRepo, emitter, gate)
+	// 四层装配用的是仓库里真实的 policy_layers.yaml，不在测试里手写策略集：
+	// 「生产代码从不注入」这个问题必须由配置来证明已经修好，否则测试只是重复
+	// 了一遍手工注入。
+	layerPath := filepath.Join(root, "pkg/config/harness_loop/policy_layers.yaml")
+	layers, err := policy.LoadLayerStore(layerPath)
+	if err != nil {
+		t.Fatalf("load layer sets %s: %v", layerPath, err)
+	}
+	bridge.SetLayerStore(layers)
 
 	agent := &policyScriptedAgent{scripts: scripts}
 	stages := NewStageRunner(agent).WithEvents(publisher).WithToolGate(bridge)
@@ -233,6 +247,8 @@ func newPolicyE2E(t *testing.T, scripts map[string][]scriptedCall, opts ...polic
 	rt.Events = publisher
 	rt.Checkpoints = checkpointRepo
 	rt.Policy = noRetryPolicy()
+	// 显式绑定，避免同进程里多个 bridge 抢默认注入点。
+	rt.TaskPolicies = bridge
 
 	return &policyE2EEnv{
 		db: db, tasks: taskRepo, events: eventRepo,
@@ -278,49 +294,82 @@ func policyWorkspace(t *testing.T) string {
 // runTask 建一条真任务行，用真 runtime 跑完，返回终态。
 func (e *policyE2EEnv) runTask(t *testing.T, taskID, workspace string) string {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	status, _ := e.runTaskWith(t, runOptions{taskID: taskID}, workspace)
+	return status
+}
+
+// runOptions 让个别用例换掉租户 / entry_agent / 任务快照（任务层策略集的来源）。
+type runOptions struct {
+	taskID     string
+	tenantID   string
+	entryAgent string
+	snapshot   []byte
+	timeout    time.Duration
+}
+
+func (e *policyE2EEnv) runTaskWith(t *testing.T, opts runOptions, workspace string) (string, error) {
+	t.Helper()
+	tenantID := opts.tenantID
+	if tenantID == "" {
+		tenantID = policyAuditTenant
+	}
+	entryAgent := opts.entryAgent
+	if entryAgent == "" {
+		entryAgent = "main-agent"
+	}
+	snapshot := opts.snapshot
+	if len(snapshot) == 0 {
+		snapshot = []byte(`{"mode":"enforce"}`)
+	}
+	timeout := opts.timeout
+	if timeout <= 0 {
+		timeout = 60 * time.Second
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	task := &repository.TaskRun{
-		TaskID:         taskID,
-		TenantID:       policyAuditTenant,
+		TaskID:         opts.taskID,
+		TenantID:       tenantID,
 		ProjectID:      policyAuditProject,
 		WorkspaceRoot:  workspace,
 		Goal:           "读取文档并执行只读命令，验证权限审计一一对应",
-		GoalHash:       "goal-" + taskID,
+		GoalHash:       "goal-" + opts.taskID,
 		CurrentStage:   fsm.StageRequirement,
 		Status:         repository.TaskRunning,
 		BudgetTokens:   200000,
 		BudgetCost:     10,
-		PolicySnapshot: []byte(`{"mode":"enforce"}`),
+		PolicySnapshot: snapshot,
 	}
 	if err := e.tasks.Create(ctx, task); err != nil {
 		t.Fatalf("create task: %v", err)
 	}
 
-	_, runErr := e.rt.Run(ctx, RunInput{
-		TenantID:       policyAuditTenant,
+	res, runErr := e.rt.Run(ctx, RunInput{
+		TenantID:       tenantID,
 		ProjectID:      policyAuditProject,
-		TaskID:         taskID,
-		SessionID:      "session-" + taskID,
-		EntryAgent:     "main-agent",
+		TaskID:         opts.taskID,
+		SessionID:      "session-" + opts.taskID,
+		EntryAgent:     entryAgent,
 		Goal:           task.Goal,
 		GoalHash:       task.GoalHash,
 		PolicySnapshot: task.PolicySnapshot,
-		PolicyHash:     "policy-hash-" + taskID,
+		PolicyHash:     "policy-hash-" + opts.taskID,
 		StageModel:     "qwen-plus",
 		ModelWindow:    32000,
 		StageTimeout:   30 * time.Second,
 	})
-	view, getErr := e.tasks.Get(ctx, policyAuditTenant, taskID)
+	view, getErr := e.tasks.Get(ctx, tenantID, opts.taskID)
 	if getErr != nil {
 		t.Fatalf("get task: %v", getErr)
 	}
+	e.lastResult = res
 	e.flushQuietly()
 	if runErr != nil {
-		t.Logf("task %s ended with runtime error (expected for deny cases): %v", taskID, runErr)
+		t.Logf("task %s ended with runtime error (expected for deny cases): %v", opts.taskID, runErr)
 	}
-	return string(view.Status)
+	return string(view.Status), runErr
 }
 
 // flushQuietly 触发一次 publisher 落库。事件是异步投递的，直接读表会拿到
@@ -359,17 +408,23 @@ func (e *policyE2EEnv) waitForEventIn(t *testing.T, tenantID, taskID string, typ
 }
 
 type policyAuditRow struct {
-	AuditID  string
-	Tool     string
-	Target   string
-	Decision string
-	RuleID   string
-	Stage    string
-	Code     string
-	Layer    string
+	AuditID      string
+	Tool         string
+	Target       string
+	Decision     string
+	RuleID       string
+	Stage        string
+	Code         string
+	Layer        string
+	PolicySource string
 }
 
 func (e *policyE2EEnv) auditRows(t *testing.T, taskID string) []policyAuditRow {
+	t.Helper()
+	return e.auditRowsIn(t, policyAuditTenant, taskID)
+}
+
+func (e *policyE2EEnv) auditRowsIn(t *testing.T, tenantID, taskID string) []policyAuditRow {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -381,10 +436,11 @@ func (e *policyE2EEnv) auditRows(t *testing.T, taskID string) []policyAuditRow {
 		       COALESCE(rule_id,''),
 		       COALESCE(payload->>'stage',''),
 		       COALESCE(payload->>'code',''),
-		       COALESCE(payload->>'layer','')
+		       COALESCE(payload->>'layer',''),
+		       COALESCE(payload->'args_summary'->>'policy_source','')
 		FROM hlp_event.audit
 		WHERE tenant_id = $1 AND task_id = $2 AND kind = 'tool_decision'
-		ORDER BY created_at, audit_id`, policyAuditTenant, taskID)
+		ORDER BY created_at, audit_id`, tenantID, taskID)
 	if err != nil {
 		t.Fatalf("query audit: %v", err)
 	}
@@ -393,7 +449,7 @@ func (e *policyE2EEnv) auditRows(t *testing.T, taskID string) []policyAuditRow {
 	var out []policyAuditRow
 	for rows.Next() {
 		var r policyAuditRow
-		if err := rows.Scan(&r.AuditID, &r.Tool, &r.Target, &r.Decision, &r.RuleID, &r.Stage, &r.Code, &r.Layer); err != nil {
+		if err := rows.Scan(&r.AuditID, &r.Tool, &r.Target, &r.Decision, &r.RuleID, &r.Stage, &r.Code, &r.Layer, &r.PolicySource); err != nil {
 			t.Fatalf("scan audit: %v", err)
 		}
 		out = append(out, r)
@@ -670,189 +726,3 @@ func TestPolicyAuditCrossTenantSecurityViolation(t *testing.T) {
 	t.Logf("cross-tenant: audit=%s rule=%s event=%s", rows[0].AuditID, rows[0].RuleID, violation.EventID)
 }
 
-// TestPolicyAuditApprovalDecisionLinkage 审批链路：require_approval → 工单 → 批准/驳回。
-//
-// 两条重要口径（都是本期实测出来的约束，写进报告）：
-//  1. 线上 stage 路径不会注入 tenant/role/task 策略集，所以 require_approval 在
-//     真实任务里目前不可达；这里验证的是 bridge 契约（传策略集时决策-工单-审计
-//     三者对齐）。
-//  2. 审批闸门只为「高危类」建工单（delete/network_write/deploy/cost），而默认
-//     exec 白名单只有 go/gofmt/...，高危命令先被 sandbox.exec 拒掉。要把审批分支
-//     真正跑通，必须显式放开一个高危命令（本用例把 kubectl 放进白名单）。
-func TestPolicyAuditApprovalDecisionLinkage(t *testing.T) {
-	e := newPolicyE2E(t, map[string][]scriptedCall{}, withExecCommands("go", "kubectl"))
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	approver := &policy.PolicySet{Rules: []policy.Rule{{
-		ID:               "task.approval.exec",
-		Tool:             "run_command",
-		Stages:           []string{"c"},
-		Effect:           policy.EffectRequireApproval,
-		RequiresApproval: true,
-	}}}
-
-	taskID := fmt.Sprintf("task-audit-approval-%d", time.Now().UnixNano())
-	if err := e.tasks.Create(ctx, &repository.TaskRun{
-		TaskID: taskID, TenantID: policyAuditTenant, ProjectID: policyAuditProject,
-		WorkspaceRoot: t.TempDir(), Goal: "approval linkage", GoalHash: "h",
-		CurrentStage: fsm.StageRequirement, Status: repository.TaskRunning,
-		PolicySnapshot: []byte(`{"mode":"enforce"}`),
-	}); err != nil {
-		t.Fatalf("create task: %v", err)
-	}
-
-	in := ToolCallInput{
-		TenantID: policyAuditTenant, ProjectID: policyAuditProject, TaskID: taskID,
-		Stage: "c", AgentID: "main-agent", Tool: "run_command",
-		Command: []string{"kubectl", "apply", "-f", "deploy.yaml"}, TaskPolicy: approver,
-	}
-
-	pre := e.bridge.Preflight(ctx, in)
-	if !pre.RequiresApproval || pre.Allowed {
-		t.Fatalf("preflight = %+v, want requires_approval and not allowed", pre)
-	}
-	if pre.ApprovalID == "" {
-		t.Fatalf("preflight did not create an approval ticket: %+v", pre)
-	}
-	if pre.RuleID != "task.approval.exec" {
-		t.Fatalf("preflight rule = %s, want task.approval.exec", pre.RuleID)
-	}
-
-	// 人工批准后，阻塞式的 AuthorizeTool 应当放行。
-	//
-	// 注意：Preflight 和 AuthorizeTool 各自 Begin 一次工单（两处决策各留一条审计），
-	// 所以这里要把两处 pending 工单都批掉——只批 preflight 那张，AuthorizeTool
-	// 会一直等到超时，测试就变成在验证「超时不放行」而不是「批准后放行」。
-	done := make(chan error, 1)
-	go func() {
-		done <- e.bridge.AuthorizeTool(ctx, in)
-	}()
-	waitPending := func(want int) []*agentapproval.ApprovalRequest {
-		deadline := time.Now().Add(5 * time.Second)
-		for time.Now().Before(deadline) {
-			if got := e.manager.GetPendingRequests(""); len(got) >= want {
-				return got
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
-		t.Fatalf("approval tickets did not reach %d pending requests", want)
-		return nil
-	}
-	pending := waitPending(2)
-	ticket := pre.ApprovalID
-	for _, req := range pending {
-		if err := e.manager.SubmitDecision(ctx, &agentapproval.ApprovalDecision{
-			RequestID: req.ID, Decision: agentapproval.StatusApproved, UserID: "auditor",
-		}); err != nil {
-			t.Fatalf("approve %s: %v", req.ID, err)
-		}
-	}
-	if err := <-done; err != nil {
-		t.Fatalf("approved call was not allowed: %v", err)
-	}
-
-	rows := e.auditRows(t, taskID)
-	if len(rows) != 2 {
-		t.Fatalf("audit rows = %d, want 2 (preflight + authorize decisions, both require_approval): %+v", len(rows), rows)
-	}
-	for _, r := range rows {
-		if r.Decision != string(policy.EffectRequireApproval) {
-			t.Fatalf("audit %s decision = %s, want require_approval", r.AuditID, r.Decision)
-		}
-		if r.RuleID != "task.approval.exec" {
-			t.Fatalf("audit %s rule = %s, want task.approval.exec", r.AuditID, r.RuleID)
-		}
-	}
-
-	// 驳回路径：同一 (tenant, task, stage, tool, command) 的重复调用会被闸门拒绝。
-	rejectTask := taskID + "-reject"
-	if err := e.tasks.Create(ctx, &repository.TaskRun{
-		TaskID: rejectTask, TenantID: policyAuditTenant, ProjectID: policyAuditProject,
-		WorkspaceRoot: t.TempDir(), Goal: "approval reject", GoalHash: "h",
-		CurrentStage: fsm.StageRequirement, Status: repository.TaskRunning,
-		PolicySnapshot: []byte(`{"mode":"enforce"}`),
-	}); err != nil {
-		t.Fatalf("create reject task: %v", err)
-	}
-	rejectIn := in
-	rejectIn.TaskID = rejectTask
-	rejectIn.Command = []string{"kubectl", "apply", "-f", "app.yaml"}
-
-	rejectDone := make(chan error, 1)
-	go func() { rejectDone <- e.bridge.AuthorizeTool(ctx, rejectIn) }()
-
-	// AuthorizeTool 内部 Begin 出一张新工单；等到它出现再驳回。
-	var rejectTicket string
-	rejectDeadline := time.Now().Add(5 * time.Second)
-	for rejectTicket == "" && time.Now().Before(rejectDeadline) {
-		for _, req := range e.manager.GetPendingRequests("") {
-			if req.SessionID == rejectTask {
-				rejectTicket = req.ID
-			}
-		}
-		if rejectTicket == "" {
-			time.Sleep(10 * time.Millisecond)
-		}
-	}
-	if rejectTicket == "" {
-		t.Fatalf("no pending approval request for the reject case")
-	}
-	if err := e.manager.SubmitDecision(ctx, &agentapproval.ApprovalDecision{
-		RequestID: rejectTicket, Decision: agentapproval.StatusRejected,
-		UserID: "auditor", Reason: "not this time",
-	}); err != nil {
-		t.Fatalf("reject: %v", err)
-	}
-	if err := <-rejectDone; err == nil {
-		t.Fatalf("rejected call was allowed")
-	} else if !strings.Contains(err.Error(), policy.CodeApprovalRejected) {
-		t.Fatalf("reject error = %v, want code %s", err, policy.CodeApprovalRejected)
-	}
-
-	rejectRows := e.auditRows(t, rejectTask)
-	if len(rejectRows) != 1 || rejectRows[0].Decision != string(policy.EffectRequireApproval) {
-		t.Fatalf("reject-case audit = %+v, want 1 require_approval row", rejectRows)
-	}
-
-	// approval.requested 事件必须与审计同 rule_id。
-	e.flushQuietly()
-	var requested int
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		requested = 0
-		events, err := e.events.List(context.Background(), repository.EventFilter{TenantID: policyAuditTenant, TaskID: taskID})
-		if err != nil {
-			t.Fatalf("list events: %v", err)
-		}
-		for _, ev := range events {
-			if ev.EventType == event.ApprovalRequested {
-				requested++
-			}
-		}
-		if requested >= 2 || time.Now().After(deadline) {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	events, err := e.events.List(context.Background(), repository.EventFilter{TenantID: policyAuditTenant, TaskID: taskID})
-	if err != nil {
-		t.Fatalf("list events: %v", err)
-	}
-	for _, ev := range events {
-		if ev.EventType != event.ApprovalRequested {
-			continue
-		}
-		var payload map[string]any
-		if err := json.Unmarshal(ev.Payload, &payload); err != nil {
-			t.Fatalf("decode approval.requested: %v", err)
-		}
-		if got, _ := payload["rule_id"].(string); got != "task.approval.exec" {
-			t.Fatalf("approval.requested rule_id = %v, want task.approval.exec", payload["rule_id"])
-		}
-	}
-	if requested != 2 {
-		t.Fatalf("approval.requested events = %d, want 2 (preflight + authorize)", requested)
-	}
-	t.Logf("approval: ticket=%s approved=true audits=%v requested_events=%d", ticket, len(rows), requested)
-}

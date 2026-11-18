@@ -1,0 +1,36 @@
+# 四层策略集装配（T-P2-31）
+#
+# 这份文件是 tenant / role 两层的唯一来源；task 层优先取
+# hlp_task.task_runs.policy_snapshot 里的 tool_policy 键，快照里没有时才回落到
+# 本文件的 tasks:（一般不用，任务级策略天然属于存储）。
+#
+# 结构：
+#   tenants.<tenant_id> / roles.<role_name|agent_id> / tasks.<task_id>
+#     allow_tools: []      非空即「本层只允许这些工具」（未列出的按 deny）
+#     deny_tools:  []      本层显式拒绝
+#     rules:               规则，effect ∈ allow / deny / require_approval
+#       - id: 唯一 id，会原样进审计的 rule_id
+#         tool: 工具名，支持前缀通配（run_*）
+#         tags: 工具标签（read/write/exec/network）
+#         stages: 限定阶段
+#         effect: allow | deny | require_approval
+#         requires_approval: true 时即使 effect=allow 也要人等
+#
+# 没有 policy_source 的配置等于没接：每条决策都会带
+# policy_source=tenant:config / role:config / task:snapshot / system:engine。
+version: 1
+
+tenants:
+  # 四层回归/联调专用租户。真实业务租户不要挂进来：
+  # 这里的 deny_tools 是为了让「哪一层说的不」在审计里可辨，不是业务策略。
+  tenant-policy-layers:
+    deny_tools:
+      - write_file
+
+roles:
+  # 探针 agent：给回归用例演示角色层命中。真实 entry_agent 不要复用这个名字。
+  policy-probe-agent:
+    deny_tools:
+      - list_dir
+
+tasks: {}

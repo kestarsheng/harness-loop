@@ -17,6 +17,7 @@ import (
 	"agent-platform/pkg/harnessloop/event"
 	"agent-platform/pkg/harnessloop/fsm"
 	"agent-platform/pkg/harnessloop/orchestrator"
+	"agent-platform/pkg/harnessloop/policy"
 	"agent-platform/pkg/harnessloop/retry"
 	"agent-platform/pkg/harnessloop/subtask"
 	"agent-platform/pkg/harnessloop/tracing"
@@ -149,6 +150,10 @@ type Runtime struct {
 	Metrics *metrics.Harness
 	Tracer  *tracing.Tracer
 
+	// TaskPolicies 是任务级策略集的注入目标。为 nil 时回落到 PolicyBridge 在
+	// 构造时登记的默认目标（生产路径不需要额外接线）。
+	TaskPolicies TaskPolicySink
+
 	mu                sync.Mutex
 	pubMu             sync.Mutex
 	aborts            map[abortKey]AbortResult
@@ -168,6 +173,24 @@ func NewRuntime(tasks TaskStore, attempts AttemptStore, stages StageExecutor) *R
 		aborted:           make(map[string]bool),
 		terminalPublished: make(map[string]bool),
 	}
+}
+
+func (r *Runtime) injectTaskPolicy(task *repository.TaskRun) {
+	if r == nil || task == nil {
+		return
+	}
+	set := policy.TaskPolicyFromSnapshot(task.PolicySnapshot)
+	if set == nil {
+		return
+	}
+	sink := r.TaskPolicies
+	if sink == nil {
+		sink = DefaultTaskPolicySink()
+	}
+	if sink == nil {
+		return
+	}
+	sink.SetTaskPolicySet(task.TaskID, set)
 }
 
 func (r *Runtime) Run(ctx context.Context, in RunInput) (*RunResult, error) {
@@ -201,6 +224,9 @@ func (r *Runtime) Run(ctx context.Context, in RunInput) (*RunResult, error) {
 	if task.Status != repository.TaskRunning {
 		return nil, fmt.Errorf("%w: status=%s", ErrRuntimeState, task.Status)
 	}
+	// 任务级策略集来自 task_runs.policy_snapshot（存储）：runtime 是唯一同时
+	// 拿得到任务行与阶段执行链的位置，注入放在这里才不会漏掉重试/续跑路径。
+	r.injectTaskPolicy(task)
 
 	result := &RunResult{}
 	if task.CurrentStage == fsm.StageDone {
