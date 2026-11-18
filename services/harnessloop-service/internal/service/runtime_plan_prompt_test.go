@@ -8,6 +8,7 @@ import (
 	"agent-platform/pkg/harnessloop/fsm"
 	"agent-platform/pkg/harnessloop/modelregistry"
 	"agent-platform/pkg/harnessloop/orchestrator"
+	"agent-platform/pkg/harnessloop/subtask"
 )
 
 // 示例 DAG 必须是校验器认可的 3 节点计划。示例一旦不合法，模型照抄就永远被
@@ -147,5 +148,31 @@ func TestMatchClosingBraceIgnoresBracesInStrings(t *testing.T) {
 	end := matchClosingBrace(text, 0)
 	if end != len(`{"a":"}{","b":{"c":1}}`)-1 {
 		t.Fatalf("brace matching must skip quoted braces, got end=%d text=%q", end, string(text))
+	}
+}
+
+// 子任务必须直接落到执行者 agent：经 main-agent 分发后模型会再 handoff 一次，
+// 被守卫拒掉。这条映射是 subtask.started → accepted 能跑通的前提。
+func TestSubtaskEntryAgentFollowsRole(t *testing.T) {
+	e := NewAgentSubtaskExecutor(nil, SubtaskExecutorConfig{EntryAgent: "main-agent"})
+	cases := map[string]string{
+		"coder":      "coder-agent",
+		"writer":     "coder-agent",
+		"verifier":   "analyst-agent",
+		"researcher": "researcher-agent",
+		"unknown":    "main-agent",
+		"":           "main-agent",
+	}
+	for role, want := range cases {
+		if got := e.entryAgentFor(&subtask.Subtask{Role: role}); got != want {
+			t.Fatalf("role %q must run on %q, got %q", role, want, got)
+		}
+	}
+	override := NewAgentSubtaskExecutor(nil, SubtaskExecutorConfig{
+		EntryAgent: "main-agent",
+		RoleAgents: map[string]string{"coder": "custom-agent"},
+	})
+	if got := override.entryAgentFor(&subtask.Subtask{Role: "coder"}); got != "custom-agent" {
+		t.Fatalf("explicit RoleAgents must win, got %q", got)
 	}
 }
