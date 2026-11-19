@@ -1392,9 +1392,9 @@
 | 目标 | `Resolve(root, ".")` 解析为 workspace 根，不得再报 `E_UNSAFE_PATH: empty path`；子任务 `read_file(".")` / `list_dir(".")` 可用。 |
 | 关联需求 | REQ-139、REQ-160；design 4.15 |
 | 依赖 | 无 |
-| 涉及文件 | [M] `pkg/harnessloop/policy/sandbox/realpath.go`、[M] `pkg/harnessloop/policy/sandbox/sandbox_test.go` |
-| 实施要点 | 1) 区分 `.` 与空串：`.` 解析为 root，空串仍拒绝；2) `..`、绝对路径、UNC、URL 仍拒绝；3) 补 `Resolve(root, ".") == root` 与子任务 `read_file(".")` 用例；4) 不改其他调用方语义。 |
-| 验收标准 | `go test ./pkg/harnessloop/policy/sandbox/...` 全绿；子任务 c 阶段 `read_file(".")` 成功；`..` 仍被拒。 |
+| 涉及文件 | [M] `pkg/harnessloop/policy/sandbox/realpath.go`、[M] `pkg/harnessloop/policy/sandbox/sandbox_test.go`、[M] `services/mcp-service/internal/tools/tools.go`（FileReadTool 目录分支）、[M] `services/mcp-service/internal/tools/workspace_test.go` |
+| 实施要点 | 1) 区分 `.` 与空串：`.` 解析为 root，空串仍拒绝；2) `..`、绝对路径、UNC、URL 仍拒绝；3) `FileReadTool` 在 `IsDir()` 时渲染目录列表（条目名 + 是否目录 + 大小），**不递归、不跟随符号链接、条目上限 200**，避免大目录撑爆上下文；4) 目录条目仍受 `resolveWorkspacePath` 约束，越权路径照旧拒绝；5) 补 `Resolve(root, ".") == root`、`read_file(".")` 目录渲染、空目录、条目上限用例；6) 不新增 `list_dir` 工具（另属后续语义）。 |
+| 验收标准 | `go test ./pkg/harnessloop/policy/sandbox/... ./services/mcp-service/internal/tools/...` 全绿；真实任务 c 阶段 `read_file(".")` 返回目录列表；`..`/绝对路径仍被拒；`AllowedSubpaths` 下 `.` 仍拒（最小权限）。 |
 | 复杂度 | S（0.5 天） |
 
 > P2 合计：实施 38 个 + 测试 5 个 = **43 个任务**。
