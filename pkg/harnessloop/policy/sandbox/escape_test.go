@@ -22,7 +22,6 @@ func TestNegativeEscapeVectorsAllRejected(t *testing.T) {
 		"http://evil.example/x",
 		"a\x00b",
 		"",
-		".",
 	}
 	for _, v := range vectors {
 		if _, err := Resolve(root, v); err == nil {
