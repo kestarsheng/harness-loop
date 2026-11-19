@@ -30,7 +30,7 @@ func TestTUIModel(t *testing.T) {
 
 	m := newModel()
 	view := m.View()
-	for _, want := range []string{"Harness Loop", "task 7f3a1b2c", "b 方案设计", "attempt #1", "elapsed 04:12", "tokens 38.2k/120.0k", "q quit"} {
+	for _, want := range []string{"Harness Loop", "task 7f3a1b2c", "b 方案设计", "attempt #1", "elapsed 04:12", "tokens 38.2k/120.0k", "? help"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("initial view missing %q:\n%s", want, view)
 		}

@@ -31,9 +31,12 @@ func RenderChat(messages []ChatMessage, width, maxLines int, theme Theme) string
 	if width < chatMinWidth {
 		width = chatMinWidth
 	}
-	lines := []string{theme.paint("Conversation", theme.Title)}
+	lines := []string{fit(theme.paint("Conversation", theme.Title), width)}
 	if len(messages) == 0 {
-		lines = append(lines, theme.paint(chatIndent+"send a message, or /task <goal> to run the a~e loop", theme.Muted))
+		hint := chatIndent + "send a message, or /task <goal> to run the a~e loop"
+		for _, row := range wrapWidth(hint, width) {
+			lines = append(lines, theme.paint(row, theme.Muted))
+		}
 	}
 
 	bodyWidth := width - len([]rune(chatIndent)) - len([]rune(chatBodyPad))
@@ -56,7 +59,7 @@ func RenderChat(messages []ChatMessage, width, maxLines int, theme Theme) string
 		if !msg.Time.IsZero() {
 			header += " " + msg.Time.Format("15:04:05")
 		}
-		lines = append(lines, theme.paint(header, style))
+		lines = append(lines, fit(theme.paint(header, style), width))
 
 		body := strings.TrimRight(msg.Text, "\n")
 		if body == "" {

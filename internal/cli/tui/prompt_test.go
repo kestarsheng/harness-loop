@@ -25,7 +25,7 @@ func TestPromptViewShowsLogoAndComponentBox(t *testing.T) {
 	if !strings.Contains(view, views.LogoText) {
 		t.Fatalf("prompt must open with the wordmark:\n%s", view)
 	}
-	for _, want := range []string{"╭", "╮", "╰", "╯", "Enter start   Esc cancel", "single line"} {
+	for _, want := range []string{"╭", "╮", "╰", "╯", "Enter start   Esc cancel", "Shift+Enter"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("prompt chrome missing %q:\n%s", want, view)
 		}
@@ -100,23 +100,67 @@ func TestPromptTypingBackspaceAndSubmit(t *testing.T) {
 	}
 }
 
-func TestPromptPasteAndCursorEditing(t *testing.T) {
+func TestPromptPasteKeepsNewlinesAndCursorEditing(t *testing.T) {
 	m := newPrompt()
 	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("abc\nxyz"), Paste: true})
 	m = next.(*PromptModel)
-	if got := m.Value(); got != "abc xyz" {
+	if got := m.Value(); got != "abc\nxyz" {
 		t.Fatalf("pasted value = %q", got)
 	}
 	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyLeft, Runes: nil})
 	m = next.(*PromptModel)
 	m = typeRunes(t, m, "-")
-	if got := m.Value(); got != "abc xy-z" {
+	if got := m.Value(); got != "abc\nxy-z" {
 		t.Fatalf("cursor insert = %q", got)
 	}
 	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlW})
 	m = next.(*PromptModel)
-	if got := m.Value(); got != "abc z" {
+	if got := m.Value(); got != "abc\nz" {
 		t.Fatalf("ctrl+w = %q", got)
+	}
+	rows := strings.Split(m.InputLine(), "\n")
+	if len(rows) != 2 || !strings.HasPrefix(rows[0], "> ") || !strings.HasPrefix(rows[1], "  ") {
+		t.Fatalf("multi-line composer rows = %#v", rows)
+	}
+}
+
+func TestPromptShiftEnterInsertsNewline(t *testing.T) {
+	m := newPrompt()
+	m = typeRunes(t, m, "line1")
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter, Alt: true})
+	m = next.(*PromptModel)
+	if cmd != nil || m.Done() {
+		t.Fatal("shift+enter must not submit")
+	}
+	m = typeRunes(t, m, "line2")
+	if got := m.Value(); got != "line1\nline2" {
+		t.Fatalf("value = %q", got)
+	}
+}
+
+func TestPromptHistory(t *testing.T) {
+	m := NewPromptModel("Harness Loop", "", PromptOptions{NoColor: true, Width: 100, Embedded: true})
+	m = typeRunes(t, m, "first")
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(*PromptModel)
+	m = typeRunes(t, m, "second")
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(*PromptModel)
+
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	m = next.(*PromptModel)
+	if got := m.Value(); got != "second" {
+		t.Fatalf("up history = %q", got)
+	}
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	m = next.(*PromptModel)
+	if got := m.Value(); got != "first" {
+		t.Fatalf("second up history = %q", got)
+	}
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = next.(*PromptModel)
+	if got := m.Value(); got != "second" {
+		t.Fatalf("down history = %q", got)
 	}
 }
 

@@ -26,3 +26,16 @@ func LogoStyle(noColor bool) lipgloss.Style {
 func RenderLogo(noColor bool) string {
 	return LogoStyle(noColor).Render(LogoText)
 }
+
+// WordmarkWidth is the terminal width at which the banner wordmark replaces
+// the single-line wordmark.
+const WordmarkWidth = 60
+
+// RenderWordmark renders the width-aware wordmark. Narrow terminals get the
+// single bold line; wide ones get the character-art banner.
+func RenderWordmark(width int, noColor bool) string {
+	if width > 0 && width < WordmarkWidth {
+		return RenderLogo(noColor)
+	}
+	return RenderLogo(noColor)
+}

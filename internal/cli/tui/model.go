@@ -1,9 +1,12 @@
 package tui
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -131,6 +134,13 @@ type Options struct {
 	// Session turns this model into a resident multi-task session. It is only
 	// set by RunSession; Run keeps the legacy single-task behaviour.
 	Session *SessionConfig
+
+	// Status-bar overrides. When empty the model reads the current working
+	// directory, the git branch of that directory and defaults the model label
+	// to "main-agent"; tests pin them for deterministic output.
+	WorkDir   string
+	GitBranch string
+	ModelName string
 }
 
 type Model struct {
@@ -226,6 +236,13 @@ type Model struct {
 	taskGen    int
 	taskCtx    context.Context
 	taskCancel context.CancelFunc
+
+	// Status-bar identity: model label, working directory and git branch.
+	workDir   string
+	gitBranch string
+	modelName string
+	// tokensUsed is the direct-chat token usage reported by the reply stream.
+	tokensUsed int64
 }
 
 type taskMsg struct {
@@ -317,6 +334,20 @@ func NewModel(state TaskState, src Source, opts Options) *Model {
 	if open == nil {
 		open = DefaultOpenURL
 	}
+	workDir := strings.TrimSpace(opts.WorkDir)
+	if workDir == "" {
+		if cwd, err := os.Getwd(); err == nil {
+			workDir = cwd
+		}
+	}
+	branch := strings.TrimSpace(opts.GitBranch)
+	if branch == "" {
+		branch = detectGitBranch(workDir)
+	}
+	modelName := strings.TrimSpace(opts.ModelName)
+	if modelName == "" {
+		modelName = "main-agent"
+	}
 	m := &Model{
 		state:            state,
 		verdicts:         map[string]string{},
@@ -335,6 +366,9 @@ func NewModel(state TaskState, src Source, opts Options) *Model {
 		kbSrc:            opts.KB,
 		kbTopK:           opts.KBTopK,
 		pendingApprovals: map[string]bool{},
+		workDir:          workDir,
+		gitBranch:        branch,
+		modelName:        modelName,
 	}
 	if m.kbTopK <= 0 {
 		m.kbTopK = 8
@@ -409,6 +443,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		if m.session != nil && m.awaitingInput {
+			// ? opens the help layer at the composer; Esc closes a panel
+			// before it clears the input buffer.
+			if msg.String() == "?" && m.input.Empty() {
+				return m.toggleView(ViewHelp, nil)
+			}
+			if msg.Type == tea.KeyEsc && m.mode != ViewMain {
+				m.mode = ViewMain
+				return m, nil
+			}
 			return m, m.input.HandleKey(msg)
 		}
 		return m.handleKey(msg)
@@ -966,101 +1009,237 @@ func (m *Model) toggleView(target ViewMode, load tea.Cmd) (tea.Model, tea.Cmd) {
 	return m, load
 }
 
+// View renders the fixed Claude-style skeleton: wordmark, the scrollable body,
+// the fixed composer and the status bar. The body height is whatever is left
+// after the fixed rows, so the composer and status bar always hug the bottom.
 func (m *Model) View() string {
 	width := m.width
 	if width <= 0 {
 		width = 100
 	}
-	parts := make([]string, 0, 7)
-	// Claude-style chrome: wordmark first, then the task header. The monitor
-	// board URL bar is gone (T-P2-42); "o" still opens it in the browser.
-	parts = append(parts, views.RenderLogo(m.theme.NoColor))
-	if m.chatMode && m.session != nil {
-		// The conversation is the whole session: no task header, the /task
-		// hint replaces it.
-		parts = append(parts, " Harness Loop · direct chat · /task <goal> for a~e")
-	} else {
-		parts = append(parts, views.RenderHeader(m.stageData()))
+	height := m.height
+	if height <= 0 {
+		height = 30
 	}
+
+	logo := views.RenderWordmark(width, m.theme.NoColor)
+	composer := m.composerBlock(width)
+	status := m.statusBar(width)
+
+	bodyHeight := height - lineCount(logo) - len(composer) - 1
+	if bodyHeight < 1 {
+		bodyHeight = 1
+	}
+	body := padLines(splitLines(m.renderBody(width, bodyHeight)), bodyHeight)
+
+	out := splitLines(logo)
+	out = append(out, body...)
+	out = append(out, composer...)
+	out = append(out, status)
+	return strings.Join(out, "\n")
+}
+
+// renderBody draws whatever occupies the scrollable middle area.
+func (m *Model) renderBody(width, height int) string {
 	switch m.mode {
 	case ViewLogs:
-		parts = append(parts, views.RenderLogs(m.events, width, m.height-4, m.theme))
+		return views.RenderLogs(m.events, width, height, m.theme)
 	case ViewHelp:
-		parts = append(parts, views.RenderHelp(m.theme))
+		return views.RenderHelp(m.theme)
 	case ViewMemory:
-		parts = append(parts, views.RenderMemory(m.theme))
+		return views.RenderMemory(m.theme)
 	case ViewSubtasks:
-		height := m.height - 5
-		if height < 8 {
-			height = 16
+		half := height / 2
+		if half < 4 {
+			half = 4
 		}
-		parts = append(parts, views.RenderSubtasks(m.subagents, width, height/2, m.theme))
-		parts = append(parts, views.RenderHandoffs(m.subagents, width, height-height/2, m.theme))
+		return strings.Join([]string{
+			views.RenderSubtasks(m.subagents, width, half, m.theme),
+			views.RenderHandoffs(m.subagents, width, height-half, m.theme),
+		}, "\n")
 	case ViewModels:
-		parts = append(parts, views.RenderModels(m.models, width, maxLinesFor(m.height-5, 12), m.theme))
+		return views.RenderModels(m.models, width, maxLinesFor(height, 12), m.theme)
 	case ViewHealth:
-		parts = append(parts, views.RenderHealth(m.healthData(), width, maxLinesFor(m.height-5, 12), m.theme))
+		return views.RenderHealth(m.healthData(), width, maxLinesFor(height, 12), m.theme)
 	case ViewArtifacts:
-		parts = append(parts, views.RenderArtifacts(m.subagents, width, maxLinesFor(m.height-5, 12), m.theme))
+		return views.RenderArtifacts(m.subagents, width, maxLinesFor(height, 12), m.theme)
 	case ViewKB:
-		parts = append(parts, views.RenderKB(m.kbData(), width, maxLinesFor(m.height-5, 12), m.theme))
+		return views.RenderKB(m.kbData(), width, maxLinesFor(height, 12), m.theme)
+	}
+	if m.chatMode && m.session != nil {
+		return views.RenderChat(m.chatLines(), width, height, m.theme)
+	}
+	header := views.RenderHeader(m.stageData())
+	stage := views.RenderStage(m.stageData())
+	remaining := height - lineCount(header) - lineCount(stage)
+	if remaining < 4 {
+		remaining = 4
+	}
+	streamMax := remaining / 3
+	if streamMax < 2 {
+		streamMax = 2
+	}
+	eventsMax := remaining - streamMax - 1
+	if eventsMax < 2 {
+		eventsMax = 2
+	}
+	return strings.Join([]string{
+		header,
+		stage,
+		views.RenderStream(m.stream, width, streamMax, m.theme),
+		views.RenderEvents(m.events, width, eventsMax, m.theme),
+	}, "\n")
+}
+
+// composerBlock is the fixed input area above the status bar. It is empty while
+// a reply streams or a task runs, so the body can use the whole middle.
+func (m *Model) composerBlock(width int) []string {
+	if m.session == nil || !m.awaitingInput {
+		if m.session != nil && m.submitting && m.state.TaskID == "" {
+			return []string{"", "  creating task…"}
+		}
+		return nil
+	}
+	lines := []string{""}
+	lines = append(lines, splitLines(views.RenderBox("", m.input.InputLine(), width))...)
+	if errText := m.input.ErrorText(); errText != "" {
+		lines = append(lines, "  "+errText)
+	}
+	if m.errText != "" {
+		lines = append(lines, "  "+m.errText)
+	}
+	return lines
+}
+
+// statusBar is the single-line footer: model · cwd · branch · tokens · ? help.
+func (m *Model) statusBar(width int) string {
+	tokens := m.state.ConsumedTokens
+	if tokens == 0 {
+		tokens = m.tokensUsed
+	}
+	branch := m.gitBranch
+	if branch == "" {
+		branch = "-"
+	}
+	segments := []string{m.modelName, shortWorkDir(m.workDir), branch}
+	prefix := ""
+	if m.mode != ViewMain {
+		prefix = "[" + m.modeName() + "] "
+	}
+	tail := " · " + formatStatusTokens(tokens) + " · ? help"
+	for len(segments) > 0 {
+		text := prefix + strings.Join(segments, " · ")
+		if width <= 0 || len([]rune(text))+len([]rune(tail)) <= width {
+			return m.theme.Muted.Render(text + tail)
+		}
+		segments = segments[:len(segments)-1]
+	}
+	return m.theme.Muted.Render(prefix + "? help")
+}
+
+func shortWorkDir(dir string) string {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return "~"
+	}
+	dir = filepath.ToSlash(dir)
+	runes := []rune(dir)
+	if len(runes) <= 28 {
+		return dir
+	}
+	return "…" + string(runes[len(runes)-27:])
+}
+
+func formatStatusTokens(n int64) string {
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM tokens", float64(n)/1_000_000)
+	case n >= 1_000:
+		return fmt.Sprintf("%.1fk tokens", float64(n)/1_000)
 	default:
-		if m.chatMode && m.session != nil {
-			// Default session view: the conversation, not the a~e panels.
-			fixed := 8 // logo + header + chat header + footer
-			if m.session != nil && m.awaitingInput {
-				fixed += 3 // blank line + rounded composer box + key hints
+		return fmt.Sprintf("%d tokens", n)
+	}
+}
+
+func splitLines(s string) []string { return strings.Split(s, "\n") }
+
+func lineCount(s string) int { return len(splitLines(s)) }
+
+func padLines(lines []string, height int) []string {
+	if height <= 0 {
+		return lines
+	}
+	if len(lines) > height {
+		return lines[:height]
+	}
+	for len(lines) < height {
+		lines = append(lines, "")
+	}
+	return lines
+}
+
+// detectGitBranch reads .git/HEAD (walking up from dir) without shelling out.
+func detectGitBranch(dir string) string {
+	if dir == "" {
+		return ""
+	}
+	cur := dir
+	for i := 0; i < 40; i++ {
+		gitPath := filepath.Join(cur, ".git")
+		if info, err := os.Stat(gitPath); err == nil {
+			head := filepath.Join(gitPath, "HEAD")
+			if !info.IsDir() {
+				// Worktree: .git is a file pointing at the real git dir.
+				if real, err := readGitDir(gitPath); err == nil {
+					head = filepath.Join(real, "HEAD")
+				}
 			}
-			chatMax := m.height - fixed
-			if chatMax < 6 {
-				chatMax = 12
-			}
-			parts = append(parts, views.RenderChat(m.chatLines(), width, chatMax, m.theme))
+			return readHEAD(head)
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
 			break
 		}
-		parts = append(parts, views.RenderStage(m.stageData()))
-		fixed := 8 // logo + header + 5 stage rows + footer
-		if m.session != nil && m.awaitingInput {
-			fixed += 3 // blank line + rounded composer box + key hints
-		}
-		budget := m.height - fixed
-		if budget < 6 {
-			budget = 12
-		}
-		streamMax := budget / 3
-		if streamMax < 2 {
-			streamMax = 2
-		}
-		eventsMax := budget - streamMax - 1
-		if eventsMax < 2 {
-			eventsMax = 2
-		}
-		parts = append(parts, views.RenderStream(m.stream, width, streamMax, m.theme))
-		parts = append(parts, views.RenderEvents(m.events, width, eventsMax, m.theme))
+		cur = parent
 	}
-	if m.session != nil {
-		switch {
-		case m.awaitingInput:
-			// The composer is a component box here too, so the session screen
-			// and the standalone prompt share one visual language.
-			parts = append(parts, "", views.RenderBox("", m.input.InputLine(), width))
-			if errText := m.input.ErrorText(); errText != "" {
-				parts = append(parts, "  "+errText)
+	return ""
+}
+
+func readGitDir(gitFile string) (string, error) {
+	f, err := os.Open(gitFile)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if strings.HasPrefix(line, "gitdir:") {
+			dir := strings.TrimSpace(strings.TrimPrefix(line, "gitdir:"))
+			if !filepath.IsAbs(dir) {
+				dir = filepath.Join(filepath.Dir(gitFile), dir)
 			}
-			if m.errText != "" {
-				parts = append(parts, "  "+m.errText)
-			}
-			if m.chatMode {
-				parts = append(parts, "  Enter submit   /task <goal> runs a~e   exit end session   Esc clear")
-			} else {
-				parts = append(parts, "  Enter submit   exit end session   Esc clear")
-			}
-		case m.submitting && m.state.TaskID == "":
-			parts = append(parts, "", "  creating task…")
+			return dir, nil
 		}
 	}
-	parts = append(parts, views.RenderFooter(m.modeName(), width, m.theme))
-	return strings.Join(parts, "\n")
+	return "", fmt.Errorf("no gitdir in %s", gitFile)
+}
+
+func readHEAD(path string) string {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	head := strings.TrimSpace(string(raw))
+	if strings.HasPrefix(head, "ref:") {
+		ref := strings.TrimSpace(strings.TrimPrefix(head, "ref:"))
+		ref = strings.TrimPrefix(ref, "refs/heads/")
+		return ref
+	}
+	if len(head) >= 7 {
+		return head[:7]
+	}
+	return head
 }
 
 func parseViewMode(name string) (ViewMode, bool) {

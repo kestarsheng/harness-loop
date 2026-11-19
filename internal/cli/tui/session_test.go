@@ -80,7 +80,7 @@ func TestSessionTerminalReturnsToInputAndAcceptsSecondTask(t *testing.T) {
 	if !m.awaitingInput {
 		t.Fatal("terminal task must return to the input box")
 	}
-	if !strings.Contains(m.View(), "Enter submit") {
+	if !strings.Contains(m.View(), "Enter to send") {
 		t.Fatalf("input hint missing after terminal state:\n%s", m.View())
 	}
 	if !m.state.terminal() || m.state.TaskID != "task-1" {
@@ -138,7 +138,7 @@ func TestSessionExitOnCompleteKeepsLegacyBehaviour(t *testing.T) {
 func TestSessionComposerUsesComponentBox(t *testing.T) {
 	m := sessionModel(t, SessionConfig{})
 	view := m.View()
-	for _, want := range []string{"harness loop", "╭", "╮", "╰", "╯", "Enter submit"} {
+	for _, want := range []string{"harness loop", "╭", "╮", "╰", "╯", "Enter to send"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("session screen missing %q:\n%s", want, view)
 		}
