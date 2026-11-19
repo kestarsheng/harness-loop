@@ -36,12 +36,9 @@ type promptQuitMsg struct{}
 // PromptModel is a minimal single-line text input built directly on Bubble
 // Tea so the CLI does not need the bubbles dependency.
 type PromptModel struct {
-	title     string
-	webURL    string
-	hyperlink bool
-	noColor   bool
-	embedded  bool
-	theme     Theme
+	title    string
+	noColor  bool
+	embedded bool
 
 	value  []rune
 	cursor int
@@ -53,7 +50,10 @@ type PromptModel struct {
 	canceled bool
 }
 
-// NewPromptModel builds the goal prompt model.
+// NewPromptModel builds the goal prompt model. webURL and opts.Hyperlink are
+// accepted for API compatibility with the monitor-board era: the Claude-style
+// layout (T-P2-42) no longer renders a URL bar, the session view keeps the
+// board reachable through the "o" key instead.
 func NewPromptModel(title, webURL string, opts PromptOptions) *PromptModel {
 	if strings.TrimSpace(title) == "" {
 		title = "Harness Loop"
@@ -67,14 +67,11 @@ func NewPromptModel(title, webURL string, opts PromptOptions) *PromptModel {
 		height = 24
 	}
 	return &PromptModel{
-		title:     title,
-		webURL:    webURL,
-		hyperlink: opts.Hyperlink,
-		noColor:   opts.NoColor,
-		embedded:  opts.Embedded,
-		theme:     NewTheme(opts.NoColor),
-		width:     width,
-		height:    height,
+		title:    title,
+		noColor:  opts.NoColor,
+		embedded: opts.Embedded,
+		width:    width,
+		height:   height,
 	}
 }
 
@@ -208,30 +205,22 @@ func (m *PromptModel) deleteWord() {
 	m.deleteRange(start, m.cursor)
 }
 
-// View implements tea.Model.
+// View implements tea.Model. The layout mirrors the Claude-style session
+// screen: wordmark, one-line hint, the input inside a rounded component box,
+// then the key hints.
 func (m *PromptModel) View() string {
-	parts := make([]string, 0, 6)
-	if bar := views.RenderURLBar(RenderHyperlink(m.webURL, m.hyperlink), m.theme); bar != "" {
-		parts = append(parts, bar)
-	}
-	parts = append(parts,
-		m.paintTitle(m.title),
-		"  Describe the goal for this loop session (single line).",
+	parts := []string{
+		views.RenderLogo(m.noColor),
 		"",
-		"  > "+m.displayLine(),
-	)
+		"  " + m.title + " · describe the goal for this session (single line).",
+		"",
+		views.RenderBox("", m.InputLine(), m.width),
+	}
 	if m.errText != "" {
-		parts = append(parts, "  "+m.errText)
+		parts = append(parts, "", "  "+m.errText)
 	}
 	parts = append(parts, "", "  Enter start   Esc cancel")
 	return strings.Join(parts, "\n")
-}
-
-func (m *PromptModel) paintTitle(s string) string {
-	if m.noColor {
-		return s
-	}
-	return m.theme.Title.Render(s)
 }
 
 func (m *PromptModel) displayLine() string {
@@ -271,7 +260,8 @@ func (m *PromptModel) HandleKey(msg tea.KeyMsg) tea.Cmd { return m.handleKey(msg
 func (m *PromptModel) Reset() { m.reset() }
 
 // InputLine renders the compact one-line composer used inside the session.
-func (m *PromptModel) InputLine() string { return "  > " + m.displayLine() }
+// The leading spaces are gone: the component box supplies its own padding.
+func (m *PromptModel) InputLine() string { return "> " + m.displayLine() }
 
 // ErrorText returns the current inline validation error.
 func (m *PromptModel) ErrorText() string { return m.errText }

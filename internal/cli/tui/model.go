@@ -729,11 +729,10 @@ func (m *Model) View() string {
 	if width <= 0 {
 		width = 100
 	}
-	parts := make([]string, 0, 6)
-	if bar := views.RenderURLBar(RenderHyperlink(m.webURL, m.hyperlink), m.theme); bar != "" {
-		parts = append(parts, bar)
-	}
-	parts = append(parts, views.RenderHeader(m.stageData()))
+	parts := make([]string, 0, 7)
+	// Claude-style chrome: wordmark first, then the task header. The monitor
+	// board URL bar is gone (T-P2-42); "o" still opens it in the browser.
+	parts = append(parts, views.RenderLogo(m.theme.NoColor), views.RenderHeader(m.stageData()))
 	switch m.mode {
 	case ViewLogs:
 		parts = append(parts, views.RenderLogs(m.events, width, m.height-4, m.theme))
@@ -758,9 +757,9 @@ func (m *Model) View() string {
 		parts = append(parts, views.RenderKB(m.kbData(), width, maxLinesFor(m.height-5, 12), m.theme))
 	default:
 		parts = append(parts, views.RenderStage(m.stageData()))
-		fixed := 7
-		if m.webURL != "" {
-			fixed++
+		fixed := 8 // logo + header + 5 stage rows + footer
+		if m.session != nil && m.awaitingInput {
+			fixed += 3 // blank line + rounded composer box + key hints
 		}
 		budget := m.height - fixed
 		if budget < 6 {
@@ -780,7 +779,9 @@ func (m *Model) View() string {
 	if m.session != nil {
 		switch {
 		case m.awaitingInput:
-			parts = append(parts, "", m.input.InputLine())
+			// The composer is a component box here too, so the session screen
+			// and the standalone prompt share one visual language.
+			parts = append(parts, "", views.RenderBox("", m.input.InputLine(), width))
 			if errText := m.input.ErrorText(); errText != "" {
 				parts = append(parts, "  "+errText)
 			}

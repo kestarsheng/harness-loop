@@ -135,6 +135,25 @@ func TestSessionExitOnCompleteKeepsLegacyBehaviour(t *testing.T) {
 	}
 }
 
+func TestSessionComposerUsesComponentBox(t *testing.T) {
+	m := sessionModel(t, SessionConfig{})
+	view := m.View()
+	for _, want := range []string{"harness loop", "╭", "╮", "╰", "╯", "Enter submit"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("session screen missing %q:\n%s", want, view)
+		}
+	}
+	boxed := false
+	for _, line := range strings.Split(view, "\n") {
+		if strings.Contains(line, "│") && strings.Contains(line, "> ") {
+			boxed = true
+		}
+	}
+	if !boxed {
+		t.Fatalf("the session composer must sit inside the component box:\n%s", view)
+	}
+}
+
 func TestSessionInitialGoalSkipsInput(t *testing.T) {
 	factory := func(ctx context.Context, goal string) (*harnesspb.TaskView, error) {
 		return &harnesspb.TaskView{TaskId: "task-seeded", Status: "running", CurrentStage: "a"}, nil

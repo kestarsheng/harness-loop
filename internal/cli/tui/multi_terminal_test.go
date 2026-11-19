@@ -49,7 +49,8 @@ func TestMultiTerminalSameBoardURL(t *testing.T) {
 		t.Fatalf("board URL must not carry query or fragment: %q", first)
 	}
 
-	// URL 也要真的出现在两个终端的顶栏上，而不只是算出来一样。
+	// T-P2-42 去掉了看板 URL 行：两个终端的顶栏现在都是 logo，URL 只保留在
+	// "o" 打开的浏览器入口里，因此断言顶栏不泄露 URL 且两个终端渲染一致。
 	renderURL := func(taskID string) string {
 		m := NewModel(TaskState{TaskID: taskID, Status: "running"}, nil,
 			Options{NoColor: true, WebURL: first})
@@ -57,8 +58,12 @@ func TestMultiTerminalSameBoardURL(t *testing.T) {
 		return next.(*Model).View()
 	}
 	for _, taskID := range []string{"task-terminal-a", "task-terminal-b"} {
-		if view := renderURL(taskID); !strings.Contains(view, first) {
-			t.Fatalf("terminal %s does not show the shared board URL %q:\n%s", taskID, first, view)
+		view := renderURL(taskID)
+		if strings.Contains(view, first) {
+			t.Fatalf("terminal %s must not render the board URL bar:\n%s", taskID, view)
+		}
+		if !strings.Contains(view, "harness loop") {
+			t.Fatalf("terminal %s must open with the wordmark:\n%s", taskID, view)
 		}
 	}
 }

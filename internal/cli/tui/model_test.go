@@ -177,8 +177,11 @@ func TestTUIModelWebURLAndOpenKey(t *testing.T) {
 	next, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
 	m = next.(*Model)
 
-	if view := m.View(); !strings.Contains(view, url) {
-		t.Fatalf("top bar must always show the fixed monitor URL:\n%s", view)
+	if view := m.View(); strings.Contains(view, url) {
+		t.Fatalf("the monitor URL bar must be gone (T-P2-42):\n%s", view)
+	}
+	if view := m.View(); !strings.Contains(view, "harness loop") {
+		t.Fatalf("the wordmark must open the view:\n%s", view)
 	}
 
 	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'o'}})
@@ -220,6 +223,9 @@ func TestTUIModelWebURLAndOpenKey(t *testing.T) {
 	}
 }
 
+// TestTUIModelHyperlinkRendering guarded the URL bar's OSC 8 output. The bar is
+// gone in the Claude-style layout, so the guard becomes the opposite: neither
+// hyperlink mode may leak the board URL or an escape sequence into the view.
 func TestTUIModelHyperlinkRendering(t *testing.T) {
 	url := URLFor(DefaultWebBaseURL)
 	m := NewModel(TaskState{TaskID: "t1", Status: "running", CurrentStage: "a"}, nil, Options{
@@ -229,8 +235,12 @@ func TestTUIModelHyperlinkRendering(t *testing.T) {
 	})
 	next, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
 	m = next.(*Model)
-	if !strings.Contains(m.View(), OSC8Link(url, url)) {
-		t.Fatalf("hyperlink-capable terminals must get an OSC 8 link:\n%q", m.View())
+	view := m.View()
+	if strings.Contains(view, "\x1b]8;;") {
+		t.Fatalf("no OSC 8 link may be rendered without a URL bar:\n%q", view)
+	}
+	if strings.Contains(view, url) {
+		t.Fatalf("hyperlinked terminals must not get the board URL:\n%s", view)
 	}
 	plain := NewModel(TaskState{TaskID: "t1", Status: "running", CurrentStage: "a"}, nil, Options{
 		NoColor: true,
@@ -238,9 +248,7 @@ func TestTUIModelHyperlinkRendering(t *testing.T) {
 	})
 	next, _ = plain.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
 	plain = next.(*Model)
-	if view := plain.View(); strings.Contains(view, "\x1b]8;;") {
-		t.Fatalf("plain terminals must not receive OSC 8 escapes:\n%q", view)
-	} else if !strings.Contains(view, url) {
-		t.Fatalf("plain terminals must still show the URL:\n%s", view)
+	if view := plain.View(); strings.Contains(view, url) || strings.Contains(view, "\x1b]8;;") {
+		t.Fatalf("plain terminals must not get the board URL either:\n%q", view)
 	}
 }
