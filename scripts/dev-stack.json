@@ -147,6 +147,7 @@
         "CONFIG_PATH": ".harness/dev/conf/agent.yaml",
         "PORT": "50006",
         "AGENT_LLM_EMIT_TOOL_CALL_MESSAGES": "true",
+        "AGENT_STREAM_TOOL_CALLS": "true",
         "HTTP_PORT": "50009",
         "MONGODB_URL": "mongodb://127.0.0.1:27017",
         "STORE_PATH": ".harness/dev/agent-contexts.db"
