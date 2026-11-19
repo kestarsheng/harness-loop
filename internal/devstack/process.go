@@ -117,7 +117,7 @@ func lookupListenerPID(port int) (int, error) {
 }
 
 func lookupPIDWindows(port int) (int, error) {
-	out, err := exec.Command("netstat", "-ano", "-p", "tcp").Output()
+	out, err := exec.Command("netstat", "-ano").Output()
 	if err != nil {
 		return 0, fmt.Errorf("netstat: %w", err)
 	}
@@ -127,7 +127,11 @@ func lookupPIDWindows(port int) (int, error) {
 		if len(fields) < 5 {
 			continue
 		}
-		if !strings.EqualFold(fields[0], "TCP") || !strings.EqualFold(fields[3], "LISTENING") {
+		proto := fields[0]
+		if !strings.EqualFold(proto, "TCP") && !strings.EqualFold(proto, "TCPv6") {
+			continue
+		}
+		if !strings.EqualFold(fields[3], "LISTENING") {
 			continue
 		}
 		if !strings.HasSuffix(fields[1], suffix) {

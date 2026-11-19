@@ -241,6 +241,27 @@ func (b *Board) Start(ctx context.Context, ref string) (*BoardState, error) {
 // only the remaining count is reported; the last release kills the process and
 // deletes the lock, so the URL stops answering. Stopping an unknown ref is a
 // no-op, which makes repeated stops idempotent.
+// waitPortFree blocks until nothing is LISTENING on the board port. A stop
+// must not report success while the URL still answers: on Windows the listener
+// can be an IPv6 socket whose PID resolution failed, in which case Kill(0) does
+// nothing and the lock would otherwise be deleted while vite keeps serving.
+func (b *Board) waitPortFree(ctx context.Context) error {
+	deadline := time.Now().Add(b.killGrace())
+	for {
+		if pid, _ := b.Runner.LookupListenerPID(b.Item.Port); pid == 0 {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("devstack: board %q still listening on port %d after stop", b.Item.Name, b.Item.Port)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+}
+
 func (b *Board) Stop(ctx context.Context, ref string) (*BoardState, error) {
 	if err := b.check(); err != nil {
 		return nil, err
@@ -281,6 +302,9 @@ func (b *Board) Stop(ctx context.Context, ref string) (*BoardState, error) {
 			if err := b.Runner.Kill(ctx, pid, b.killGrace()); err != nil {
 				return fmt.Errorf("devstack: stop board %q: %w", b.Item.Name, err)
 			}
+		}
+		if err := b.waitPortFree(ctx); err != nil {
+			return err
 		}
 		_ = os.Remove(filepath.Join(b.Dirs.Run, b.Item.PIDFileStem()+".pid"))
 		if err := os.Remove(b.lockPath()); err != nil && !os.IsNotExist(err) {

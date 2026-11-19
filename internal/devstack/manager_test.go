@@ -106,6 +106,11 @@ func (r *fakeRunner) Kill(_ context.Context, pid int, _ time.Duration) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.kills = append(r.kills, pid)
+	for port, listening := range r.listeners {
+		if listening == pid {
+			delete(r.listeners, port)
+		}
+	}
 	return nil
 }
 
