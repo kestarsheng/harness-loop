@@ -103,18 +103,19 @@ func New(root string, contract *Contract) *Manager {
 	return m
 }
 
-// Ensure probes harnessloop (127.0.0.1:50013) and reuses the stack when it is
-// already healthy; otherwise it brings the whole contract up. It keeps the
-// whole-stack semantics of `dev`: all 14 items, vite included.
+// Ensure probes the contract's declared stack probe (probe:true, 50013
+// harnessloop in the shipped contract) and reuses the stack when it is already
+// healthy; otherwise it brings the whole contract up. It keeps the whole-stack
+// semantics of `dev`: all 14 items, vite included.
 func (m *Manager) Ensure(ctx context.Context) (*Report, error) {
 	if err := m.check(); err != nil {
 		return nil, err
 	}
-	loop, ok := m.Contract.HarnessLoop()
+	probe, ok := m.probeItem()
 	if !ok {
-		return nil, fmt.Errorf("devstack: contract has no %q item", "harnessloop")
+		return nil, ErrNoProbe
 	}
-	if healthy, _ := m.Prober.Healthy(ctx, loop); healthy {
+	if healthy, _ := m.Prober.Healthy(ctx, probe); healthy {
 		rep := m.statusItems(ctx, m.Contract.Items)
 		rep.Reused = true
 		return rep, nil
@@ -122,10 +123,14 @@ func (m *Manager) Ensure(ctx context.Context) (*Report, error) {
 	return m.up(ctx, m.Contract.Items)
 }
 
-// EnsureGroups is Ensure restricted to groups. The 50013 harnessloop probe
-// stays the reuse signal whenever harnessloop is part of the selection (that is
-// what `loop` asks for: infra+agent); a selection without it (e.g. board only)
-// reuses only when every selected item already probes healthy.
+// EnsureGroups is Ensure restricted to groups.
+//
+// The reuse decision is "selected set ∩ probe": when the declared probe is part
+// of the selection, its single health verdict decides — a running stack is
+// reused even if some selected items are momentarily down (that is what `loop`
+// asks for: infra+agent). When the selection does not contain the probe (e.g.
+// board only), there is no global signal to trust, so it degrades to "reuse only
+// when every selected item already probes healthy".
 //
 // `loop` uses EnsureGroups(GroupInfra, GroupAgent) so a cold start never
 // launches the board: the board is `loop start`'s business alone.
@@ -137,8 +142,8 @@ func (m *Manager) EnsureGroups(ctx context.Context, groups ...string) (*Report, 
 	if err != nil {
 		return nil, err
 	}
-	if loop, ok := m.Contract.HarnessLoop(); ok && containsItem(items, loop.Name) {
-		if healthy, _ := m.Prober.Healthy(ctx, loop); healthy {
+	if probe, ok := m.probeItem(); ok && containsItem(items, probe.Name) {
+		if healthy, _ := m.Prober.Healthy(ctx, probe); healthy {
 			rep := m.statusItems(ctx, items)
 			rep.Reused = true
 			return rep, nil
@@ -151,6 +156,20 @@ func (m *Manager) EnsureGroups(ctx context.Context, groups ...string) (*Report, 
 		return rep, nil
 	}
 	return m.up(ctx, items)
+}
+
+// ErrNoProbe is returned when the contract declares no probe:true item and
+// carries no legacy "harnessloop" item either.
+var ErrNoProbe = errors.New(`devstack: contract declares no probe:true item and has no "harnessloop" item`)
+
+// probeItem resolves the stack liveness probe: the declared probe:true item
+// first, then the legacy "harnessloop" name for contracts written before the
+// flag existed. Naming is only ever a fallback here — never a rule.
+func (m *Manager) probeItem() (Item, bool) {
+	if probe, ok := m.Contract.ProbeItem(); ok {
+		return probe, true
+	}
+	return m.Contract.HarnessLoop()
 }
 
 // itemsInGroups resolves groups to contract items in contract order. Unknown

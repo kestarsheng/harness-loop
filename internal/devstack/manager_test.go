@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -648,6 +649,196 @@ func indexOf(list []string, want string) int {
 		}
 	}
 	return -1
+}
+
+// --- T-P2-43: the reuse gate is the declared probe, not a service name ---
+
+// agentProc builds a minimal valid agent-group process item for fixtures.
+func agentProc(name string, port int) Item {
+	return Item{
+		Name: name, Kind: KindProcess, Group: GroupAgent, Port: port,
+		Command: "true",
+		Health:  Health{Type: HealthPort, Address: "127.0.0.1:" + strconv.Itoa(port)},
+	}
+}
+
+// probeOf flips the probe:true flag on a fixture item.
+func probeOf(it Item) Item {
+	it.Probe = true
+	return it
+}
+
+func boardFrontend() Item {
+	return Item{
+		Name: "vite", Kind: KindFrontend, Group: GroupBoard, Port: 5174,
+		Command: "node vite.js",
+		Health:  Health{Type: HealthHTTP, URL: "http://127.0.0.1:5174/harness-loop/monitor", ExpectStatus: 200},
+	}
+}
+
+// newFixtureManager wires a Manager around an in-memory contract so probe
+// behaviour can be tested without touching scripts/dev-stack.json.
+func newFixtureManager(t *testing.T, items ...Item) (*Manager, *fakeProber, *fakeRunner) {
+	t.Helper()
+	contract := &Contract{Version: SupportedVersion, Items: items}
+	if err := contract.Validate(); err != nil {
+		t.Fatalf("fixture contract invalid: %v", err)
+	}
+	m := New(t.TempDir(), contract)
+	prober := newFakeProber()
+	runner := newFakeRunner(prober, contract)
+	m.Prober = prober
+	m.Runner = runner
+	m.PrepareConfig = func(string, Item) error { return nil }
+	m.PollInterval = 2 * time.Millisecond
+	m.StartTimeout = 40 * time.Millisecond
+	m.KillGrace = 20 * time.Millisecond
+	return m, prober, runner
+}
+
+// probe 缺失时回退到 HarnessLoop()：老 fixture（只有 harnessloop 名字、没有
+// probe 标志）必须保持原有复用语义。
+func TestEnsureFallsBackToHarnessLoopWhenProbeMissing(t *testing.T) {
+	m, prober, runner := newFixtureManager(t,
+		agentProc("harnessloop", 50013),
+		agentProc("memory", 50003),
+	)
+
+	prober.set("harnessloop", true) // memory stays down on purpose
+	rep, err := m.Ensure(context.Background())
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	if !rep.Reused {
+		t.Fatal("Ensure must reuse on the legacy harnessloop probe")
+	}
+	if len(rep.Items) != 2 {
+		t.Fatalf("status items = %d, want 2", len(rep.Items))
+	}
+	runs, starts, _ := runner.snapshot()
+	if len(runs)+len(starts) != 0 {
+		t.Fatalf("reuse must start nothing: runs=%v starts=%v", runs, starts)
+	}
+
+	sub, subProber, subRunner := newFixtureManager(t,
+		agentProc("harnessloop", 50013),
+		agentProc("memory", 50003),
+	)
+	subProber.set("harnessloop", true)
+	rep, err = sub.EnsureGroups(context.Background(), GroupAgent)
+	if err != nil {
+		t.Fatalf("EnsureGroups: %v", err)
+	}
+	if !rep.Reused {
+		t.Fatal("EnsureGroups must reuse on the legacy harnessloop probe")
+	}
+	if r, s, _ := subRunner.snapshot(); len(r)+len(s) != 0 {
+		t.Fatalf("reuse must start nothing: runs=%v starts=%v", r, s)
+	}
+}
+
+// probe 在选中集：探针健康即复用，其余选中项短暂 unhealthy 不影响判断。
+func TestEnsureGroupsReusesOnDeclaredProbeInSelection(t *testing.T) {
+	m, prober, runner := newFixtureManager(t,
+		probeOf(agentProc("probe-svc", 50013)),
+		agentProc("memory", 50003),
+		agentProc("gateway", 9000),
+	)
+	prober.set("probe-svc", true)
+
+	rep, err := m.EnsureGroups(context.Background(), GroupAgent)
+	if err != nil {
+		t.Fatalf("EnsureGroups: %v", err)
+	}
+	if !rep.Reused {
+		t.Fatal("a healthy declared probe inside the selection must reuse")
+	}
+	if len(rep.Items) != 3 {
+		t.Fatalf("status items = %d, want 3", len(rep.Items))
+	}
+	if r, s, _ := runner.snapshot(); len(r)+len(s) != 0 {
+		t.Fatalf("reuse must start nothing: runs=%v starts=%v", r, s)
+	}
+
+	// 探针不健康时必须建栈，而不是靠「其他项都健康」蒙混。
+	prober.set("probe-svc", false)
+	prober.set("memory", true)
+	prober.set("gateway", true)
+	rep, err = m.EnsureGroups(context.Background(), GroupAgent)
+	if err != nil {
+		t.Fatalf("EnsureGroups: %v", err)
+	}
+	if rep.Reused {
+		t.Fatal("an unhealthy probe must not reuse, even if the rest is healthy")
+	}
+	if _, starts, _ := runner.snapshot(); strings.Join(starts, ",") != "probe-svc" {
+		t.Fatalf("starts = %v, want only the down probe", starts)
+	}
+}
+
+// probe 不在选中集：没有全局信号可信，退化为「选中项全健康才复用」。
+func TestEnsureGroupsProbeOutsideSelectionDegradesToPerItemHealth(t *testing.T) {
+	m, prober, runner := newFixtureManager(t,
+		probeOf(agentProc("probe-svc", 50013)),
+		boardFrontend(),
+	)
+	prober.set("probe-svc", true) // healthy but outside the selection
+
+	rep, err := m.EnsureGroups(context.Background(), GroupBoard)
+	if err != nil {
+		t.Fatalf("EnsureGroups: %v", err)
+	}
+	if rep.Reused {
+		t.Fatal("board-only selection must not reuse on the agent-group probe")
+	}
+	if len(rep.Items) != 1 || rep.Items[0].Name != "vite" || !rep.Items[0].Started {
+		t.Fatalf("board-only report = %+v", rep.Items)
+	}
+	if _, starts, _ := runner.snapshot(); strings.Join(starts, ",") != "vite" {
+		t.Fatalf("starts = %v, want [vite]", starts)
+	}
+
+	// 全健康时仍然复用。
+	prober.set("vite", true)
+	rep, err = m.EnsureGroups(context.Background(), GroupBoard)
+	if err != nil {
+		t.Fatalf("EnsureGroups: %v", err)
+	}
+	if !rep.Reused {
+		t.Fatal("a fully healthy selection must reuse without the probe")
+	}
+}
+
+// 命名不产生隐式耦合：新增一个叫 harnessloop 的项（非探针）不得取代声明的探针，
+// 也不得让复用判定回到「按名字猜」。
+func TestNamingDoesNotCreateImplicitProbeCoupling(t *testing.T) {
+	m, prober, runner := newFixtureManager(t,
+		agentProc("harnessloop", 50013),            // 只是普通服务，healthy
+		probeOf(agentProc("obs-collector", 50020)), // 声明的探针，down
+		agentProc("memory", 50003),
+	)
+	prober.set("harnessloop", true)
+	prober.set("memory", true)
+
+	rep, err := m.EnsureGroups(context.Background(), GroupAgent)
+	if err != nil {
+		t.Fatalf("EnsureGroups: %v", err)
+	}
+	if rep.Reused {
+		t.Fatal("an item named harnessloop must not act as the probe")
+	}
+	if _, starts, _ := runner.snapshot(); strings.Join(starts, ",") != "obs-collector" {
+		t.Fatalf("starts = %v, want only the declared probe", starts)
+	}
+}
+
+// 没有任何探针也没有 harnessloop 时，Ensure 必须显式报错而不是静默全量起栈。
+func TestEnsureWithoutProbeOrLegacyItemFails(t *testing.T) {
+	m, _, _ := newFixtureManager(t, agentProc("memory", 50003))
+	_, err := m.Ensure(context.Background())
+	if !errors.Is(err, ErrNoProbe) {
+		t.Fatalf("Ensure error = %v, want ErrNoProbe", err)
+	}
 }
 
 func TestDockerStopCommand(t *testing.T) {
