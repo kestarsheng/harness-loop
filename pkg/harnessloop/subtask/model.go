@@ -61,6 +61,48 @@ type Subtask struct {
 
 var ErrInvalidSubtask = errors.New("subtask: invalid subtask")
 
+// Retry errors. A retry re-opens one failed subtask for another attempt; it is
+// not a rewind of the state machine, so it has its own guarded entry point
+// (RequeueForRetry) instead of an extra edge in AllowedTransition.
+var (
+	// ErrRetryBudgetExhausted means attempt_no already used the whole budget.
+	ErrRetryBudgetExhausted = errors.New("subtask: retry budget exhausted")
+	// ErrRetryNotFailed means only a failed subtask may be retried.
+	ErrRetryNotFailed = errors.New("subtask: only a failed subtask can be retried")
+)
+
+// RetryBudgetLeft reports whether attempts remain under the configured cap.
+// attempt_no is the 1-based number of the attempt that produced the current
+// status (the planner opens a subtask at 1), so maxAttempts=2 means at most two
+// runs in total: attempt 1 may be retried once, attempt 2 is final. It
+// deliberately ignores Status: callers decide whether the subtask is in a
+// retryable state, and RequeueForRetry enforces it.
+func (s *Subtask) RetryBudgetLeft(maxAttempts int) bool {
+	return s != nil && maxAttempts > 0 && s.AttemptNo < maxAttempts
+}
+
+// RequeueForRetry is the only sanctioned failed→pending migration: it opens the
+// next attempt (attempt_no+1) and hands the subtask back to the scheduler as
+// pending. It is budget-bounded by construction, so a retry loop can always
+// terminate; an exhausted subtask stays failed (terminal) and the parent closes
+// through the d-stage gate (T-P2-29).
+func (s *Subtask) RequeueForRetry(maxAttempts int) error {
+	if s == nil {
+		return fmt.Errorf("%w: nil subtask", ErrInvalidSubtask)
+	}
+	if s.Status != StatusFailed {
+		return fmt.Errorf("%w: subtask %s is %s", ErrRetryNotFailed, s.SubtaskID, s.Status)
+	}
+	if !s.RetryBudgetLeft(maxAttempts) {
+		return fmt.Errorf("%w: subtask %s stopped at attempt %d of %d",
+			ErrRetryBudgetExhausted, s.SubtaskID, s.AttemptNo, maxAttempts)
+	}
+	s.AttemptNo++
+	s.Status = StatusPending
+	s.AcceptanceID = ""
+	return nil
+}
+
 func (s *Subtask) Validate() error {
 	if s.SubtaskID == "" || s.ParentTaskID == "" || s.TenantID == "" || s.ProjectID == "" {
 		return fmt.Errorf("%w: subtask_id/parent_task_id/tenant_id/project_id are required", ErrInvalidSubtask)
