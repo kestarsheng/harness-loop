@@ -23,11 +23,20 @@ type Record struct {
 	Path          string `json:"path,omitempty"`
 	WorkspaceRoot string `json:"workspace_root,omitempty"`
 	Reason        string `json:"reason,omitempty"`
+
+	// 审批令牌相关字段：批没批、令牌对不对、nonce 有没有被重复使用，
+	// 事后都要能从审计里逐条对上。
+	TaskID      string `json:"task_id,omitempty"`
+	ApprovalID  string `json:"approval_id,omitempty"`
+	ApprovalRef string `json:"approval_ref,omitempty"`
+	Nonce       string `json:"nonce,omitempty"`
+	WaitMs      int64  `json:"wait_ms,omitempty"`
 }
 
 // Decision values.
 const (
-	DecisionDeny = "deny"
+	DecisionDeny  = "deny"
+	DecisionAllow = "allow"
 )
 
 var (
@@ -42,6 +51,15 @@ func SetFile(path string) {
 	mu.Lock()
 	defer mu.Unlock()
 	logPath = path
+}
+
+// Emit records an arbitrary enforcement decision and returns it.
+func Emit(rec Record) Record {
+	if rec.TS == "" {
+		rec.TS = time.Now().UTC().Format(time.RFC3339Nano)
+	}
+	record(rec)
+	return rec
 }
 
 // Deny records a refused tool call and returns the record.

@@ -163,6 +163,19 @@ message GetPromptResponse {
     repeated PromptMessage messages = 2;
 }
 
+// 注册一次性审批令牌请求。令牌由 harnessloop 在人工批准后签发，执行面
+// （本服务）只验签并暂存，不接受任何无签名的「批准声明」。
+message RegisterApprovalTokenRequest {
+    string token = 1;
+}
+
+// 注册一次性审批令牌响应
+message RegisterApprovalTokenResponse {
+    bool accepted = 1;
+    string nonce = 2;
+    string reason = 3;
+}
+
 // MCP 服务定义
 service MCPService {
     // 连接管理
@@ -173,6 +186,9 @@ service MCPService {
     // 工具
     rpc ListTools(ListToolsRequest) returns (ListToolsResponse);
     rpc CallTool(CallToolRequest) returns (CallToolResponse);
+
+    // 审批令牌（批准后由 harnessloop 注册，执行前由本服务校验）
+    rpc RegisterApprovalToken(RegisterApprovalTokenRequest) returns (RegisterApprovalTokenResponse);
 
     // 资源
     rpc ListResources(ListResourcesRequest) returns (ListResourcesResponse);

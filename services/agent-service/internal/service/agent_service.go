@@ -1009,6 +1009,9 @@ func (a *toolAdapter) Execute(ctx context.Context, toolName string, arguments js
 	if pc, ok := toolPolicyContextFrom(ctx); ok {
 		req.TenantId = pc.TenantID
 		toolConfig = mergeToolPolicyContext(toolConfig, pc)
+		// exec 调用带审批绑定（tool+args 摘要）与等待预算；批准后到达的
+		// 一次性令牌由 mcp-service 校验，agent-service 只透传指纹。
+		annotateApprovalBinding(toolConfig, toolName, arguments)
 	}
 
 	// Add tool config if provided

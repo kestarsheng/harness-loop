@@ -47,6 +47,12 @@ func (h *MCPHandler) CallTool(ctx context.Context, req *pb.CallToolRequest) (*pb
 	return h.service.CallTool(ctx, req)
 }
 
+// RegisterApprovalToken registers a one-time approval token signed by the
+// harness loop after a human approved an exec call.
+func (h *MCPHandler) RegisterApprovalToken(ctx context.Context, req *pb.RegisterApprovalTokenRequest) (*pb.RegisterApprovalTokenResponse, error) {
+	return h.service.RegisterApprovalToken(ctx, req)
+}
+
 // ListResources lists resources
 func (h *MCPHandler) ListResources(ctx context.Context, req *pb.ListResourcesRequest) (*pb.ListResourcesResponse, error) {
 	return h.service.ListResources(ctx, req)
