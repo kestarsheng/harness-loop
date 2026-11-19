@@ -36,8 +36,31 @@ func TestResolveMatchesContractJoin(t *testing.T) {
 	}
 }
 
-// A href-style or absolute argument must never be silently rebased: the
-// contract check would join it differently than the writer resolved it.
+// An absolute argument that already names a location inside the root must
+// resolve to exactly what the contract checker computes by joining the same
+// relative path onto the root. This is the /task case: workspace=D:\Desktop,
+// path=D:\Desktop\morning_greeting.vbs.
+func TestResolveAcceptsAbsoluteInsideRootAsContractJoin(t *testing.T) {
+	root := t.TempDir()
+	rel := "desktop/morning_greeting.vbs"
+	abs := filepath.Join(root, filepath.FromSlash(rel))
+
+	resolved, err := Resolve(root, abs)
+	if err != nil {
+		t.Fatalf("Resolve(%q): %v", abs, err)
+	}
+	joined := filepath.Join(root, filepath.FromSlash(rel))
+	if evaluated, err := filepath.EvalSymlinks(filepath.Dir(joined)); err == nil {
+		joined = filepath.Join(evaluated, filepath.Base(joined))
+	}
+	if filepath.Clean(resolved) != filepath.Clean(joined) {
+		t.Fatalf("absolute inside root resolves to %s, contract join gives %s", resolved, joined)
+	}
+}
+
+// A href-style or absolute argument outside the root must never be silently
+// rebased: the contract check would join it differently than the writer
+// resolved it.
 func TestResolveRejectsArgumentsTheContractCannotJoin(t *testing.T) {
 	root := t.TempDir()
 	for _, rel := range []string{"../x", "/etc/passwd", `C:\Windows\x.txt`} {

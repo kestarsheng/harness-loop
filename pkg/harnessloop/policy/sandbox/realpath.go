@@ -28,7 +28,9 @@ func resolveWith(root, rel string, eval func(string) (string, error)) (string, e
 	if strings.ContainsRune(rel, 0) {
 		return "", fmt.Errorf("%w: NUL byte in path", ErrUnsafePath)
 	}
-	if strings.HasPrefix(rel, `\\`) || strings.HasPrefix(rel, "//") {
+	// UNC paths (including `\\?\` and `\\.\` device forms) name a share or a
+	// device, not a file inside the workspace, so they stay refused.
+	if isUNCPath(rel) {
 		return "", fmt.Errorf("%w: UNC path is not allowed", ErrUnsafePath)
 	}
 	decoded := rel
@@ -43,18 +45,13 @@ func resolveWith(root, rel string, eval func(string) (string, error)) (string, e
 	if decoded == "" {
 		return "", fmt.Errorf("%w: empty path", ErrUnsafePath)
 	}
+	// Re-check after percent-decoding so `%5c%5cserver` cannot smuggle a UNC
+	// path past the raw-prefix check above.
+	if isUNCPath(decoded) {
+		return "", fmt.Errorf("%w: UNC path is not allowed", ErrUnsafePath)
+	}
 	if hasURLScheme(decoded) {
 		return "", fmt.Errorf("%w: url-style path %q is not allowed", ErrUnsafePath, rel)
-	}
-	if filepath.IsAbs(decoded) || strings.HasPrefix(decoded, "/") || strings.HasPrefix(decoded, `\`) {
-		return "", fmt.Errorf("%w: absolute path %q is not allowed", ErrUnsafePath, rel)
-	}
-	// Parent traversal is refused here rather than left to the escapes-root
-	// check below: when the root is itself a filesystem root (`/`, `C:\`),
-	// joining `..` stays "inside" and the containment test would wave it
-	// through. `.` is unaffected — Clean(".") is ".", not "..".
-	if hasParentTraversal(decoded) {
-		return "", fmt.Errorf("%w: %q escapes workspace root", ErrPathEscape, rel)
 	}
 
 	rootAbs, err := filepath.Abs(root)
@@ -66,6 +63,43 @@ func resolveWith(root, rel string, eval func(string) (string, error)) (string, e
 		rootResolved = rootAbs
 	}
 
+	// Absolute paths are accepted only when they already point inside the
+	// workspace. The agent often names the artifact the way the user did
+	// ("D:\Desktop\morning_greeting.vbs") while workspace_root is "D:\Desktop";
+	// rebasing that onto the root would look for a nested copy, and refusing it
+	// made every /task write against a desktop workspace fail. Normalize
+	// separators and case, resolve links, then apply the same containment test
+	// as relative paths. Anything outside the root keeps E_UNSAFE_PATH.
+	if filepath.IsAbs(decoded) {
+		target := filepath.Clean(filepath.FromSlash(decoded))
+		resolved, err := eval(target)
+		if err != nil {
+			return "", fmt.Errorf("%w: resolve %q: %v", ErrUnsafePath, rel, err)
+		}
+		if !isWithin(rootResolved, resolved) {
+			// A lexical path inside the root that resolves outside is a
+			// symlink/junction escape, not a user naming an outside absolute
+			// path. Keep the same sentinel the relative-path branch uses.
+			if isWithin(rootResolved, target) {
+				return "", fmt.Errorf("%w: %q escapes workspace root via a link", ErrPathEscape, rel)
+			}
+			return "", fmt.Errorf("%w: absolute path %q is not allowed", ErrUnsafePath, rel)
+		}
+		return resolved, nil
+	}
+	// Root-relative paths without a volume ("/etc/passwd", `\Windows`) are
+	// absolute in intent but not filepath.IsAbs on Windows; keep them refused.
+	if strings.HasPrefix(decoded, "/") || strings.HasPrefix(decoded, `\`) {
+		return "", fmt.Errorf("%w: absolute path %q is not allowed", ErrUnsafePath, rel)
+	}
+	// Parent traversal is refused here rather than left to the escapes-root
+	// check below: when the root is itself a filesystem root (`/`, `C:\`),
+	// joining `..` stays "inside" and the containment test would wave it
+	// through. `.` is unaffected — Clean(".") is ".", not "..".
+	if hasParentTraversal(decoded) {
+		return "", fmt.Errorf("%w: %q escapes workspace root", ErrPathEscape, rel)
+	}
+
 	target := filepath.Clean(filepath.Join(rootResolved, filepath.FromSlash(decoded)))
 	resolved, err := eval(target)
 	if err != nil {
@@ -75,6 +109,13 @@ func resolveWith(root, rel string, eval func(string) (string, error)) (string, e
 		return "", fmt.Errorf("%w: %q escapes workspace root", ErrPathEscape, rel)
 	}
 	return resolved, nil
+}
+
+// isUNCPath reports whether p names a UNC share or a `\\?\` / `\\.\` device
+// path. Both separator spellings are checked because callers may hand the guard
+// either form and because decoding can turn `%5c` into a backslash.
+func isUNCPath(p string) bool {
+	return strings.HasPrefix(p, `\\`) || strings.HasPrefix(p, "//")
 }
 
 // hasParentTraversal reports whether a slash-normalized relative path climbs

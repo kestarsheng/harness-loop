@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -94,6 +95,139 @@ func TestFileWriteToolTargetsWorkspaceNotProcessCwd(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(cwd, "artifact-cwd-probe.txt")); !os.IsNotExist(err) {
 		t.Fatalf("artifact leaked into process cwd %s (err=%v)", cwd, err)
+	}
+}
+
+// An agent that names the artifact absolutely must land it in the same place
+// the relative spelling would, because a-stage read_file and c-stage
+// write_file both use whatever path the plan carried.
+func TestFileWriteToolAcceptsAbsolutePathInsideWorkspace(t *testing.T) {
+	root := t.TempDir()
+	abs := filepath.Join(root, "desktop", "morning_greeting.vbs")
+
+	variants := []string{abs, filepath.ToSlash(abs)}
+	if runtime.GOOS == "windows" {
+		variants = append(variants,
+			strings.ToLower(abs),
+			strings.ToUpper(abs),
+			strings.ToUpper(filepath.ToSlash(abs)),
+		)
+	}
+
+	for _, target := range variants {
+		target := target
+		t.Run(target, func(t *testing.T) {
+			audit.Reset()
+			tool := NewFileWriteTool("")
+			out, err := tool.ExecuteWithConfig(context.Background(), map[string]interface{}{
+				"path":    target,
+				"content": "msgbox \"hi\"\n",
+			}, callConfig(t, root))
+			if err != nil {
+				t.Fatalf("write %q: %v", target, err)
+			}
+
+			stored := filepath.Join(root, "desktop", "morning_greeting.vbs")
+			got, err := os.ReadFile(stored)
+			if err != nil {
+				t.Fatalf("artifact not on disk at %s: %v", stored, err)
+			}
+			if string(got) != "msgbox \"hi\"\n" {
+				t.Fatalf("content = %q", got)
+			}
+
+			var result map[string]interface{}
+			if err := json.Unmarshal([]byte(out), &result); err != nil {
+				t.Fatalf("result is not json: %v (%s)", err, out)
+			}
+			if result["path"] != "desktop/morning_greeting.vbs" {
+				t.Fatalf("result path = %v, want the contract-relative path", result["path"])
+			}
+			if len(audit.Records()) != 0 {
+				t.Fatalf("an allowed write must not audit a denial, got %v", audit.Records())
+			}
+		})
+	}
+}
+
+func TestFileReadToolAcceptsAbsolutePathInsideWorkspace(t *testing.T) {
+	audit.Reset()
+	root := t.TempDir()
+	abs := filepath.Join(root, "docs", "a.txt")
+	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(abs, []byte("hello"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	tool := NewFileReadTool("")
+	out, err := tool.ExecuteWithConfig(context.Background(), map[string]interface{}{
+		"path": abs,
+	}, callConfig(t, root))
+	if err != nil {
+		t.Fatalf("read absolute inside root: %v", err)
+	}
+	if !strings.Contains(out, "hello") {
+		t.Fatalf("read output = %q", out)
+	}
+	if !strings.Contains(out, "File: docs/a.txt") {
+		t.Fatalf("read output must report the contract-relative path: %q", out)
+	}
+}
+
+// The absolute-path allowance must not widen the boundary: an absolute path
+// outside the root is still refused and audited, and nothing is written.
+func TestFileWriteToolRejectsAbsolutePathOutsideWorkspace(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "ws")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	outside := filepath.Join(parent, "other", "x.txt")
+
+	cases := []string{
+		outside,
+		filepath.ToSlash(outside),
+		filepath.Join(root, "..", "Windows", "x"),
+		"file:///etc/passwd",
+		`\\server\share\x.txt`,
+		`\\?\C:\Windows\x.txt`,
+		"%5c%5cserver%5cshare%5cx.txt",
+	}
+	if runtime.GOOS == "windows" {
+		cases = append(cases, `D:\Other\x`, `D:\Desktop\..\Windows\x`)
+	}
+	for _, target := range cases {
+		target := target
+		t.Run(target, func(t *testing.T) {
+			audit.Reset()
+			tool := NewFileWriteTool("")
+			_, err := tool.ExecuteWithConfig(context.Background(), map[string]interface{}{
+				"path":    target,
+				"content": "leak",
+			}, callConfig(t, root))
+			if err == nil {
+				t.Fatalf("write %q must be refused", target)
+			}
+			if !errors.Is(err, sandbox.ErrUnsafePath) && !errors.Is(err, sandbox.ErrPathEscape) {
+				t.Fatalf("error must be a sandbox sentinel, got %v", err)
+			}
+			if _, statErr := os.Stat(filepath.Join(parent, "other", "x.txt")); !os.IsNotExist(statErr) {
+				t.Fatalf("escape created a file outside the workspace: %v", statErr)
+			}
+
+			records := audit.Records()
+			if len(records) != 1 {
+				t.Fatalf("denial must leave exactly one audit record, got %d", len(records))
+			}
+			if records[0].Decision != audit.DecisionDeny || records[0].Path != target {
+				t.Fatalf("audit record = %+v", records[0])
+			}
+			if records[0].Code != "E_UNSAFE_PATH" && records[0].Code != policy.CodePathEscape {
+				t.Fatalf("audit code = %q", records[0].Code)
+			}
+		})
 	}
 }
 
