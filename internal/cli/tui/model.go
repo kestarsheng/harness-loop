@@ -91,6 +91,15 @@ type WatchEvent struct {
 	Err   error
 }
 
+// ChatLine is one rendered turn of the direct-chat conversation.
+type ChatLine struct {
+	Role      string // "user" or "assistant"
+	Text      string
+	Err       bool
+	Streaming bool
+	Time      time.Time
+}
+
 type Source interface {
 	Task(ctx context.Context) (TaskState, error)
 	Abort(ctx context.Context) error
@@ -203,6 +212,15 @@ type Model struct {
 	exitRequested bool
 	taskIDs       []string
 
+	// chat is the direct-chat conversation shown by default in a session.
+	// chatMode switches the main view between the conversation and the a~e
+	// stage/event panels; /task flips it off, a plain line flips it on.
+	chat          []ChatLine
+	chatMode      bool
+	chatStreaming bool
+	chatCh        <-chan ChatChunk
+	chatGen       int
+
 	// taskGen tags async messages so a late reply from a previous task can
 	// never be applied to the task now on screen.
 	taskGen    int
@@ -267,6 +285,20 @@ type taskCreatedMsg struct {
 	Err  error
 }
 
+// chatStartedMsg carries the opened reply stream for one direct-chat message.
+type chatStartedMsg struct {
+	Gen int
+	Ch  <-chan ChatChunk
+	Err error
+}
+
+// chatChunkMsg is one chunk read off the direct-chat stream.
+type chatChunkMsg struct {
+	Gen   int
+	Chunk ChatChunk
+	OK    bool
+}
+
 func NewModel(state TaskState, src Source, opts Options) *Model {
 	now := opts.Now
 	if now == nil {
@@ -315,6 +347,9 @@ func NewModel(state TaskState, src Source, opts Options) *Model {
 	}
 	if opts.Session != nil {
 		m.session = opts.Session
+		// A session starts in the conversation: a plain line is answered
+		// directly, only /task opens the a~e stage view.
+		m.chatMode = true
 		m.input = NewPromptModel("Harness Loop", opts.WebURL, PromptOptions{
 			NoColor:   opts.NoColor,
 			Hyperlink: opts.Hyperlink,
@@ -334,11 +369,13 @@ func (m *Model) Init() tea.Cmd {
 		m.awaitingInput = true
 		m.input.Reset()
 		if goal := strings.TrimSpace(m.session.InitialGoal); goal != "" {
-			// Reuse the same dispatcher as typed input so an initial "exit" or
-			// slash command cannot create a task by accident.
-			if _, cmd := m.handleSessionSubmit(goal); cmd != nil {
-				return cmd
+			// --goal / --goal-file keep the one-shot a~e behaviour: the seed
+			// always creates a task, even without a /task prefix. Only exit
+			// words still short-circuit.
+			if DispatchSessionLine(goal).Action != SessionSubmit {
+				return nil
 			}
+			return m.startTaskSubmit(goal)
 		}
 		return nil
 	}
@@ -382,6 +419,29 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case promptQuitMsg:
 		m.exitRequested = true
 		return m, tea.Quit
+
+	case chatStartedMsg:
+		if msg.Gen != m.chatGen {
+			return m, nil
+		}
+		if msg.Err != nil {
+			m.failChat(msg.Err)
+			return m, nil
+		}
+		m.chatCh = msg.Ch
+		return m, m.waitChatCmd(msg.Gen, msg.Ch)
+
+	case chatChunkMsg:
+		if msg.Gen != m.chatGen {
+			return m, nil
+		}
+		if !msg.OK {
+			m.chatCh = nil
+			m.finishChat()
+			return m, nil
+		}
+		m.applyChatChunk(msg.Chunk)
+		return m, m.waitChatCmd(msg.Gen, m.chatCh)
 
 	case taskCreatedMsg:
 		if msg.Err != nil {
@@ -520,25 +580,201 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleSessionSubmit turns an input-box line into either a new task or a
-// session exit, using the same dispatcher as the terminal fallback prompt.
+// handleSessionSubmit turns an input-box line into one of three things:
+// /task <goal> creates a task and shows the a~e stage view, exit ends the
+// session, and anything else is answered directly in the conversation.
 func (m *Model) handleSessionSubmit(line string) (tea.Model, tea.Cmd) {
 	if m.session == nil || !m.awaitingInput {
 		return m, nil
 	}
-	dispatched := DispatchSessionLine(line)
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return m, nil
+	}
+	if goal, ok := taskCommandArg(trimmed); ok {
+		if goal == "" {
+			m.errText = "usage: /task <goal>"
+			return m, nil
+		}
+		return m, m.startTaskSubmit(goal)
+	}
+	dispatched := DispatchSessionLine(trimmed)
 	switch dispatched.Action {
 	case SessionExit:
 		m.exitRequested = true
 		return m, tea.Quit
 	case SessionSubmit:
-		m.awaitingInput = false
-		m.submitting = true
-		m.errText = ""
-		return m, m.createTaskCmd(dispatched.Goal)
+		return m, m.startChatSubmit(dispatched.Goal)
 	default:
 		return m, nil
 	}
+}
+
+// taskCommandPrefix is the only way to reach the a~e loop from the composer.
+const taskCommandPrefix = "/task"
+
+// taskCommandArg reports whether line starts with the /task command and
+// returns the remaining goal text (may be empty when the prefix is bare).
+func taskCommandArg(line string) (string, bool) {
+	lower := strings.ToLower(line)
+	if lower == taskCommandPrefix {
+		return "", true
+	}
+	if !strings.HasPrefix(lower, taskCommandPrefix) {
+		return "", false
+	}
+	rest := line[len(taskCommandPrefix):]
+	if rest == "" || (rest[0] != ' ' && rest[0] != '\t') {
+		// /tasks or /taskfoo are plain chat words, not the command.
+		return "", false
+	}
+	return strings.TrimSpace(rest), true
+}
+
+// startTaskSubmit switches the session into a~e for one goal.
+func (m *Model) startTaskSubmit(goal string) tea.Cmd {
+	m.awaitingInput = false
+	m.submitting = true
+	m.chatMode = false
+	m.errText = ""
+	return m.createTaskCmd(goal)
+}
+
+// startChatSubmit sends one plain message to agent-service and opens an
+// assistant turn that grows as tokens arrive.
+func (m *Model) startChatSubmit(message string) tea.Cmd {
+	cfg := m.session
+	if cfg == nil || cfg.Chat == nil {
+		m.errText = "direct chat is not configured for this session"
+		return nil
+	}
+	m.awaitingInput = false
+	m.submitting = false
+	m.chatMode = true
+	m.errText = ""
+	now := m.now()
+	m.chat = append(m.chat,
+		ChatLine{Role: "user", Text: message, Time: now},
+		ChatLine{Role: "assistant", Streaming: true, Time: now},
+	)
+	m.chatStreaming = true
+	m.chatCh = nil
+	m.chatGen++
+	return m.chatCmd(m.chatGen, message)
+}
+
+func (m *Model) chatCmd(gen int, message string) tea.Cmd {
+	cfg := m.session
+	if cfg == nil || cfg.Chat == nil {
+		return nil
+	}
+	ctx := m.baseCtx()
+	chat := cfg.Chat
+	return func() tea.Msg {
+		ch, err := chat(ctx, message)
+		return chatStartedMsg{Gen: gen, Ch: ch, Err: err}
+	}
+}
+
+func (m *Model) waitChatCmd(gen int, ch <-chan ChatChunk) tea.Cmd {
+	if ch == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		chunk, ok := <-ch
+		return chatChunkMsg{Gen: gen, Chunk: chunk, OK: ok}
+	}
+}
+
+// applyChatChunk folds one streamed chunk into the trailing assistant turn.
+func (m *Model) applyChatChunk(chunk ChatChunk) {
+	switch chunk.Type {
+	case "token":
+		m.appendAssistantText(chunk.Content)
+	case "response":
+		// Legacy alias for streamed text; kept so an older server still works.
+		m.appendAssistantText(chunk.Content)
+	case "final":
+		// final carries the full authoritative reply; replacing (instead of
+		// appending) keeps the text from being duplicated after the tokens.
+		if chunk.Content != "" {
+			m.setAssistantText(chunk.Content)
+		}
+		m.finishChat()
+	case "error":
+		content := strings.TrimSpace(chunk.Content)
+		if content == "" {
+			content = "agent-service returned an error chunk"
+		}
+		m.finishChat()
+		m.chat = append(m.chat, ChatLine{Role: "assistant", Text: content, Err: true, Time: m.now()})
+	case "think", "tool_start", "tool_result", "handoff", "approval":
+		// Reasoning/tool plumbing stays out of the conversation view.
+	default:
+		if chunk.Content != "" {
+			m.appendAssistantText(chunk.Content)
+		}
+	}
+}
+
+func (m *Model) appendAssistantText(text string) {
+	if text == "" {
+		return
+	}
+	for i := len(m.chat) - 1; i >= 0; i-- {
+		if m.chat[i].Role != "assistant" || m.chat[i].Err {
+			continue
+		}
+		m.chat[i].Text += text
+		return
+	}
+	m.chat = append(m.chat, ChatLine{Role: "assistant", Text: text, Streaming: true, Time: m.now()})
+}
+
+func (m *Model) setAssistantText(text string) {
+	for i := len(m.chat) - 1; i >= 0; i-- {
+		if m.chat[i].Role != "assistant" || m.chat[i].Err {
+			continue
+		}
+		m.chat[i].Text = text
+		return
+	}
+	m.chat = append(m.chat, ChatLine{Role: "assistant", Text: text, Time: m.now()})
+}
+
+// finishChat closes the streaming turn and gives the composer back. The read
+// loop keeps draining the channel until the server closes it, so a trailing
+// chunk is never left unread; finishChat is idempotent.
+func (m *Model) finishChat() {
+	m.chatStreaming = false
+	for i := len(m.chat) - 1; i >= 0; i-- {
+		if m.chat[i].Role == "assistant" && m.chat[i].Streaming && !m.chat[i].Err {
+			if strings.TrimSpace(m.chat[i].Text) == "" {
+				m.chat[i].Text = "(empty reply)"
+			}
+			m.chat[i].Streaming = false
+			break
+		}
+	}
+	if m.session != nil && !m.session.ExitOnComplete {
+		m.awaitingInput = true
+		m.submitting = false
+		if m.input != nil {
+			m.input.Reset()
+		}
+	}
+}
+
+// failChat surfaces a stream-open failure instead of silently returning to
+// the prompt.
+func (m *Model) failChat(err error) {
+	m.finishChat()
+	m.chat = append(m.chat, ChatLine{
+		Role: "assistant",
+		Text: "chat failed: " + err.Error(),
+		Err:  true,
+		Time: m.now(),
+	})
 }
 
 // terminalCmd decides what happens when the current task reaches a terminal
@@ -571,6 +807,12 @@ func (m *Model) startTask(state TaskState, src Source) {
 	m.state = state
 	m.src = src
 	m.taskGen++
+	// A task takes over the screen: the conversation view is hidden and any
+	// in-flight chat chunk is dropped on arrival.
+	m.chatGen++
+	m.chatCh = nil
+	m.chatStreaming = false
+	m.chatMode = false
 	m.watchCh = nil
 	m.terminal = false
 	m.awaitingInput = false
@@ -732,7 +974,14 @@ func (m *Model) View() string {
 	parts := make([]string, 0, 7)
 	// Claude-style chrome: wordmark first, then the task header. The monitor
 	// board URL bar is gone (T-P2-42); "o" still opens it in the browser.
-	parts = append(parts, views.RenderLogo(m.theme.NoColor), views.RenderHeader(m.stageData()))
+	parts = append(parts, views.RenderLogo(m.theme.NoColor))
+	if m.chatMode && m.session != nil {
+		// The conversation is the whole session: no task header, the /task
+		// hint replaces it.
+		parts = append(parts, " Harness Loop · direct chat · /task <goal> for a~e")
+	} else {
+		parts = append(parts, views.RenderHeader(m.stageData()))
+	}
 	switch m.mode {
 	case ViewLogs:
 		parts = append(parts, views.RenderLogs(m.events, width, m.height-4, m.theme))
@@ -756,6 +1005,19 @@ func (m *Model) View() string {
 	case ViewKB:
 		parts = append(parts, views.RenderKB(m.kbData(), width, maxLinesFor(m.height-5, 12), m.theme))
 	default:
+		if m.chatMode && m.session != nil {
+			// Default session view: the conversation, not the a~e panels.
+			fixed := 8 // logo + header + chat header + footer
+			if m.session != nil && m.awaitingInput {
+				fixed += 3 // blank line + rounded composer box + key hints
+			}
+			chatMax := m.height - fixed
+			if chatMax < 6 {
+				chatMax = 12
+			}
+			parts = append(parts, views.RenderChat(m.chatLines(), width, chatMax, m.theme))
+			break
+		}
 		parts = append(parts, views.RenderStage(m.stageData()))
 		fixed := 8 // logo + header + 5 stage rows + footer
 		if m.session != nil && m.awaitingInput {
@@ -788,7 +1050,11 @@ func (m *Model) View() string {
 			if m.errText != "" {
 				parts = append(parts, "  "+m.errText)
 			}
-			parts = append(parts, "  Enter submit   exit end session   Esc clear")
+			if m.chatMode {
+				parts = append(parts, "  Enter submit   /task <goal> runs a~e   exit end session   Esc clear")
+			} else {
+				parts = append(parts, "  Enter submit   exit end session   Esc clear")
+			}
 		case m.submitting && m.state.TaskID == "":
 			parts = append(parts, "", "  creating task…")
 		}
@@ -848,6 +1114,24 @@ func (m *Model) modeName() string {
 	default:
 		return "main"
 	}
+}
+
+// chatLines maps the conversation onto the view-layer type.
+func (m *Model) chatLines() []views.ChatMessage {
+	if len(m.chat) == 0 {
+		return nil
+	}
+	out := make([]views.ChatMessage, 0, len(m.chat))
+	for _, line := range m.chat {
+		out = append(out, views.ChatMessage{
+			Role:      line.Role,
+			Text:      line.Text,
+			Err:       line.Err,
+			Streaming: line.Streaming,
+			Time:      line.Time,
+		})
+	}
+	return out
 }
 
 func (m *Model) stageData() views.StageData {

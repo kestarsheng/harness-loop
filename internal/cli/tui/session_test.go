@@ -64,7 +64,7 @@ func TestSessionTerminalReturnsToInputAndAcceptsSecondTask(t *testing.T) {
 		t.Fatal("a fresh session must wait at the input box")
 	}
 
-	m = submitLine(t, typeLine(t, m, "first goal"))
+	m = submitLine(t, typeLine(t, m, "/task first goal"))
 	if len(goals) != 1 || goals[0] != "first goal" {
 		t.Fatalf("factory goals = %v", goals)
 	}
@@ -88,7 +88,7 @@ func TestSessionTerminalReturnsToInputAndAcceptsSecondTask(t *testing.T) {
 	}
 
 	// Second submission in the same session creates a second task.
-	m = submitLine(t, typeLine(t, m, "second goal"))
+	m = submitLine(t, typeLine(t, m, "/task second goal"))
 	if len(goals) != 2 || goals[1] != "second goal" {
 		t.Fatalf("factory goals = %v", goals)
 	}
@@ -124,7 +124,7 @@ func TestSessionExitOnCompleteKeepsLegacyBehaviour(t *testing.T) {
 		return &harnesspb.TaskView{TaskId: "task-1", Status: "running", CurrentStage: "a"}, nil
 	}
 	m := sessionModel(t, SessionConfig{ExitOnComplete: true, CreateTask: factory})
-	m = submitLine(t, typeLine(t, m, "legacy goal"))
+	m = submitLine(t, typeLine(t, m, "/task legacy goal"))
 
 	_, quit := completeTask(t, m, "task-1")
 	if quit == nil {
