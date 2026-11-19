@@ -104,7 +104,8 @@ func New(root string, contract *Contract) *Manager {
 }
 
 // Ensure probes harnessloop (127.0.0.1:50013) and reuses the stack when it is
-// already healthy; otherwise it brings the whole contract up.
+// already healthy; otherwise it brings the whole contract up. It keeps the
+// whole-stack semantics of `dev`: all 14 items, vite included.
 func (m *Manager) Ensure(ctx context.Context) (*Report, error) {
 	if err := m.check(); err != nil {
 		return nil, err
@@ -114,31 +115,109 @@ func (m *Manager) Ensure(ctx context.Context) (*Report, error) {
 		return nil, fmt.Errorf("devstack: contract has no %q item", "harnessloop")
 	}
 	if healthy, _ := m.Prober.Healthy(ctx, loop); healthy {
-		rep, err := m.Status(ctx)
-		if err != nil {
-			return nil, err
-		}
+		rep := m.statusItems(ctx, m.Contract.Items)
 		rep.Reused = true
 		return rep, nil
 	}
-	return m.Up(ctx)
+	return m.up(ctx, m.Contract.Items)
+}
+
+// EnsureGroups is Ensure restricted to groups. The 50013 harnessloop probe
+// stays the reuse signal whenever harnessloop is part of the selection (that is
+// what `loop` asks for: infra+agent); a selection without it (e.g. board only)
+// reuses only when every selected item already probes healthy.
+//
+// `loop` uses EnsureGroups(GroupInfra, GroupAgent) so a cold start never
+// launches the board: the board is `loop start`'s business alone.
+func (m *Manager) EnsureGroups(ctx context.Context, groups ...string) (*Report, error) {
+	if err := m.check(); err != nil {
+		return nil, err
+	}
+	items, err := m.itemsInGroups(groups)
+	if err != nil {
+		return nil, err
+	}
+	if loop, ok := m.Contract.HarnessLoop(); ok && containsItem(items, loop.Name) {
+		if healthy, _ := m.Prober.Healthy(ctx, loop); healthy {
+			rep := m.statusItems(ctx, items)
+			rep.Reused = true
+			return rep, nil
+		}
+		return m.up(ctx, items)
+	}
+	rep := m.statusItems(ctx, items)
+	if rep.healthy() {
+		rep.Reused = true
+		return rep, nil
+	}
+	return m.up(ctx, items)
+}
+
+// itemsInGroups resolves groups to contract items in contract order. Unknown
+// group names are rejected so a typo cannot quietly select nothing.
+func (m *Manager) itemsInGroups(groups []string) ([]Item, error) {
+	if len(groups) == 0 {
+		return nil, errors.New("devstack: no groups given")
+	}
+	for _, g := range groups {
+		if !ValidGroup(strings.TrimSpace(g)) {
+			return nil, fmt.Errorf("devstack: unknown group %q (want one of %s/%s/%s)",
+				g, GroupInfra, GroupAgent, GroupBoard)
+		}
+	}
+	items := m.Contract.ItemsInGroups(groups...)
+	if len(items) == 0 {
+		return nil, fmt.Errorf("devstack: no contract item belongs to %v", groups)
+	}
+	return items, nil
+}
+
+func containsItem(items []Item, name string) bool {
+	for _, it := range items {
+		if it.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // Up starts every contract item that is not already healthy, in contract order.
 // Items that probe healthy are reused and never restarted, which makes a second
 // call a no-op. On failure, processes started by this call are rolled back.
+//
+// Up keeps the whole-stack semantics of `dev up`: all 14 items, vite included.
+// Use UpGroups to start a subset.
 func (m *Manager) Up(ctx context.Context) (*Report, error) {
 	if err := m.check(); err != nil {
 		return nil, err
 	}
+	return m.up(ctx, m.Contract.Items)
+}
+
+// UpGroups starts only the items belonging to groups, in contract order, with
+// the same reuse/health/rollback rules as Up. Unknown group names are an error
+// so a typo cannot quietly start nothing.
+func (m *Manager) UpGroups(ctx context.Context, groups ...string) (*Report, error) {
+	if err := m.check(); err != nil {
+		return nil, err
+	}
+	items, err := m.itemsInGroups(groups)
+	if err != nil {
+		return nil, err
+	}
+	return m.up(ctx, items)
+}
+
+// up is the shared engine for Up/UpGroups: it walks items in contract order.
+func (m *Manager) up(ctx context.Context, items []Item) (*Report, error) {
 	if err := m.ensureDirs(); err != nil {
 		return nil, err
 	}
 
-	rep := &Report{Items: make([]ItemStatus, 0, len(m.Contract.Items))}
+	rep := &Report{Items: make([]ItemStatus, 0, len(items))}
 	var started []launched
 
-	for _, item := range m.Contract.Items {
+	for _, item := range items {
 		st := ItemStatus{Name: item.Name, Kind: item.Kind, Port: item.Port}
 
 		if healthy, detail := m.Prober.Healthy(ctx, item); healthy {
@@ -261,8 +340,13 @@ func (m *Manager) Status(ctx context.Context) (*Report, error) {
 	if err := m.check(); err != nil {
 		return nil, err
 	}
-	rep := &Report{Items: make([]ItemStatus, 0, len(m.Contract.Items))}
-	for _, item := range m.Contract.Items {
+	return m.statusItems(ctx, m.Contract.Items), nil
+}
+
+// statusItems probes exactly items without changing anything.
+func (m *Manager) statusItems(ctx context.Context, items []Item) *Report {
+	rep := &Report{Items: make([]ItemStatus, 0, len(items))}
+	for _, item := range items {
 		st := ItemStatus{Name: item.Name, Kind: item.Kind, Port: item.Port}
 		st.Healthy, st.Detail = m.Prober.Healthy(ctx, item)
 		if item.IsProcess() {
@@ -270,7 +354,7 @@ func (m *Manager) Status(ctx context.Context) (*Report, error) {
 		}
 		rep.Items = append(rep.Items, st)
 	}
-	return rep, nil
+	return rep
 }
 
 // Healthy reports whether the last report has every item healthy.

@@ -315,6 +315,167 @@ func TestEnsureStartsWhenHarnessLoopDown(t *testing.T) {
 	}
 }
 
+// TestEnsureGroupsStartsInfraAndAgentOnly is the T-P2-40 core: a cold `loop`
+// brings up 13 items and never touches vite.
+func TestEnsureGroupsStartsInfraAndAgentOnly(t *testing.T) {
+	m, _, runner := newTestManager(t)
+	rep, err := m.EnsureGroups(context.Background(), GroupInfra, GroupAgent)
+	if err != nil {
+		t.Fatalf("EnsureGroups: %v", err)
+	}
+	if rep.Reused {
+		t.Fatal("EnsureGroups must not report reuse on a cold start")
+	}
+	if len(rep.Items) != 13 {
+		t.Fatalf("items = %d, want 13 (14 minus the board)", len(rep.Items))
+	}
+	for _, it := range rep.Items {
+		if it.Name == "vite" {
+			t.Fatalf("EnsureGroups(infra,agent) must not include vite: %+v", rep.Items)
+		}
+		if !it.Healthy || !it.Started {
+			t.Fatalf("%s status = %+v", it.Name, it)
+		}
+	}
+	_, starts, _ := runner.snapshot()
+	if indexOf(starts, "vite") >= 0 {
+		t.Fatalf("vite started by EnsureGroups(infra,agent): %v", starts)
+	}
+	if len(starts) != 9 {
+		t.Fatalf("process starts = %v, want the 9 services", starts)
+	}
+	for _, cmd := range runner.commandSnapshot() {
+		if strings.Contains(cmd, "vite") {
+			t.Fatalf("vite command issued by EnsureGroups(infra,agent): %q", cmd)
+		}
+	}
+}
+
+// TestUpGroupsStartsOnlySelectedGroup checks the filter itself: board alone
+// launches exactly the board item.
+func TestUpGroupsStartsOnlySelectedGroup(t *testing.T) {
+	m, prober, runner := newTestManager(t)
+	rep, err := m.UpGroups(context.Background(), GroupBoard)
+	if err != nil {
+		t.Fatalf("UpGroups(board): %v", err)
+	}
+	if len(rep.Items) != 1 || rep.Items[0].Name != "vite" {
+		t.Fatalf("board group items = %+v, want only vite", rep.Items)
+	}
+	runs, starts, _ := runner.snapshot()
+	if len(runs) != 0 {
+		t.Fatalf("no container must start for the board group: %v", runs)
+	}
+	if strings.Join(starts, ",") != "vite" {
+		t.Fatalf("starts = %v, want [vite]", starts)
+	}
+	if prober.get("postgres") {
+		t.Fatal("infra must stay untouched when only the board group is selected")
+	}
+}
+
+// TestUpGroupsIsIdempotent mirrors TestUpIsIdempotent for a subset.
+func TestUpGroupsIsIdempotent(t *testing.T) {
+	m, _, runner := newTestManager(t)
+	if _, err := m.UpGroups(context.Background(), GroupInfra, GroupAgent); err != nil {
+		t.Fatalf("first UpGroups: %v", err)
+	}
+	_, startsAfterFirst, _ := runner.snapshot()
+	rep, err := m.UpGroups(context.Background(), GroupInfra, GroupAgent)
+	if err != nil {
+		t.Fatalf("second UpGroups: %v", err)
+	}
+	for _, it := range rep.Items {
+		if !it.Reused || it.Started {
+			t.Fatalf("second UpGroups must reuse %s: %+v", it.Name, it)
+		}
+	}
+	_, startsAfterSecond, kills := runner.snapshot()
+	if len(startsAfterSecond) != len(startsAfterFirst) {
+		t.Fatalf("second UpGroups restarted items: %v -> %v", startsAfterFirst, startsAfterSecond)
+	}
+	if len(kills) != 0 {
+		t.Fatalf("second UpGroups killed processes: %v", kills)
+	}
+}
+
+// TestEnsureGroupsReusesOn50013Probe keeps the documented reuse signal: the
+// harnessloop probe, even when other items are down.
+func TestEnsureGroupsReusesOn50013Probe(t *testing.T) {
+	m, prober, runner := newTestManager(t)
+	prober.set("harnessloop", true)
+	rep, err := m.EnsureGroups(context.Background(), GroupInfra, GroupAgent)
+	if err != nil {
+		t.Fatalf("EnsureGroups: %v", err)
+	}
+	if !rep.Reused {
+		t.Fatal("EnsureGroups must report reuse when 50013 is healthy")
+	}
+	if len(rep.Items) != 13 {
+		t.Fatalf("status items = %d, want 13", len(rep.Items))
+	}
+	runs, starts, _ := runner.snapshot()
+	if len(runs)+len(starts) != 0 {
+		t.Fatalf("EnsureGroups started items on a healthy stack: runs=%v starts=%v", runs, starts)
+	}
+}
+
+// A selection without harnessloop cannot use the 50013 probe; it must fall back
+// to "all selected healthy" instead of reporting a bogus reuse.
+func TestEnsureGroupsWithoutHarnessLoopFallsBackToPerItemHealth(t *testing.T) {
+	m, prober, runner := newTestManager(t)
+	prober.set("harnessloop", true) // healthy, but outside the selection
+	rep, err := m.EnsureGroups(context.Background(), GroupBoard)
+	if err != nil {
+		t.Fatalf("EnsureGroups: %v", err)
+	}
+	if rep.Reused {
+		t.Fatal("board-only selection must not reuse on the 50013 probe")
+	}
+	if len(rep.Items) != 1 || rep.Items[0].Name != "vite" || !rep.Items[0].Started {
+		t.Fatalf("board-only report = %+v", rep.Items)
+	}
+	if _, starts, _ := runner.snapshot(); strings.Join(starts, ",") != "vite" {
+		t.Fatalf("starts = %v", starts)
+	}
+}
+
+func TestGroupsRejectUnknownOrEmptySelection(t *testing.T) {
+	m, _, runner := newTestManager(t)
+	if _, err := m.UpGroups(context.Background(), "vm"); err == nil {
+		t.Fatal("UpGroups must reject an unknown group")
+	}
+	if _, err := m.EnsureGroups(context.Background(), "vm"); err == nil {
+		t.Fatal("EnsureGroups must reject an unknown group")
+	}
+	if _, err := m.UpGroups(context.Background()); err == nil {
+		t.Fatal("UpGroups must reject an empty group list")
+	}
+	if _, err := m.EnsureGroups(context.Background()); err == nil {
+		t.Fatal("EnsureGroups must reject an empty group list")
+	}
+	runs, starts, _ := runner.snapshot()
+	if len(runs)+len(starts) != 0 {
+		t.Fatalf("a rejected group must start nothing: runs=%v starts=%v", runs, starts)
+	}
+}
+
+// Up keeps the whole-stack semantics: 14 items, vite included.
+func TestUpStillStartsAll14IncludingBoard(t *testing.T) {
+	m, _, runner := newTestManager(t)
+	rep, err := m.Up(context.Background())
+	if err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	if len(rep.Items) != 14 {
+		t.Fatalf("items = %d, want 14", len(rep.Items))
+	}
+	_, starts, _ := runner.snapshot()
+	if indexOf(starts, "vite") < 0 {
+		t.Fatalf("dev up must still start vite: %v", starts)
+	}
+}
+
 func TestMissingHarnessLoopItemFails(t *testing.T) {
 	m, _, _ := newTestManager(t)
 	m.Contract = &Contract{Version: SupportedVersion, Items: []Item{{

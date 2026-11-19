@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "description": "本地开发栈声明式契约：14 项 = 4 个数据容器 + 9 个微服务 + vite。dev-up.sh / dev-down.sh 与 T-P2-21 的 harness-cli 自举共用此文件，任何启停项必须与脚本逐项一致。",
+  "description": "本地开发栈声明式契约：14 项 = 4 个数据容器 + 9 个微服务 + vite。dev-up.sh / dev-down.sh 与 T-P2-21 的 harness-cli 自举共用此文件，任何启停项必须与脚本逐项一致。group 用于按组启动：infra（4 个数据容器 + redis）、agent（9 个服务）、board（vite，看板，board:true）。",
   "tenant": "tenant-devfull",
   "defaults": {
     "dev_dir": ".harness/dev",
@@ -13,6 +13,7 @@
     {
       "name": "postgres",
       "kind": "container",
+      "group": "infra",
       "port": 55432,
       "command": "docker compose -f docker/docker-compose.data.yaml up -d postgres",
       "config_template": null,
@@ -22,6 +23,7 @@
     {
       "name": "mongo",
       "kind": "container",
+      "group": "infra",
       "port": 27017,
       "command": "docker compose -f docker/docker-compose.data.yaml up -d mongo",
       "config_template": null,
@@ -31,6 +33,7 @@
     {
       "name": "qdrant",
       "kind": "container",
+      "group": "infra",
       "port": 6333,
       "command": "docker compose -f docker/docker-compose.data.yaml up -d qdrant",
       "config_template": null,
@@ -40,6 +43,7 @@
     {
       "name": "redis",
       "kind": "container",
+      "group": "infra",
       "port": 56379,
       "command": "docker run -d --name hlp-dev-redis -p 56379:6379 redis:7-alpine",
       "config_template": null,
@@ -49,6 +53,7 @@
     {
       "name": "memory",
       "kind": "process",
+      "group": "agent",
       "port": 50003,
       "command": ".harness/dev/bin/memory-service",
       "config_template": "services/memory-service/config.example.yaml",
@@ -65,6 +70,7 @@
     {
       "name": "knowledge",
       "kind": "process",
+      "group": "agent",
       "port": 50002,
       "command": ".harness/dev/bin/knowledge-service",
       "config_template": "services/knowledge-service/config.example.yaml",
@@ -76,6 +82,7 @@
     {
       "name": "chat",
       "kind": "process",
+      "group": "agent",
       "port": 50001,
       "command": ".harness/dev/bin/chat-service",
       "config_template": "services/chat-service/config.example.yaml",
@@ -90,6 +97,7 @@
     {
       "name": "a2a",
       "kind": "process",
+      "group": "agent",
       "port": 50004,
       "command": ".harness/dev/bin/a2a-service",
       "config_template": "services/a2a-service/config.example.yaml",
@@ -104,6 +112,7 @@
     {
       "name": "mcp",
       "kind": "process",
+      "group": "agent",
       "port": 50005,
       "command": ".harness/dev/bin/mcp-service",
       "config_template": "services/mcp-service/config.example.yaml",
@@ -115,6 +124,7 @@
     {
       "name": "harness-service",
       "kind": "process",
+      "group": "agent",
       "pid_name": "harness-svc",
       "port": 50007,
       "command": ".harness/dev/bin/harness-service",
@@ -127,6 +137,7 @@
     {
       "name": "agent",
       "kind": "process",
+      "group": "agent",
       "port": 50006,
       "http_port": 50009,
       "command": ".harness/dev/bin/agent-service",
@@ -145,6 +156,7 @@
     {
       "name": "harnessloop",
       "kind": "process",
+      "group": "agent",
       "port": 50013,
       "command": ".harness/dev/bin/harnessloop-service -config .harness/dev/conf/harnessloop.yaml",
       "config_template": "services/harnessloop-service/config.example.yaml",
@@ -160,6 +172,7 @@
     {
       "name": "gateway",
       "kind": "process",
+      "group": "agent",
       "port": 9000,
       "command": ".harness/dev/bin/gateway",
       "config_template": "services/gateway/config.example.yaml",
@@ -171,6 +184,7 @@
     {
       "name": "vite",
       "kind": "frontend",
+      "group": "board",
       "port": 5174,
       "command": "node frontend/node_modules/vite/bin/vite.js frontend --host 127.0.0.1 --port 5174 --strictPort",
       "config_template": null,

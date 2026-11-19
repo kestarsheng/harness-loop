@@ -47,15 +47,19 @@ func newLoopCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "loop",
-		Short: "Start a resident Harness Loop session and show the fixed monitor board",
-		Long: "Start one resident Harness Loop session.\n\n" +
+		Short: "Open the resident Harness Loop agent session (TUI only)",
+		Long: "Start one resident Harness Loop session in this terminal: the agent " +
+			"conversation TUI.\n\n" +
 			"Each line you submit in the session creates a task; when a task reaches " +
 			"a terminal state the interface returns to the input box. Type exit (or " +
 			"/harness loop exit) to end only this terminal. Use --exit-on-complete " +
 			"for the legacy one-task-then-exit behaviour.\n\n" +
-			"The dev stack is probed on 127.0.0.1:50013 first: a healthy stack is " +
-			"reused, a cold one is brought up automatically, so `dev up` is never a " +
-			"prerequisite. Use `loop start`/`loop stop` to manage the shared board.",
+			"Only the agent side of the stack is ensured: the data containers and the " +
+			"9 services (groups infra+agent) are probed on 127.0.0.1:50013, a healthy " +
+			"stack is reused and a cold one is started without vite, so `dev up` is " +
+			"never a prerequisite.\n\n" +
+			"This command does not manage the monitor board and never prints its URL. " +
+			"Run `loop start` for the board (and its URL), `loop stop` to release it.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if goalFile != "" {
 				raw, err := os.ReadFile(goalFile)
@@ -68,13 +72,12 @@ func newLoopCmd() *cobra.Command {
 				return fmt.Errorf("loop requires an interactive terminal; use `harness-cli run` in non-interactive contexts")
 			}
 
-			// T-P2-21 leftover: a cold `loop` must be self-sufficient.
+			// T-P2-21 leftover: a cold `loop` must be self-sufficient. It only
+			// ensures infra+agent — the board belongs to `loop start`.
 			if err := ensureBackend(cmd, stackRoot, contractPath, cmd.ErrOrStderr()); err != nil {
 				fmt.Fprintf(cmd.ErrOrStderr(), "warning: dev stack not ready: %v\n", err)
 			}
 
-			cfg := loadFileConfig(opts.Config)
-			monitorURL := tui.URLFor(resolveWebBaseURL(cfg))
 			hyperlink := tui.HyperlinkSupported(isatty.IsTerminal(os.Stdout.Fd()), os.Getenv)
 
 			if strings.TrimSpace(workspace) == "" {
@@ -100,9 +103,9 @@ func newLoopCmd() *cobra.Command {
 				timeout:    timeout,
 			}
 			if exitOnComplete {
-				return runLoopOnce(cmd, client, tenant, monitorURL, hyperlink, spec)
+				return runLoopOnce(cmd, client, tenant, hyperlink, spec)
 			}
-			return runLoopSession(cmd, client, tenant, monitorURL, hyperlink, spec)
+			return runLoopSession(cmd, client, tenant, hyperlink, spec)
 		},
 	}
 
@@ -121,9 +124,11 @@ func newLoopCmd() *cobra.Command {
 	return cmd
 }
 
-// ensureBackend makes a cold `loop` self-sufficient: it probes
-// 127.0.0.1:50013 and only on failure calls devstack.Ensure. A running stack is
-// reused untouched, so `loop` never requires a manual `dev up` first.
+// ensureBackend makes a cold `loop` self-sufficient without touching the board:
+// it probes 127.0.0.1:50013 (harnessloop) and only on failure calls
+// devstack.EnsureGroups(infra, agent). A running stack is reused untouched, so
+// `loop` never requires a manual `dev up` first, and vite is never started here
+// — the board is `loop start`'s job.
 func ensureBackend(cmd *cobra.Command, stackRoot, contractPath string, out io.Writer) error {
 	m, err := newDevManager(stackRoot, contractPath)
 	if err != nil {
@@ -142,8 +147,9 @@ func ensureBackend(cmd *cobra.Command, stackRoot, contractPath string, out io.Wr
 		return nil
 	}
 
-	fmt.Fprintf(out, "devstack: %s is down, starting the stack from %s\n", addr, m.Root)
-	rep, err := m.Ensure(cmd.Context())
+	fmt.Fprintf(out, "devstack: %s is down, starting the stack (groups %s+%s) from %s\n",
+		addr, devstack.GroupInfra, devstack.GroupAgent, m.Root)
+	rep, err := m.EnsureGroups(cmd.Context(), devstack.GroupInfra, devstack.GroupAgent)
 	if rep != nil {
 		ready := 0
 		for _, it := range rep.Items {
@@ -181,11 +187,15 @@ func newLoopStartCmd() *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "start",
-		Short: "Start or reuse the single shared monitor board and print its URL",
-		Long: "Register this terminal on the shared monitor board.\n\n" +
-			"The board is a singleton: the first call launches the process on its fixed " +
-			"port, every later call only records one more reference and prints the same " +
-			"URL. Registering twice from the same terminal does not add a second ref.",
+		Short: "Start or reuse the shared monitor board and print its URL",
+		Long: "Start or reuse the single shared monitor board and print its URL.\n\n" +
+			"This is the only command that manages and reports the board: it starts " +
+			"(or reuses) the vite process on its fixed port and prints the URL every " +
+			"terminal shares. It does not open the agent session TUI — use `loop` " +
+			"for that.\n\n" +
+			"The board is a singleton: the first call launches the process, every " +
+			"later call only records one more reference and prints the same URL. " +
+			"Registering twice from the same terminal does not add a second ref.",
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			b, err := newBoard(stackRoot, contractPath)
@@ -290,7 +300,10 @@ func boardStateWord(st *devstack.BoardState) string {
 
 // runLoopSession is the resident default: submit as many goals as needed and
 // return to the input box after every terminal state.
-func runLoopSession(cmd *cobra.Command, client harnesspb.HarnessLoopServiceClient, tenant, monitorURL string, hyperlink bool, spec loopSpec) error {
+//
+// The session never receives a board URL: `loop` is the agent conversation only
+// and `loop start` is the single command that prints the monitor URL.
+func runLoopSession(cmd *cobra.Command, client harnesspb.HarnessLoopServiceClient, tenant string, hyperlink bool, spec loopSpec) error {
 	initialGoal := ""
 	switch dispatched := tui.DispatchSessionLine(spec.goal); dispatched.Action {
 	case tui.SessionExit:
@@ -330,7 +343,7 @@ func runLoopSession(cmd *cobra.Command, client harnesspb.HarnessLoopServiceClien
 
 	result, tuiErr := tui.RunSession(runCtx, client, tenant, tui.RunOptions{
 		NoColor:      opts.NoColor,
-		WebURL:       monitorURL,
+		WebURL:       "",
 		Hyperlink:    hyperlink,
 		KB:           kbSrc,
 		InitialView:  os.Getenv("HARNESS_TUI_VIEW"),
@@ -354,16 +367,15 @@ func runLoopSession(cmd *cobra.Command, client harnesspb.HarnessLoopServiceClien
 	if len(result.TaskIDs) == 0 {
 		fmt.Fprintf(cmd.OutOrStdout(), "tasks=0\n")
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "monitor=%s\n", monitorURL)
 	return nil
 }
 
 // runLoopOnce keeps the original one-task-then-exit behaviour behind
 // --exit-on-complete.
-func runLoopOnce(cmd *cobra.Command, client harnesspb.HarnessLoopServiceClient, tenant, monitorURL string, hyperlink bool, spec loopSpec) error {
+func runLoopOnce(cmd *cobra.Command, client harnesspb.HarnessLoopServiceClient, tenant string, hyperlink bool, spec loopSpec) error {
 	goal := spec.goal
 	if strings.TrimSpace(goal) == "" {
-		entered, canceled, err := tui.RunPrompt(cmd.Context(), "Harness Loop", monitorURL, tui.PromptOptions{
+		entered, canceled, err := tui.RunPrompt(cmd.Context(), "Harness Loop", "", tui.PromptOptions{
 			NoColor:   opts.NoColor,
 			Hyperlink: hyperlink,
 		})
@@ -410,14 +422,14 @@ func runLoopOnce(cmd *cobra.Command, client harnesspb.HarnessLoopServiceClient, 
 	}
 	result, tuiErr := tui.Run(runCtx, client, tenant, created.Task, tui.RunOptions{
 		NoColor:      opts.NoColor,
-		WebURL:       monitorURL,
+		WebURL:       "",
 		Hyperlink:    hyperlink,
 		KB:           kbSrc,
 		InitialView:  os.Getenv("HARNESS_TUI_VIEW"),
 		InitialQuery: os.Getenv("HARNESS_TUI_KB_QUERY"),
 	})
 
-	fmt.Fprintf(cmd.OutOrStdout(), "task_id=%s\nmonitor=%s\n", taskID, monitorURL)
+	fmt.Fprintf(cmd.OutOrStdout(), "task_id=%s\n", taskID)
 	if tuiErr != nil {
 		if runCtx.Err() == context.DeadlineExceeded {
 			emit(cmd, output.Failure("E_TIMEOUT", "task did not reach a terminal state before --timeout", nil))
