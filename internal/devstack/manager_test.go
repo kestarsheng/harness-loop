@@ -45,6 +45,7 @@ type fakeRunner struct {
 	mu        sync.Mutex
 	prober    *fakeProber
 	runs      []string
+	commands  []string
 	starts    []string
 	kills     []int
 	listeners map[int]int
@@ -52,6 +53,7 @@ type fakeRunner struct {
 	failRun   map[string]error
 	failStart map[string]error
 	noHealth  map[string]bool
+	existing  map[string]bool
 	nextPID   int
 }
 
@@ -63,6 +65,7 @@ func newFakeRunner(prober *fakeProber, contract *Contract) *fakeRunner {
 		failRun:   map[string]error{},
 		failStart: map[string]error{},
 		noHealth:  map[string]bool{},
+		existing:  map[string]bool{},
 		nextPID:   1000,
 	}
 	for _, it := range contract.Items {
@@ -71,9 +74,25 @@ func newFakeRunner(prober *fakeProber, contract *Contract) *fakeRunner {
 	return r
 }
 
+func (r *fakeRunner) setExisting(name string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.existing[name] = true
+}
+
 func (r *fakeRunner) Run(_ context.Context, spec LaunchSpec) error {
+	if strings.HasPrefix(spec.Command, "docker start ") {
+		name := strings.TrimPrefix(spec.Command, "docker start ")
+		r.mu.Lock()
+		exists := r.existing[name]
+		r.mu.Unlock()
+		if !exists {
+			return errors.New("No such container: " + name)
+		}
+	}
 	r.mu.Lock()
 	r.runs = append(r.runs, spec.Name)
+	r.commands = append(r.commands, spec.Command)
 	err := r.failRun[spec.Name]
 	noHealth := r.noHealth[spec.Name]
 	r.mu.Unlock()
@@ -127,6 +146,12 @@ func (r *fakeRunner) snapshot() (runs, starts []string, kills []int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]string(nil), r.runs...), append([]string(nil), r.starts...), append([]int(nil), r.kills...)
+}
+
+func (r *fakeRunner) commandSnapshot() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.commands...)
 }
 
 func newTestManager(t *testing.T) (*Manager, *fakeProber, *fakeRunner) {
@@ -187,6 +212,40 @@ func TestUpStartsAll14AndWritesPIDs(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(m.Dirs.Run, "harness-svc.pid")); err != nil {
 		t.Fatalf("harness-service pid file must use pid_name: %v", err)
+	}
+}
+
+func TestUpRestartsExistingStoppedContainer(t *testing.T) {
+	m, prober, runner := newTestManager(t)
+	for _, it := range m.Contract.Items {
+		if it.Name != "redis" {
+			prober.set(it.Name, true)
+		}
+	}
+	// redis 的容器仍存在但已停止（dev-down --keep-db / loop stop 的常见状态）。
+	runner.setExisting("hlp-dev-redis")
+
+	rep, err := m.Up(context.Background())
+	if err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	if !prober.get("redis") {
+		t.Fatalf("redis not healthy after restart: %+v", rep.Items)
+	}
+	var started, ran bool
+	for _, cmd := range runner.commandSnapshot() {
+		if cmd == "docker start hlp-dev-redis" {
+			started = true
+		}
+		if strings.HasPrefix(cmd, "docker run ") && strings.Contains(cmd, "--name hlp-dev-redis") {
+			ran = true
+		}
+	}
+	if !started {
+		t.Fatal("existing stopped container must be started with docker start")
+	}
+	if ran {
+		t.Fatal("existing container must not be re-created with docker run (exit 125)")
 	}
 }
 
@@ -464,5 +523,30 @@ func TestTimeoutForKind(t *testing.T) {
 	m.StartTimeout = time.Second
 	if got := m.timeoutFor(Item{Kind: KindContainer}); got != time.Second {
 		t.Fatalf("override timeout = %s", got)
+	}
+}
+
+func TestResolveCommandAddsExeOnWindows(t *testing.T) {
+	root := t.TempDir()
+	bin := filepath.Join(root, ".harness", "dev", "bin", "memory-service.exe")
+	if err := os.MkdirAll(filepath.Dir(bin), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bin, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := resolveCommand(".harness/dev/bin/memory-service", root, "windows", KindProcess)
+	want := `.\` + filepath.FromSlash(".harness/dev/bin/memory-service") + ".exe"
+	if got != want {
+		t.Fatalf("windows command = %q, want %q", got, want)
+	}
+	if got := resolveCommand(".harness/dev/bin/memory-service", root, "linux", KindProcess); got != ".harness/dev/bin/memory-service" {
+		t.Fatalf("linux command = %q", got)
+	}
+	if got := resolveCommand(".harness/dev/bin/missing", root, "windows", KindProcess); got != ".harness/dev/bin/missing" {
+		t.Fatalf("missing binary must keep command, got %q", got)
+	}
+	if got := resolveCommand("node frontend/node_modules/vite/bin/vite.js", root, "windows", KindFrontend); got != "node frontend/node_modules/vite/bin/vite.js" {
+		t.Fatalf("frontend command = %q", got)
 	}
 }

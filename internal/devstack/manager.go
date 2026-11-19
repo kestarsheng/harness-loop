@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -310,13 +311,28 @@ func (m *Manager) launch(ctx context.Context, item Item) (int, error) {
 	spec := LaunchSpec{
 		Name:    item.Name,
 		Dir:     m.Root,
-		Command: item.Command,
+		Command: resolveCommand(item.Command, m.Root, runtime.GOOS, item.Kind),
 		Env:     m.env(item),
 		LogPath: m.logPath(item),
 	}
 	if item.Kind == KindContainer {
 		cctx, cancel := context.WithTimeout(ctx, m.timeoutFor(item))
 		defer cancel()
+		// `docker run --name X` fails with exit 125 when X already exists, even
+		// if it is stopped (common after dev-down/--keep-db). Try `docker start`
+		// first; only fall back to run when the container is absent.
+		if name, ok := dockerRunName(item.Command); ok {
+			startSpec := LaunchSpec{
+				Name:    item.Name,
+				Dir:     m.Root,
+				Command: "docker start " + name,
+				Env:     m.env(item),
+				LogPath: m.logPath(item) + ".start",
+			}
+			if err := m.Runner.Run(cctx, startSpec); err == nil {
+				return 0, nil
+			}
+		}
 		return 0, m.Runner.Run(cctx, spec)
 	}
 	return m.Runner.Start(ctx, spec)
@@ -468,13 +484,50 @@ func dockerStopCommand(command string) (string, bool) {
 		}
 		return fmt.Sprintf("docker compose -f %s stop %s", file, svc), true
 	case "run":
-		for i := 2; i+1 < len(fields); i++ {
-			if fields[i] == "--name" {
-				return "docker stop " + fields[i+1], true
-			}
+		if name, ok := dockerRunName(command); ok {
+			return "docker stop " + name, true
 		}
 	}
 	return "", false
+}
+
+// dockerRunName extracts the --name value from a `docker run` command.
+func dockerRunName(command string) (string, bool) {
+	fields := strings.Fields(command)
+	if len(fields) < 2 || fields[0] != "docker" || fields[1] != "run" {
+		return "", false
+	}
+	for i := 2; i+1 < len(fields); i++ {
+		if fields[i] == "--name" {
+			return fields[i+1], true
+		}
+	}
+	return "", false
+}
+
+// resolveCommand appends .exe on Windows for contract process commands that
+// point at extension-less binaries (dev-up.sh builds some of them without an
+// extension, cmd.exe cannot execute those directly).
+func resolveCommand(command, root, goos, kind string) string {
+	if goos != "windows" || kind == KindContainer || kind == KindFrontend {
+		return command
+	}
+	fields := strings.Fields(command)
+	if len(fields) == 0 {
+		return command
+	}
+	first := fields[0]
+	if !strings.ContainsAny(first, `/\`) || strings.HasSuffix(strings.ToLower(first), ".exe") {
+		return command
+	}
+	if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(first)+".exe")); err == nil {
+		// cmd.exe treats ".harness" as the command name (not a relative path), so
+		// prefix it with ".\". The path is relative to the manager root (cmd's
+		// working dir), which avoids quoting problems when root contains spaces.
+		fields[0] = `.\` + filepath.FromSlash(first) + ".exe"
+		return strings.Join(fields, " ")
+	}
+	return command
 }
 
 func readPIDFile(path string) (int, error) {
