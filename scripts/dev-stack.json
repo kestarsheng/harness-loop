@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "description": "本地开发栈声明式契约：14 项 = 4 个数据容器 + 9 个微服务 + vite。dev-up.sh / dev-down.sh 与 T-P2-21 的 harness-cli 自举共用此文件，任何启停项必须与脚本逐项一致。group 用于按组启动：infra（4 个数据容器 + redis）、agent（9 个服务）、board（vite，看板，board:true）。",
+  "description": "本地开发栈声明式契约：14 项 = 4 个数据容器 + 9 个微服务 + vite。dev-up.sh / dev-down.sh 与 T-P2-21 的 harness-cli 自举共用此文件，任何启停项必须与脚本逐项一致。group 用于按组启动：infra（4 个数据容器 + redis）、agent（9 个服务）、board（vite，看板，board:true）。harnessloop 额外声明 probe:true，作为 Ensure 复用整栈的唯一存活探针（显式声明，不按名字推断）。",
   "tenant": "tenant-devfull",
   "defaults": {
     "dev_dir": ".harness/dev",
@@ -167,7 +167,8 @@
         "HARNESSLOOP_APPROVAL_ADDR": "http://127.0.0.1:50009"
       },
       "health": { "type": "port", "address": "127.0.0.1:50013" },
-      "required": true
+      "required": true,
+      "probe": true
     },
     {
       "name": "gateway",

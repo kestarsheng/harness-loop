@@ -146,6 +146,74 @@ func TestHarnessLoopProbeTargets50013(t *testing.T) {
 	}
 }
 
+// TestContractDeclaresExactlyOneProbe pins T-P2-43 on the shipped contract: the
+// stack probe is declared, not inferred, and only harnessloop carries it.
+func TestContractDeclaresExactlyOneProbe(t *testing.T) {
+	c := loadContract(t)
+	if len(c.Items) != 14 {
+		t.Fatalf("items = %d, want 14", len(c.Items))
+	}
+	var flagged []string
+	for _, it := range c.Items {
+		if it.Probe {
+			flagged = append(flagged, it.Name)
+		}
+	}
+	if strings.Join(flagged, ",") != "harnessloop" {
+		t.Fatalf("probe:true items = %v, want exactly [harnessloop]", flagged)
+	}
+	probe, ok := c.ProbeItem()
+	if !ok {
+		t.Fatal("ProbeItem must find the declared probe")
+	}
+	if probe.Name != "harnessloop" {
+		t.Fatalf("probe item = %q", probe.Name)
+	}
+	if probe.Kind != KindProcess {
+		t.Fatalf("probe kind = %q, want process", probe.Kind)
+	}
+	if probe.Group != GroupAgent {
+		t.Fatalf("probe group = %q, want %q", probe.Group, GroupAgent)
+	}
+	if probe.Health.Type == "" {
+		t.Fatal("probe must declare a health check")
+	}
+	if probe.Port != 50013 || probe.Health.Address != "127.0.0.1:50013" {
+		t.Fatalf("probe must stay on 50013: port=%d health=%+v", probe.Port, probe.Health)
+	}
+	// The legacy name lookup must keep resolving to the same item.
+	legacy, ok := c.HarnessLoop()
+	if !ok || legacy.Name != probe.Name {
+		t.Fatalf("HarnessLoop() = %q,%v; want the declared probe", legacy.Name, ok)
+	}
+	// Ports and commands stay untouched by the probe flag.
+	if it, _ := c.Item("harnessloop"); it.Command != ".harness/dev/bin/harnessloop-service -config .harness/dev/conf/harnessloop.yaml" {
+		t.Fatalf("harnessloop command changed: %q", it.Command)
+	}
+}
+
+// TestProbeItemPrefersDeclarationOverName guards against reintroducing the old
+// naming convention: an item literally called "harnessloop" must not win over
+// the item flagged probe:true.
+func TestProbeItemPrefersDeclarationOverName(t *testing.T) {
+	c := &Contract{Version: SupportedVersion, Items: []Item{
+		{Name: "harnessloop", Kind: KindProcess, Group: GroupAgent, Port: 50013, Command: "true",
+			Health: Health{Type: HealthPort, Address: "127.0.0.1:50013"}},
+		{Name: "obs-collector", Kind: KindProcess, Group: GroupAgent, Port: 50020, Command: "true",
+			Health: Health{Type: HealthPort, Address: "127.0.0.1:50020"}, Probe: true},
+	}}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	probe, ok := c.ProbeItem()
+	if !ok || probe.Name != "obs-collector" {
+		t.Fatalf("ProbeItem() = %q,%v; want the declared obs-collector", probe.Name, ok)
+	}
+	if legacy, _ := c.HarnessLoop(); legacy.Name != "harnessloop" {
+		t.Fatalf("HarnessLoop() name lookup = %q", legacy.Name)
+	}
+}
+
 func TestProcessItemsDeclareConfigOutput(t *testing.T) {
 	c := loadContract(t)
 	for _, it := range c.Items {
@@ -223,6 +291,14 @@ func TestContractValidationRejects(t *testing.T) {
 		{"missing group", func(c *Contract) { c.Items[0].Group = "" }},
 		{"unknown group", func(c *Contract) { c.Items[0].Group = "vm" }},
 		{"board item outside board group", func(c *Contract) { c.Items[13].Group = GroupAgent }},
+		{"two probe items", func(c *Contract) { c.Items[12].Probe = true }},
+		{"probe is a frontend", func(c *Contract) { c.Items[11].Kind = KindFrontend }},
+		{"probe is a container", func(c *Contract) {
+			c.Items[11].Kind = KindContainer
+			c.Items[11].ConfigTemplate, c.Items[11].ConfigOutput = "", ""
+		}},
+		{"probe outside agent group", func(c *Contract) { c.Items[11].Group = GroupInfra }},
+		{"probe without health", func(c *Contract) { c.Items[11].Health = Health{} }},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

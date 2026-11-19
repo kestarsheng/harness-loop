@@ -95,6 +95,12 @@ type Item struct {
 	// Board marks the item that serves the shared monitor board. Exactly one
 	// item may carry it; Board (see board.go) manages that item as a singleton.
 	Board bool `json:"board"`
+	// Probe marks the item whose health is the whole-stack liveness signal:
+	// Ensure/EnsureGroups reuse a running stack when it probes healthy. At most
+	// one item may carry it, and it must be a process in group agent. Declaring
+	// it replaces the old "look for an item named harnessloop" convention, so a
+	// renamed or additional service cannot silently become the reuse gate.
+	Probe bool `json:"probe"`
 }
 
 // Health describes how an item is considered ready.
@@ -150,16 +156,22 @@ func (c *Contract) Validate() error {
 	names := make(map[string]bool, len(c.Items))
 	ports := make(map[int]string, len(c.Items))
 	stems := make(map[string]string, len(c.Items))
-	// The board singleton is checked first so a contract with two board items
-	// reports that fact (not a per-item group complaint).
-	boardCount := 0
+	// The board and probe singletons are checked first so a contract with two
+	// board/probe items reports that fact (not a per-item group complaint).
+	boardCount, probeCount := 0, 0
 	for _, it := range c.Items {
 		if it.Board {
 			boardCount++
 		}
+		if it.Probe {
+			probeCount++
+		}
 	}
 	if boardCount > 1 {
 		return fmt.Errorf("%d items are flagged board:true; the shared board must be a singleton", boardCount)
+	}
+	if probeCount > 1 {
+		return fmt.Errorf("%d items are flagged probe:true; the stack probe must be a singleton", probeCount)
 	}
 	for i, it := range c.Items {
 		label := fmt.Sprintf("items[%d] %q", i, it.Name)
@@ -177,6 +189,19 @@ func (c *Contract) Validate() error {
 		}
 		if strings.TrimSpace(it.Command) == "" {
 			return fmt.Errorf("%s: command is required", label)
+		}
+		if it.Probe {
+			// The probe is the reuse gate for the whole stack, so it must be a
+			// long-lived local process with an observable health signal.
+			if it.Kind != KindProcess {
+				return fmt.Errorf("%s: the probe item must be a process, got kind %q", label, it.Kind)
+			}
+			if it.Group != GroupAgent {
+				return fmt.Errorf("%s: the probe item must be in group %q, got %q", label, GroupAgent, it.Group)
+			}
+			if strings.TrimSpace(it.Health.Type) == "" {
+				return fmt.Errorf("%s: the probe item must declare a health check", label)
+			}
 		}
 		if err := validPort(it.Port, true, label+" port"); err != nil {
 			return err
@@ -259,8 +284,30 @@ func (c *Contract) Item(name string) (Item, bool) {
 	return Item{}, false
 }
 
-// HarnessLoop returns the item whose health is the single-stack probe
-// (harnessloop-service on 127.0.0.1:50013).
+// ProbeItem returns the item flagged probe:true, i.e. the explicit stack
+// liveness probe used by Ensure/EnsureGroups to decide whether a running stack
+// can be reused (harnessloop, 127.0.0.1:50013, in the shipped contract).
+//
+// This is the authoritative lookup: the probe is declared, never inferred from
+// an item name, so adding or renaming services cannot change the reuse gate by
+// accident.
+func (c *Contract) ProbeItem() (Item, bool) {
+	if c == nil {
+		return Item{}, false
+	}
+	for _, it := range c.Items {
+		if it.Probe {
+			return it, true
+		}
+	}
+	return Item{}, false
+}
+
+// HarnessLoop returns the item named "harnessloop".
+//
+// Deprecated in spirit: it is a name lookup kept only so contracts written
+// before the probe:true declaration still work (see Manager.probeItem, which
+// prefers ProbeItem and falls back here). New code must use ProbeItem.
 func (c *Contract) HarnessLoop() (Item, bool) {
 	return c.Item("harnessloop")
 }
