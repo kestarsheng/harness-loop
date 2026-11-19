@@ -1469,7 +1469,19 @@
 | 验收标准 | 真实 `harness-cli run --goal "hi" --workspace . --no-tui` → `completed`，a~e 各 `attempts=1 accepted=true`；`conf/agent.yaml` 不再含 `your-api-key`；`conf/harnessloop.yaml` 的 `entry_agent=main-agent`；MCP server key 保持原值；失败事件包含上游错误文本；`go test ./internal/devstack/... ./services/harnessloop-service/... ./internal/cli/...`、`go build -p 1 ./...`、depcheck 0。 |
 | 复杂度 | S（已修复 `1b8dd91`） |
 
-> P2 合计：实施 44 个 + 测试 5 个 = **49 个任务**。
+### T-P2-45 `loop` 默认直答、`/task` 才走 a~e
+
+| 字段 | 内容 |
+|---|---|
+| 目标 | `/harness loop` 的输入默认走 agent 普通对话（非 stage mode），TUI 直接显示流式回复；只有显式 `/task <goal>`（或 `--goal`）才创建 a~e 任务。消除「发 hi 却跑五阶段、b 无子任务、d 被 exec 白名单拒绝」的错配。 |
+| 关联需求 | REQ-171~175；design 4.11.7；用户 2026-11-19 拍板 A（直答优先） |
+| 依赖 | T-P2-20（会话式 TUI）、T-P2-40（loop/loop start 解耦） |
+| 涉及文件 | [M] `internal/cli/cmd/loop.go`、[M] `internal/cli/tui/{model,session,app}.go`、[M] `internal/cli/tui/views/*`（新增对话渲染）、[M] `internal/cli/cmd/root.go`（agent 连接/flag）、[M] 对应 `*_test.go` |
+| 实施要点 | 1) CLI 新增 agent-service 连接（默认 `127.0.0.1:50006`，可用 `--agent-server`/`HARNESS_AGENT_SERVER` 覆盖），复用 `pkg/pb/agent` 已生成的 `ExecuteStream`，不改 proto；2) `SessionConfig` 增加 `Chat func(ctx, message) (<-chan ChatChunk, error)`；`Model` 增加 chat 消息列表与流式状态；3) `handleSessionSubmit` 判定：`/task ` 前缀 → 现有 `CreateTask`（a~e）；其他 → `Chat`；`--goal` 仍一次性 a~e；4) 直答请求：`EntryAgent=main-agent`、`StageMode=false`（不写 `__stage_mode__`）、携带 tenant/session/workspace；5) `ExecuteStream` 的 `response/token` 追加到 assistant 消息，`error` chunk 显示在对话中（不得静默）；6) TUI 默认视图显示「用户消息 + assistant 流式回复 + 输入框」，`/task` 仍切回现有 stage/事件视图；7) `/harness loop start`、`loop stop` 与看板 URL 一律不动。 |
+| 验收标准 | 真实 TTY 执行 `/harness loop` 发 `hi`：不创建 task、不出现 a~e 阶段，几秒内显示 assistant 回复；`/task 实现 xxx`：创建 task 并显示原有 a~e 视图；`loop --goal xxx` 仍走 a~e；`ExecuteStream` 报错时对话区显示具体错误；`go test ./internal/cli/...`、`go build -p 1 ./...`、depcheck 0；`loop start` 仍只打印 URL。 |
+| 复杂度 | M（1~2 天） |
+
+> P2 合计：实施 45 个 + 测试 5 个 = **50 个任务**。
 
 ---
 
@@ -1681,6 +1693,8 @@ flowchart LR
     P40 --> P43
     P21 --> P44
     P40 --> P44
+    P20 --> P45
+    P40 --> P45
     P01 --> PTT3
     P09 --> PTT4
     P11 --> PTT5
