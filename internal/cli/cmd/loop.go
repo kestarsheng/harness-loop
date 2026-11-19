@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -17,6 +18,8 @@ import (
 	"agent-platform/internal/cli/output"
 	"agent-platform/internal/cli/tui"
 	"agent-platform/internal/devstack"
+	"agent-platform/pkg/harnessclient"
+	agentpb "agent-platform/pkg/pb/agent"
 	harnesspb "agent-platform/pkg/pb/harnessloop"
 )
 
@@ -50,10 +53,17 @@ func newLoopCmd() *cobra.Command {
 		Short: "Open the resident Harness Loop agent session (TUI only)",
 		Long: "Start one resident Harness Loop session in this terminal: the agent " +
 			"conversation TUI.\n\n" +
-			"Each line you submit in the session creates a task; when a task reaches " +
-			"a terminal state the interface returns to the input box. Type exit (or " +
+			"A plain line is answered directly by agent-service (main-agent, no " +
+			"stages): you get a streamed reply in the conversation a few seconds " +
+			"later. Only /task <goal> starts the a~e loop, which creates a task and " +
+			"switches the screen to the stage/event panels. When a task reaches a " +
+			"terminal state the interface returns to the input box. Type exit (or " +
 			"/harness loop exit) to end only this terminal. Use --exit-on-complete " +
-			"for the legacy one-task-then-exit behaviour.\n\n" +
+			"for the legacy one-task-then-exit behaviour; --goal is still a one-shot " +
+			"a~e task.\n\n" +
+			"The direct-chat backend is agent-service on 127.0.0.1:50006; override " +
+			"with --agent-server or $HARNESS_AGENT_SERVER. A chat failure is shown in " +
+			"the conversation instead of being retried as a task.\n\n" +
 			"Only the agent side of the stack is ensured: the data containers and the " +
 			"9 services (groups infra+agent) are probed on 127.0.0.1:50013, a healthy " +
 			"stack is reused and a cold one is started without vite, so `dev up` is " +
@@ -325,6 +335,15 @@ func runLoopSession(cmd *cobra.Command, client harnesspb.HarnessLoopServiceClien
 	}
 
 	session := newSessionIdentity()
+
+	// A plain line in the session is answered by agent-service directly
+	// (main-agent, no stage mode); only /task reaches the a~e loop.
+	agentClient, agentTarget, agentDialErr := dialAgentService(cmd)
+	if agentClient != nil {
+		defer agentClient.Close()
+	}
+	chat := newAgentChatFunc(agentClient, agentTarget, agentDialErr, tenant, session.ID, spec.workspace)
+
 	createTask := func(ctx context.Context, goal string) (*harnesspb.TaskView, error) {
 		created, err := client.CreateTask(tenantCallContext(ctx, tenant), &harnesspb.CreateTaskRequest{
 			TenantId:      tenant,
@@ -351,6 +370,7 @@ func runLoopSession(cmd *cobra.Command, client harnesspb.HarnessLoopServiceClien
 	}, tui.SessionConfig{
 		InitialGoal: initialGoal,
 		CreateTask:  createTask,
+		Chat:        chat,
 	})
 	if tuiErr != nil {
 		if runCtx.Err() == context.DeadlineExceeded {
@@ -454,6 +474,74 @@ func runLoopOnce(cmd *cobra.Command, client harnesspb.HarnessLoopServiceClient, 
 		return &ExitError{Code: code}
 	}
 	return nil
+}
+
+// dialAgentService connects to agent-service for direct chat. It dials lazily so
+// a cold or missing agent-service never blocks `loop` from opening the
+// composer: the failure is reported as a chat error in the conversation.
+func dialAgentService(cmd *cobra.Command) (*harnessclient.Client, string, error) {
+	target := resolveAgentServer(loadFileConfig(opts.Config))
+	client, err := harnessclient.DialLazy(cmd.Context(), harnessclient.DefaultConfig(target))
+	if err != nil {
+		return nil, target, err
+	}
+	return client, target, nil
+}
+
+// buildAgentChatRequest is the single place that defines a direct-chat call:
+// EntryAgent=main-agent, StageMode off (no __stage_mode__), tenant / session /
+// workspace attached, and the user message forwarded verbatim.
+func buildAgentChatRequest(tenant, sessionID, workspace, message string) *agentpb.ExecuteStreamRequest {
+	req := &agentpb.ExecuteStreamRequest{
+		SessionId:  sessionID,
+		TenantId:   tenant,
+		UserId:     "harness-cli",
+		Message:    message,
+		EntryAgent: "main-agent",
+		// StageMode deliberately absent: direct chat must not be forced into
+		// the "no tool call means not finished" stage contract.
+		ContextVars: map[string]string{},
+	}
+	if workspace != "" {
+		req.ContextVars["workspace"] = workspace
+	}
+	return req
+}
+
+// newAgentChatFunc builds the session's Chat callable: one ExecuteStream per
+// message, EntryAgent=main-agent, StageMode off (no __stage_mode__), tenant /
+// session / workspace attached, and the user message forwarded verbatim.
+func newAgentChatFunc(client *harnessclient.Client, target string, dialErr error, tenant, sessionID, workspace string) tui.ChatFunc {
+	return func(ctx context.Context, message string) (<-chan tui.ChatChunk, error) {
+		if client == nil {
+			if dialErr == nil {
+				dialErr = fmt.Errorf("not connected")
+			}
+			return nil, fmt.Errorf("agent-service %s: %w", target, dialErr)
+		}
+		req := buildAgentChatRequest(tenant, sessionID, workspace, message)
+
+		ch := make(chan tui.ChatChunk, 64)
+		callCtx := tenantCallContext(ctx, tenant)
+		go func() {
+			defer close(ch)
+			err := client.ExecuteStream(callCtx, req, func(c *agentpb.ExecuteStreamChunk) error {
+				select {
+				case ch <- tui.ChatChunk{Type: c.GetType(), Content: c.GetContent(), Agent: c.GetCurrentAgent()}:
+					return nil
+				case <-callCtx.Done():
+					return callCtx.Err()
+				}
+			})
+			if err != nil && !errors.Is(err, context.Canceled) {
+				select {
+				case ch <- tui.ChatChunk{Type: "error", Content: fmt.Sprintf("agent-service %s: %v", target, err)}:
+				case <-callCtx.Done():
+				}
+			}
+		}()
+		return ch, nil
+	}
 }
 
 // tenantCallContext mirrors callContext for contexts built inside the TUI.

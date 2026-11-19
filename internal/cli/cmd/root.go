@@ -25,19 +25,23 @@ import (
 )
 
 type Options struct {
-	Server     string
-	KBServer   string
-	Tenant     string
-	Config     string
-	WebBaseURL string
-	JSON       bool
-	NoColor    bool
+	Server      string
+	KBServer    string
+	AgentServer string
+	Tenant      string
+	Config      string
+	WebBaseURL  string
+	JSON        bool
+	NoColor     bool
 }
 
 const (
 	DefaultServerAddr   = "127.0.0.1:50013"
 	DefaultKBServerAddr = "127.0.0.1:50002"
-	DefaultTenant       = "default"
+	// DefaultAgentServerAddr is agent-service, the direct-chat backend the
+	// resident session talks to when a line is not a /task command.
+	DefaultAgentServerAddr = "127.0.0.1:50006"
+	DefaultTenant          = "default"
 )
 
 var opts Options
@@ -49,10 +53,11 @@ type ExitError struct {
 func (e *ExitError) Error() string { return fmt.Sprintf("exit code %d", e.Code) }
 
 type fileConfig struct {
-	Server     string `yaml:"server"`
-	KBServer   string `yaml:"kb_server"`
-	Tenant     string `yaml:"tenant"`
-	WebBaseURL string `yaml:"web_base_url"`
+	Server      string `yaml:"server"`
+	KBServer    string `yaml:"kb_server"`
+	AgentServer string `yaml:"agent_server"`
+	Tenant      string `yaml:"tenant"`
+	WebBaseURL  string `yaml:"web_base_url"`
 }
 
 func NewRootCmd() *cobra.Command {
@@ -65,6 +70,7 @@ func NewRootCmd() *cobra.Command {
 	pf := root.PersistentFlags()
 	pf.StringVar(&opts.Server, "server", "", "harnessloop-service gRPC address (default 127.0.0.1:50013)")
 	pf.StringVar(&opts.KBServer, "kb-server", "", "knowledge-service gRPC address (default 127.0.0.1:50002)")
+	pf.StringVar(&opts.AgentServer, "agent-server", "", "agent-service gRPC address for direct chat (default 127.0.0.1:50006, or $HARNESS_AGENT_SERVER)")
 	pf.StringVar(&opts.Tenant, "tenant", "", "tenant id (default default)")
 	pf.StringVar(&opts.Config, "config", "", "config file (default ~/.harness/config.yaml)")
 	pf.StringVar(&opts.WebBaseURL, "web-base-url", "", "local web base URL for the fixed monitor board (default http://localhost:5174)")
@@ -137,6 +143,22 @@ func resolveKBServer(cfg fileConfig) string {
 		return cfg.KBServer
 	}
 	return DefaultKBServerAddr
+}
+
+// resolveAgentServer picks the agent-service address used for direct chat.
+// Precedence: --agent-server, then HARNESS_AGENT_SERVER, then the config file,
+// then the fixed local default.
+func resolveAgentServer(cfg fileConfig) string {
+	if opts.AgentServer != "" {
+		return opts.AgentServer
+	}
+	if env := os.Getenv("HARNESS_AGENT_SERVER"); env != "" {
+		return env
+	}
+	if cfg.AgentServer != "" {
+		return cfg.AgentServer
+	}
+	return DefaultAgentServerAddr
 }
 
 func resolveTenant(cfg fileConfig) string {

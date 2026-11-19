@@ -31,6 +31,21 @@ type RunResult struct {
 // TaskFactory creates one task for the resident session.
 type TaskFactory func(ctx context.Context, goal string) (*harnesspb.TaskView, error)
 
+// ChatChunk is one piece of a direct-chat reply streamed from agent-service.
+// Type mirrors the gRPC chunk type ("token", "final", "error", …) so the model
+// can tell a partial token from the authoritative final text and from a
+// failure that must stay visible in the conversation.
+type ChatChunk struct {
+	Type    string
+	Content string
+	Agent   string
+}
+
+// ChatFunc sends one user message to agent-service and streams the reply back.
+// The channel is closed when the stream ends; an error chunk (or a non-nil
+// error here) is rendered in the conversation rather than swallowed.
+type ChatFunc func(ctx context.Context, message string) (<-chan ChatChunk, error)
+
 // SessionConfig turns the TUI into a resident session: each submitted goal
 // creates a task, terminal tasks return to the input box, and typed commands
 // (for example exit) are dispatched through DispatchSessionLine.
@@ -39,9 +54,12 @@ type SessionConfig struct {
 	// behaviour instead of returning to the input box.
 	ExitOnComplete bool
 	// InitialGoal is submitted immediately on start; empty starts at the input
-	// box.
+	// box. It always creates a task (the --goal one-shot a~e path).
 	InitialGoal string
 	CreateTask  TaskFactory
+	// Chat answers a plain line without creating a task. Nil means direct chat
+	// is unavailable and the TUI says so instead of falling back to a~e.
+	Chat ChatFunc
 	// SourceFor builds the monitor source for a newly created task.
 	SourceFor func(taskID string) Source
 }
