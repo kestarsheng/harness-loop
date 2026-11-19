@@ -1053,12 +1053,12 @@
 
 | 字段 | 内容 |
 |---|---|
-| 目标 | 新增 `harness loop` 交互入口：进入类 Claude Code 的 TUI，并常驻显示**全局固定**的看板 URL（本地地址、不带域名、不区分项目）；同一机器任意终端执行同一命令，得到同一个 URL。 |
+| 目标 | 新增 `harness loop` 交互入口：进入类 Claude Code 的 TUI，并常驻显示**全局固定**的看板 URL（本地地址、不带域名、不区分项目）；同一机器任意终端执行同一命令，得到同一个 URL。**（2026-11-19 补充：URL 生成规则与多终端一致性仍有效；`loop` TUI 顶部常驻 URL 的展示已由 T-P2-40 覆盖，URL 改由 `loop start` 在当前终端打印。）** |
 | 关联需求 | REQ-107~113、REQ-097~099；design 7.1 / 7.2 / 4.12.6 |
 | 依赖 | T-P1-27、T-P1-28、T-P2-03 |
 | 涉及文件 | [N] `internal/cli/cmd/loop.go`、[M] `internal/cli/cmd/root.go`、[M] `internal/cli/cmd/run.go`、[M] `internal/cli/tui/app.go`、[M] `internal/cli/tui/model.go`、[M] `internal/cli/config` |
-| 实施要点 | 1) `harness loop` 为默认交互入口，`run` 保留脚本化；2) 默认值：`--server` 默认 `127.0.0.1:50013`（可被配置/flag 覆盖），`--tenant` 默认 `default`（可用 `HARNESS_TENANT`/配置覆盖），保证多终端与大屏同租户；3) URL 固定为 `${web_base_url}/harness-loop/monitor`，`web_base_url` 默认 `http://localhost:5174`，**只允许本地地址，不拼接域名**；4) TUI 顶部常驻 URL，`o` 键调系统 opener，终端支持时输出 OSC 8 超链接；5) 无 `--goal` 时进入输入框，有则直接提交并进入监控；6) 每次 `loop` 新建一个任务，退出时保留 URL 与任务号。 |
-| 验收标准 | 真实终端执行 `harness loop` 可起动 TUI 并显示固定 URL；另开终端执行同一命令，URL 完全相同；`o` 能打开浏览器且落到 `/harness-loop/monitor`；`go test ./internal/cli/...` 全绿；显式 `--server`/`--tenant` 优先于默认值。 |
+| 实施要点 | 1) `harness loop` 为默认交互入口，`run` 保留脚本化；2) 默认值：`--server` 默认 `127.0.0.1:50013`（可被配置/flag 覆盖），`--tenant` 默认 `default`（可用 `HARNESS_TENANT`/配置覆盖），保证多终端与大屏同租户；3) URL 固定为 `${web_base_url}/harness-loop/monitor`，`web_base_url` 默认 `http://localhost:5174`，**只允许本地地址，不拼接域名**；4) URL 生成规则保留；**TUI 顶部常驻 URL 已由 T-P2-40 移出 `loop`**，`o` 键逻辑保留给后续看板入口；终端支持时输出 OSC 8 超链接；5) 无 `--goal` 时进入输入框，有则直接提交并进入监控；6) 每次 `loop` 新建一个任务，退出时保留 URL 与任务号。 |
+| 验收标准 | URL 生成规则与多终端一致性仍按本条验收（两终端得到同一 URL）；`o` 能打开浏览器且落到 `/harness-loop/monitor`；`go test ./internal/cli/...` 全绿；显式 `--server`/`--tenant` 优先于默认值。**URL 在 `loop` TUI 顶部的展示由 T-P2-40 验收替代（`loop start` 输出 URL、`loop` 不显示）。** |
 | 复杂度 | M |
 
 ### T-P2-12 终端会话标签与多终端识别
@@ -1165,7 +1165,7 @@
 | 关联需求 | REQ-097~113、DFX-M-05；design 7.1 / 7.2 |
 | 依赖 | T-P2-16 |
 | 涉及文件 | [M] `scripts/dev-up.sh`、[M] `scripts/dev-down.sh`、[M] `scripts/dev-lib.sh`、[N] `scripts/dev-stack.json`、[M] `docker/docker-compose.data.yaml`、[M] `docs/dev.md`、[M] `README.md`、[M] `services/*/config.example.yaml`（仅补模板字段） |
-| 实施要点 | 1) 统一端口矩阵：gateway 9000、chat 50001、knowledge 50002、memory 50003、a2a 50004、mcp 50005、agent 50006（HTTP 50009）、harness 50007、harnessloop 50013、PG 55432、Mongo 27017、Redis 56379、Qdrant 6333、vite 5174；**agent 必须从当前 50002 改回 50006**，同步 harnessloop 的 subtask executor 与 harness-service 的 agent 指向；2) `docker-compose.data.yaml` 增 Qdrant（具名卷 `qdrant-data`，首次可启动）；3) 新增 chat/knowledge/memory/a2a 四个 step 与配置生成（LLM/embedding、Qdrant、Mongo、PG、Redis）；4) `dev-down` 同步清理新增服务与 Qdrant，`--keep-db` 保留 PG/Mongo/Qdrant；5) 新增 `scripts/dev-stack.json`（name/kind/port/command/config_template/health/required），作为 T-P2-21 自举的唯一数据源；6) 文档更新为 14 项。 |
+| 实施要点 | 1) 统一端口矩阵：gateway 9000、chat 50001、knowledge 50002、memory 50003、a2a 50004、mcp 50005、agent 50006（HTTP 50009）、harness 50007、harnessloop 50013、PG 55432、Mongo 27017、Redis 56379、Qdrant 6333、vite 5174；**agent 必须从当前 50002 改回 50006**，同步 harnessloop 的 subtask executor 与 harness-service 的 agent 指向；2) `docker-compose.data.yaml` 增 Qdrant（具名卷 `qdrant-data`，首次可启动）；3) 新增 chat/knowledge/memory/a2a 四个 step 与配置生成（LLM/embedding、Qdrant、Mongo、PG、Redis）；4) `dev-down` 同步清理新增服务与 Qdrant，`--keep-db` 保留 PG/Mongo/Qdrant；5) 新增 `scripts/dev-stack.json`（name/kind/port/command/config_template/health/required），作为 T-P2-21 自举的唯一数据源；**`group` 字段由 T-P2-40 增量追加（infra|agent|board），不改变本任务的 14 项验收**；6) 文档更新为 14 项。 |
 | 验收标准 | `dev-down.sh` 后 `dev-up.sh --demo` **14 项健康全绿**；9 个微服务端口均可连；`harnessloop.log` 不再出现 `memory recall disabled`；Qdrant 6333 可访问且 knowledge 上传后集合存在；`dev-stack.json` 可解析且与脚本实际启动项逐项一致；不得留半截栈。 |
 | 复杂度 | M |
 
@@ -1185,12 +1185,12 @@
 
 | 字段 | 内容 |
 |---|---|
-| 目标 | `/harness loop` 检测 127.0.0.1:50013，未起则按 `scripts/dev-stack.json` 自动拉起 14 项并等待健康，冷启动一条命令进 TUI。 |
+| 目标 | `/harness loop` 检测 127.0.0.1:50013，未起则按 `scripts/dev-stack.json` 自动拉起 **infra+agent 13 项**（不含 board/vite）并等待健康，冷启动一条命令进 TUI。**（T-P2-40 起：board/vite 只由 `/harness loop start` 管理，`loop` 不再拉起看板。）** |
 | 关联需求 | REQ-176；design 4.11.7 |
 | 依赖 | T-P2-19（`dev-stack.json` 已定稿） |
 | 涉及文件 | [N] `internal/devstack/{stack,process,health,config}.go`、[M] `internal/cli/cmd/root.go`、[N] `scripts/verify-stack.sh` |
 | 实施要点 | 1) 以 `dev-stack.json` 为唯一数据源（脚本与 Go 共用），禁止第二份服务清单；2) 已存在实例则复用，不重复起；3) 进程 pid/日志落 `.harness/dev`，Windows 用端口反查 + taskkill；4) 失败回滚本次已起进程；5) 与 T-P2-20 文件域隔离：本任务只碰 `internal/devstack/**` 与 `root.go`，不改 `tui/**`。 |
-| 验收标准 | 干净状态执行 `harness loop` → 14 项就绪并进 TUI；再执行一次 <2s 复用；杀进程后重跑可恢复；失败不留半截栈。 |
+| 验收标准 | 干净状态执行 `harness loop` → **infra+agent 13 项就绪**并进 TUI（board/vite 不在 `loop` 起）；再执行一次 <2s 复用；杀进程后重跑可恢复；失败不留半截栈。 |
 | 复杂度 | M（1~2 天，可与 T-P2-20 并行） |
 
 ### T-P2-22 看板 start/stop 生命周期
@@ -1247,10 +1247,10 @@
 |---|---|
 | 目标 | 两终端演示闭环 + 全量验证 + CHANGELOG + `v0.3.0-p2`。 |
 | 关联需求 | design 8.4；全部 P2 任务 |
-| 依赖 | T-P2-18~25 |
+| 依赖 | T-P2-18~25、T-P2-40~42 |
 | 涉及文件 | [M] `CHANGELOG.md`、[M] `docs/dev.md`、发布 tag |
-| 实施要点 | 1) 冷启动 `harness loop` → 14 项 → TUI；2) 第二终端 → 同一看板两张卡；3) `exit`/`stop` 隔离验证；4) 全量 build/test/depcheck；5) 合 main 打 tag。 |
-| 验收标准 | 上述 4 条演示全过；`go build -p 1 ./...`、`go test ./services/... ./internal/cli/...`、depcheck 0；tag 已推。 |
+| 实施要点 | 1) 冷启动 `harness loop` → 13 项（infra+agent，不含 board）→ TUI（无 URL、后台无可见窗口、logo/组件框）；2) 第二终端 → 同一看板两张卡；3) `exit`/`stop` 隔离验证；4) 全量 build/test/depcheck；5) 合 main 打 tag。 |
+| 验收标准 | 上述 4 条演示全过；`loop` TUI 不显示 URL、后台服务无可见窗口、加粗浅蓝 logo + 组件框（T-P2-42）；`go build -p 1 ./...`、`go test ./services/... ./internal/cli/...`、depcheck 0；tag 已推。 |
 | 复杂度 | S（0.5 天） |
 
 ### T-P2-27 真实 token 计量（流式 usage）
@@ -1409,7 +1409,43 @@
 | 验收标准 | fail-fast 集合重入后同组全部重跑或重新规划，不出现「只重试一个节点 + 兄弟永久取消」；集合级预算耗尽后整组 failed；tolerate 场景行为不变；`go test ./pkg/harnessloop/orchestrator/... ./services/harnessloop-service/...` 全绿。 |
 | 复杂度 | M（1 天） |
 
-> P2 合计：实施 39 个 + 测试 5 个 = **44 个任务**。
+### T-P2-40 `loop` / `loop start` 职责解耦与按组启动
+
+| 字段 | 内容 |
+|---|---|
+| 目标 | 彻底拆开「看板 + URL」与「agent 会话」：`/harness loop start` 只在当前终端启动/复用共享看板并打印 URL，不进入 TUI；`/harness loop` 只进入当前终端的对话式 TUI，不显示 URL、不启动 board/vite。 |
+| 关联需求 | REQ-171、REQ-178；design 4.11.7 |
+| 依赖 | T-P2-21（自举）、T-P2-22（board 单例 + refs） |
+| 涉及文件 | [M] `scripts/dev-stack.json`（14 项补 `group`）、[M] `internal/devstack/contract.go`、[M] `internal/devstack/manager.go`、[M] `internal/cli/cmd/loop.go`、[M] `internal/devstack/{contract,manager}_test.go`、[M] `internal/cli/cmd/*_test.go` |
+| 实施要点 | 1) 契约仍保持 14 项，只新增 `group: infra|agent|board` 字段（`scripts_test.go` / `contract_test.go` 的 14 项断言不变）；2) `Item.Group` + 校验：4 个数据容器与 redis 为 `infra`，9 个服务为 `agent`，vite 为 `board`，board 项必须 `group=board`；3) `Manager` 新增 `UpGroups(ctx, groups...)` / `EnsureGroups(ctx, groups...)`，`Up`/`Ensure` 保持全量语义（`dev up`、`dev status` 不变）；4) `loop.go` 的 `ensureBackend` 改为 `EnsureGroups("infra","agent")`，冷启动不再触碰 vite；5) `loop` 不再把 `tui.URLFor(...)` 传给 TUI（`WebURL=""`），URL 只由 `loop start` 打印（**覆盖 T-P2-11 的“TUI 顶部常驻 URL”展示项，URL 生成规则不变**）；6) 帮助文案与 `loop start`/`loop` 的 Short/Long 同步改写，明确 `loop start` 不进 TUI、`loop` 不显示 URL。 |
+| 验收标准 | 冷启动执行 `/harness loop`：5174 不监听、TUI 无 URL 行；执行 `/harness loop start`：当前终端输出固定 URL、不进入 TUI、不打开新窗口；`/harness dev up` 仍启动 14 项；`go test ./internal/devstack/... ./internal/cli/...` 全绿；`go build ./...`、depcheck 0；契约项数仍为 14。 |
+| 复杂度 | M（1 天） |
+
+### T-P2-41 后台服务无可见窗口（Windows）
+
+| 字段 | 内容 |
+|---|---|
+| 目标 | `/harness loop` 冷启动 infra+agent 时，9 个服务进程与 4 个容器全部在后台隐藏运行；用户可见窗口始终只有当前终端，不再出现「很多终端」。 |
+| 关联需求 | REQ-171（不弹多终端）；2026-11-19 用户口径 |
+| 依赖 | T-P2-40 |
+| 涉及文件 | [M] `internal/devstack/process_windows.go`、[M] `internal/devstack/process.go`（如需要）、[M] `internal/devstack/manager_test.go` |
+| 实施要点 | 1) `startDetached` 的 `CreationFlags` 由 `DETACHED_PROCESS` 改为 `DETACHED_PROCESS | CREATE_NO_WINDOW`（0x08000000），确保 `cmd /c` 与子进程不分配可见控制台窗口；2) 保持进程存活（不能改用会随父终端退出的前台启动）；3) 启动日志仍写 `.harness/dev/logs/<name>.log`，不把 stdout 回显到当前终端；4) `resolveCommand` 继续使用 `.\` 相对路径 + `.exe`，不用引号绝对路径（避免 cmd 转义问题）；5) 只改 Windows 实现，Linux/macOS 启动语义不变。 |
+| 验收标准 | 在 Windows 冷启动 `/harness loop` 后：`Get-Process cmd` / `conhost` 不新增可见窗口（`MainWindowTitle` 为空），`dev status` 的 9 个服务全部健康；当前终端保持 TUI 不被抢占；容器进程不弹窗；`go test ./internal/devstack/...` 全绿；Linux 容器内 `go test` 不受影响。 |
+| 复杂度 | S（0.5 天） |
+
+### T-P2-42 Claude 式 TUI：加粗浅蓝 logo + 组件框
+
+| 字段 | 内容 |
+|---|---|
+| 目标 | `/harness loop` 进入的 TUI 具备 Claude Code 式的对话界面：顶部加粗 `harness loop` logo（浅蓝色），输入/状态区用带边框的组件框呈现，去掉看板 URL 行。 |
+| 关联需求 | REQ-171（会话式 TUI）；2026-11-19 用户视觉口径 |
+| 依赖 | T-P2-20（会话式 TUI 已落地）、T-P2-40 |
+| 涉及文件 | [M] `internal/cli/tui/views/theme.go`、[M] `internal/cli/tui/views/stage.go`、[M] `internal/cli/tui/views/urlbar.go`、[M] `internal/cli/tui/prompt.go`、[M] `internal/cli/tui/model.go`、[M] 对应 `*_test.go` |
+| 实施要点 | 1) 新增 `views.RenderLogo()`：`harness loop` 文本，`lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#8FD3FF"))`，`NO_COLOR` 时降级为纯文本加粗；2) 新增 `views.RenderBox(title, body, width)`：圆角边框（`lipgloss.RoundedBorder()`），宽度随终端自适应（最小 40、最大 120）；3) `PromptModel.View()` 改为「logo + 说明 + 输入组件框 + 快捷键提示」，输入行放进组件框；4) `Model.View()` 顶部渲染 logo（不再渲染 URL 栏），session 待输入时输入框套组件框；流式/事件区保持现有组件，只在视觉上对齐；5) 不使用新的 TUI 依赖（继续 bubbletea + lipgloss）；6) 测试：`NO_COLOR` 降级、边框字符存在、宽度自适应、logo 文本与颜色样式断言；`go test ./internal/cli/tui/...` 全绿。 |
+| 验收标准 | 真实终端执行 `/harness loop`：顶部可见加粗浅蓝 `harness loop`，输入区有圆角组件框，界面无 URL 行；`NO_COLOR=1` 时无 ANSI 颜色但仍有 logo 文本与边框；TUI 宽度 < 60 时不溢出；单测覆盖 logo/框/降级；用户目视确认（无 TTY 时如实说明，不得宣称已目视）。 |
+| 复杂度 | M（1 天） |
+
+> P2 合计：实施 42 个 + 测试 5 个 = **47 个任务**。
 
 ---
 
@@ -1517,19 +1553,114 @@ flowchart LR
 
 ## 4.3 P2 依赖图
 
+> 只画 P2 内部依赖边；P0/P1 前置（如 T-P1-13/19/27/28/31）见各任务「依赖」字段。`T-P2-18~25`、`T-P2-11~15`、`T-P2-40~42` 已展开为逐条边。
+
 ```mermaid
 flowchart LR
-  X01[T-P2-01 多语言] --> X03[T-P2-03 全量/性能]
-  X03 --> XT1[T-P2-T1 压测]
-  G02[T-P2-02 图扩展] --> XT1
-  RF04[T-P2-04 HTTP rerank] --> XT3[T-P2-T3 准确率/知识]
-  X01 --> XT3
-  X05[T-P2-05 引擎适配] --> XT2[T-P2-T2 混沌]
-  X06[T-P2-06 异步索引] --> XT2
-  X07[T-P2-07 审计/租户] --> XT2
-  X08[T-P2-08 运维] --> XT1
-  X09[T-P2-09 WFQ] --> XT4[T-P2-T4 公平/模糊]
-  X10[T-P2-10 高级场景] --> XT4
+  subgraph G1["检索与RAG"]
+      P01["T-P2-01 以 tree-sitter（cg…"]
+      P02["T-P2-02 代码检索增加 1 跳调用/导入图…"]
+      P03["T-P2-03 提供全量索引命令与批量事务参数，…"]
+      P04["T-P2-04 为知识检索增加 HTTP cro…"]
+      P05["T-P2-05 在 ContextEngine …"]
+      P06["T-P2-06 文档上传后由 worker 异步…"]
+      P07["T-P2-07 启停/中止/删除/重建/配置变更…"]
+      P08["T-P2-08 暴露 DFX-M-01 全量指标…"]
+      P09["T-P2-09 同租户多父任务按权重公平分配并发…"]
+      P10["T-P2-10 支持跨阶段 handoff（c→…"]
+      PTT1["T-P2-T1 按 9.7 完成索引/检索/验收…"]
+      PTT2["T-P2-T2 按 9.8 注入依赖故障与进程级…"]
+      PTT3["T-P2-T3 量化 Go/TS/Python …"]
+      PTT4["T-P2-T4 验证配额占用曲线与沙箱逃逸零放行…"]
+  end
+  subgraph G2["CLI 与看板"]
+      P11["T-P2-11 新增 harness loop …"]
+      P12["T-P2-12 每个终端生成 session_i…"]
+      P13["T-P2-13 大屏在**不按项目过滤**的前提…"]
+      P14["T-P2-14 在 TUI 内补齐 PDF 第 …"]
+      P15["T-P2-15 提供 harness kb se…"]
+      P16["T-P2-16 在调度层之前增加租户池准入校验：…"]
+      P17["T-P2-17 修复「事件 seq 为每任务独立…"]
+      P20["T-P2-20 把 loop 从「一次任务、终态…"]
+      P21["T-P2-21 /harness loop 检测…"]
+      P22["T-P2-22 /harness loop st…"]
+      P40["T-P2-40 彻底拆开「看板 + URL」与「…"]
+      P41["T-P2-41 /harness loop 冷启…"]
+      P42["T-P2-42 /harness loop 进入…"]
+      PTT5["T-P2-T5 验证「两个终端 → 同一 URL…"]
+  end
+  subgraph G3["执行与治理"]
+      P18["T-P2-18 让子任务从「数据库有行」变成「真…"]
+      P19["T-P2-19 dev-up/dev-down …"]
+      P23["T-P2-23 b 阶段一次拆出 3 个节点并真…"]
+      P24["T-P2-24 pkg/llm 底层换成 git…"]
+      P25["T-P2-25 用触发 read_file/ru…"]
+      P26["T-P2-26 两终端演示闭环 + 全量验证 +…"]
+      P27["T-P2-27 让流式调用的真实 usage 从…"]
+      P28["T-P2-28 file_write 必须落到 …"]
+      P29["T-P2-29 子任务未全部到达终态或未 acc…"]
+      P30["T-P2-30 真实任务在 harness lo…"]
+      P31["T-P2-31 生产代码注入 tenant/ro…"]
+      P32["T-P2-32 消除 event.Publish…"]
+      P33["T-P2-33 修复 TestFidelityN…"]
+      P34["T-P2-34 d→c 回退后，failed 子…"]
+      P35["T-P2-35 定位并修复「orchestrat…"]
+      P36["T-P2-36 修复注入 HARNESSLOOP…"]
+      P37["T-P2-37 harness 批准后，agen…"]
+      P38["T-P2-38 Resolveroot, . 解…"]
+      P39["T-P2-39 fail-fast 失败导致同组…"]
+  end
+  
+    P03 --> PTT1
+    P03 --> P11
+    P11 --> P12
+    P12 --> P13
+    P11 --> P14
+    P11 --> P15
+    P09 --> P16
+    P10 --> P16
+    P16 --> P18
+    P16 --> P19
+    P12 --> P20
+    P19 --> P21
+    P21 --> P22
+    P18 --> P23
+    P20 --> P24
+    P18 --> P25
+    P18 --> P26
+    P19 --> P26
+    P20 --> P26
+    P21 --> P26
+    P22 --> P26
+    P23 --> P26
+    P24 --> P26
+    P25 --> P26
+    P40 --> P26
+    P41 --> P26
+    P42 --> P26
+    P24 --> P27
+    P18 --> P28
+    P18 --> P29
+    P23 --> P29
+    P28 --> P30
+    P30 --> P31
+    P24 --> P33
+    P29 --> P34
+    P23 --> P35
+    P31 --> P37
+    P34 --> P39
+    P21 --> P40
+    P22 --> P40
+    P40 --> P41
+    P20 --> P42
+    P40 --> P42
+    P01 --> PTT3
+    P09 --> PTT4
+    P11 --> PTT5
+    P12 --> PTT5
+    P13 --> PTT5
+    P14 --> PTT5
+    P15 --> PTT5
 ```
 
 ## 4.4 关键路径
