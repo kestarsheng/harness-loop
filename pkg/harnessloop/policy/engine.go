@@ -83,6 +83,12 @@ type Request struct {
 	RoleName  string
 	AgentID   string
 	Attempt   int
+
+	// ExecApproved 表示这次 exec 调用已经拿到「人对这条命令的批准」，因此允许
+	// 越过 exec 白名单。它只能由持有一次性审批令牌的执行面置位（mcp-service
+	// 验签后设置），不能由调用方自己在参数里声明。硬线（shell 解释器、绝对
+	// 路径、上跳、元字符）不因批准而放行。
+	ExecApproved bool
 }
 
 type Decision struct {
@@ -245,7 +251,13 @@ func (e *Engine) SystemDecide(ctx context.Context, req Request) Decision {
 	}
 
 	if len(req.Args.Command) > 0 {
-		if err := e.ExecAllow.Check(req.Args.Command); err != nil {
+		check := e.ExecAllow.Check
+		if req.ExecApproved {
+			// 批准只替代「命令在不在白名单」，不替代沙箱硬线：批准一条
+			// `rm -rf /` 也收不了场，所以仍然要过同一套逃逸/解释器检查。
+			check = CheckApprovedCommand
+		}
+		if err := check(req.Args.Command); err != nil {
 			base.Layer = LayerSystem
 			base.RuleID = "sandbox.exec"
 			base.Code = CodeExecDenied
@@ -259,6 +271,27 @@ func (e *Engine) SystemDecide(ctx context.Context, req Request) Decision {
 	base.RuleID = "system.allow"
 	base.Reason = "system constraints satisfied"
 	return base
+}
+
+// CheckApprovedCommand 是「已获人工批准」时可用的 exec 校验：放开命令白名单，
+// 但保留沙箱硬线（解释器、绝对路径、上跳、shell 元字符）。与
+// sandbox.ExecAllowlist.Check 一样拒绝空命令。
+func CheckApprovedCommand(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("%w: empty command", sandbox.ErrExecDenied)
+	}
+	cmd := args[0]
+	if strings.ContainsAny(cmd, `/\`) || path.IsAbs(cmd) {
+		return fmt.Errorf("%w: command %q must be a bare executable name", sandbox.ErrExecDenied, cmd)
+	}
+	switch cmd {
+	case "sh", "bash", "cmd", "powershell", "pwsh":
+		return fmt.Errorf("%w: shell invocation is not allowed", sandbox.ErrExecDenied)
+	}
+	if sandbox.HasEscapingArgs(args[1:]) {
+		return fmt.Errorf("%w: command %q escapes the workspace", sandbox.ErrExecDenied, strings.Join(args, " "))
+	}
+	return nil
 }
 
 func (e *Engine) applyLayers(req Request) Decision {

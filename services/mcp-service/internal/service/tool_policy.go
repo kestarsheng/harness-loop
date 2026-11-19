@@ -20,6 +20,12 @@ type ToolPolicyContext struct {
 	TaskID        string `json:"task_id,omitempty"`
 	AgentID       string `json:"agent_id,omitempty"`
 	WorkspaceRoot string `json:"workspace_root,omitempty"`
+
+	// 审批绑定：agent-service 只透传（它没有密钥），执行面据此等一枚由
+	// harnessloop 签发的令牌。ApprovalID 可空——按 task/tool/args 绑定匹配。
+	ApprovalID          string `json:"approval_id,omitempty"`
+	ApprovalRef         string `json:"approval_ref,omitempty"`
+	ApprovalWaitSeconds int    `json:"approval_wait_seconds,omitempty"`
 }
 
 // ToolPolicyInput is the normalised call facts used by the MCP-level policy
@@ -35,6 +41,10 @@ type ToolPolicyInput struct {
 	Paths         []string
 	Command       []string
 	Tags          []string
+
+	// ExecApproved 只能在验过一次性审批令牌之后置位（见 MCPService.
+	// authorizeApproval）。它放行 exec 白名单，不放行沙箱硬线。
+	ExecApproved bool
 }
 
 // ToolPolicyResult is the decision returned to CallTool.
@@ -93,6 +103,7 @@ func (p *HarnessToolPolicy) Authorize(ctx context.Context, in ToolPolicyInput) T
 		TaskID:        in.TaskID,
 		AgentID:       in.AgentID,
 		RoleName:      in.AgentID,
+		ExecApproved:  in.ExecApproved,
 	})
 	if decision.Allowed {
 		return ToolPolicyResult{Allowed: true, Code: decision.Code, RuleID: decision.RuleID, Layer: decision.Layer, Reason: decision.Reason}
@@ -260,15 +271,8 @@ func (s *MCPService) permissionTagsFor(tool string) []string {
 }
 
 func parseToolArguments(raw string) ([]string, []string) {
-	if strings.TrimSpace(raw) == "" {
-		return nil, nil
-	}
-	var args map[string]any
-	if err := json.Unmarshal([]byte(raw), &args); err != nil {
-		return nil, nil
-	}
-	return argumentList(args, "paths", "path", "file_path", "files"),
-		argumentList(args, "command", "cmd", "argv")
+	args := policy.CanonicalArgsFromJSON([]byte(raw))
+	return args.Paths, args.Command
 }
 
 func argumentList(args map[string]any, keys ...string) []string {

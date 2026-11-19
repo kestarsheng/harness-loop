@@ -114,7 +114,15 @@ type ApprovalTicket struct {
 	Stage       string
 	RequestedAt time.Time
 	ExpiresAt   time.Time
-	key         string
+
+	// 下面四个字段只用于签发一次性审批令牌：令牌必须钉死「哪个任务、哪次
+	// 调用（参数摘要）、哪张工单」，少一个就能被别的调用复用。
+	TenantID   string
+	ProjectID  string
+	TaskID     string
+	ArgsDigest string
+
+	key string
 }
 
 type ApprovalOutcome struct {
@@ -138,6 +146,14 @@ type ApprovalGate struct {
 	alert        func(string)
 	rejected     map[string]ApprovalOutcome
 	requests     int
+
+	// tickets 按调用指纹复用 pending 工单。同一次调用被重复检查（重试、预检
+	// 与闸门各问一次）时不能再建一张工单——否则一次 rm 会刷出一屏工单。
+	// 只在 gate 自己管理工单时启用（manager 非空）。
+	tickets map[string]*ApprovalTicket
+
+	issuer *ApprovalTokenIssuer
+	sink   ApprovalTokenSink
 }
 
 func NewApprovalGate(cfg ApprovalConfig, manager *agentapproval.ApprovalFlowManager) *ApprovalGate {
@@ -147,7 +163,20 @@ func NewApprovalGate(cfg ApprovalConfig, manager *agentapproval.ApprovalFlowMana
 		now:          time.Now,
 		pollInterval: 50 * time.Millisecond,
 		rejected:     make(map[string]ApprovalOutcome),
+		tickets:      make(map[string]*ApprovalTicket),
 	}
+}
+
+// SetTokenDelivery 挂上令牌签发器与投递端。两者都非空时，批准后会把一次性
+// 令牌送到执行面；缺一不可，否则宁可不下发（执行面会失败关闭）。
+func (g *ApprovalGate) SetTokenDelivery(issuer *ApprovalTokenIssuer, sink ApprovalTokenSink) {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	g.issuer = issuer
+	g.sink = sink
+	g.mu.Unlock()
 }
 
 func (g *ApprovalGate) Config() ApprovalConfig {
@@ -191,6 +220,15 @@ func (g *ApprovalGate) Begin(ctx context.Context, req Request, tags []string) (*
 		g.mu.Unlock()
 		return nil, fmt.Errorf("%w: %s", ErrApprovalRejected, out.RuleID)
 	}
+	if existing, ok := g.tickets[key]; ok {
+		if g.now().Before(existing.ExpiresAt) {
+			// 同一调用（同任务、同工具、同参数）已经有工单在等人批复：
+			// 直接复用，不再建第二张。
+			g.mu.Unlock()
+			return existing, nil
+		}
+		delete(g.tickets, key)
+	}
 	manager := g.manager
 	g.mu.Unlock()
 
@@ -229,7 +267,7 @@ func (g *ApprovalGate) Begin(ctx context.Context, req Request, tags []string) (*
 	g.requests++
 	g.mu.Unlock()
 
-	return &ApprovalTicket{
+	ticket := &ApprovalTicket{
 		ID:          created.ID,
 		Kind:        kind,
 		RuleID:      ruleID,
@@ -237,8 +275,16 @@ func (g *ApprovalGate) Begin(ctx context.Context, req Request, tags []string) (*
 		Stage:       req.Stage,
 		RequestedAt: g.now(),
 		ExpiresAt:   g.now().Add(time.Duration(g.cfg.TimeoutSeconds) * time.Second),
+		TenantID:    req.TenantID,
+		ProjectID:   req.ProjectID,
+		TaskID:      req.TaskID,
+		ArgsDigest:  ArgumentsDigest(req.Args),
 		key:         key,
-	}, nil
+	}
+	g.mu.Lock()
+	g.tickets[key] = ticket
+	g.mu.Unlock()
+	return ticket, nil
 }
 
 func (g *ApprovalGate) Await(ctx context.Context, ticket *ApprovalTicket) ApprovalOutcome {
@@ -271,9 +317,22 @@ func (g *ApprovalGate) Await(ctx context.Context, ticket *ApprovalTicket) Approv
 		}
 		switch st {
 		case agentapproval.StatusApproved:
+			// 批准生效的最后一步：把「这一次调用」签成一次性令牌送到执行面。
+			// 送不到就不算放行——执行面没有令牌会照样拒绝，这里必须先把
+			// 失败说清楚，而不是返回 allowed 让调用端以为能跑。
+			if err := g.deliverToken(ctx, ticket); err != nil {
+				out.Status = agentapproval.StatusApproved
+				out.Code = CodeApprovalUnavailable
+				out.Err = ErrApprovalUnavailable
+				out.Reason = "approval approved but token delivery failed: " + err.Error()
+				g.notify("policy: approval token delivery failed for " + ticket.ID + ": " + err.Error())
+				g.forgetTicket(ticket)
+				return out
+			}
 			out.Allowed = true
 			out.Status = agentapproval.StatusApproved
 			out.Reason = "approval approved"
+			g.forgetTicket(ticket)
 			return out
 		case agentapproval.StatusRejected:
 			out.Status = agentapproval.StatusRejected
@@ -281,6 +340,7 @@ func (g *ApprovalGate) Await(ctx context.Context, ticket *ApprovalTicket) Approv
 			out.Err = ErrApprovalRejected
 			out.Reason = "approval rejected"
 			g.rememberRejected(ticket, out)
+			g.forgetTicket(ticket)
 			return out
 		case agentapproval.StatusCancelled, agentapproval.StatusTimeout:
 			out.Status = st
@@ -292,6 +352,7 @@ func (g *ApprovalGate) Await(ctx context.Context, ticket *ApprovalTicket) Approv
 				out.Err = ErrApprovalCancelled
 			}
 			out.Reason = "approval " + string(st)
+			g.forgetTicket(ticket)
 			return out
 		}
 
@@ -301,6 +362,7 @@ func (g *ApprovalGate) Await(ctx context.Context, ticket *ApprovalTicket) Approv
 			out.Code = CodeApprovalTimeout
 			out.Err = ErrApprovalTimeout
 			out.Reason = "approval timed out; the call is not allowed"
+			g.forgetTicket(ticket)
 			return out
 		}
 
@@ -311,10 +373,52 @@ func (g *ApprovalGate) Await(ctx context.Context, ticket *ApprovalTicket) Approv
 			out.Code = CodeApprovalCancelled
 			out.Err = ErrApprovalCancelled
 			out.Reason = "approval cancelled"
+			g.forgetTicket(ticket)
 			return out
 		case <-ticker.C:
 		}
 	}
+}
+
+// deliverToken 给一次已批准的调用签一次性令牌并投递。未装配签发器/投递端时
+// 什么都不做（离线单元测试与旧行为），装配了就必须成功。
+func (g *ApprovalGate) deliverToken(ctx context.Context, ticket *ApprovalTicket) error {
+	g.mu.Lock()
+	issuer, sink := g.issuer, g.sink
+	g.mu.Unlock()
+	if issuer == nil || sink == nil || ticket == nil {
+		return nil
+	}
+	token, _, err := issueTicketToken(issuer, ticket)
+	if err != nil {
+		return err
+	}
+	return RegisterApprovalTokenWithRetry(ctx, sink, token)
+}
+
+func (g *ApprovalGate) forgetTicket(ticket *ApprovalTicket) {
+	if ticket == nil {
+		return
+	}
+	g.mu.Lock()
+	if cur, ok := g.tickets[ticket.key]; ok && cur.ID == ticket.ID {
+		delete(g.tickets, ticket.key)
+	}
+	g.mu.Unlock()
+}
+
+// issueTicketToken 把工单钉成令牌载荷。gate 与 HTTP ApprovalClient 共用同一
+// 份载荷构造，避免两边签出不同绑定。
+func issueTicketToken(issuer *ApprovalTokenIssuer, ticket *ApprovalTicket) (string, ApprovalTokenClaims, error) {
+	return issuer.Issue(ApprovalTokenClaims{
+		TenantID:   ticket.TenantID,
+		ProjectID:  ticket.ProjectID,
+		TaskID:     ticket.TaskID,
+		Tool:       ticket.Tool,
+		Stage:      ticket.Stage,
+		ArgsDigest: ticket.ArgsDigest,
+		ApprovalID: ticket.ID,
+	})
 }
 
 func (g *ApprovalGate) Authorize(ctx context.Context, req Request, tags []string) ApprovalOutcome {

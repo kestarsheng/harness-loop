@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -26,6 +27,12 @@ type ApprovalClientConfig struct {
 	PollInterval   time.Duration
 	Approval       policy.ApprovalConfig
 	Now            func() time.Time
+
+	// TokenIssuer/TokenSink 是「批准真正生效」的下半场：批准后签发一次性
+	// 令牌并注册到执行面（mcp-service）。只在跨进程部署时装配；未装配时保持
+	// 老的「只回一个 allowed」行为（执行面会失败关闭）。
+	TokenIssuer *policy.ApprovalTokenIssuer
+	TokenSink   policy.ApprovalTokenSink
 }
 
 // ApprovalClient implements ToolApprovalGate over HTTP. The approval queue
@@ -43,6 +50,21 @@ type ApprovalClient struct {
 	mu       sync.Mutex
 	rejected map[string]policy.ApprovalOutcome
 	keys     map[string]string
+	// tickets 让「同一调用」（同租户/项目/任务/阶段/工具/参数）复用同一张
+	// pending 工单。重复建单就是工单风暴的来源：模型多轮重试、预检与闸门
+	// 各问一次，都会走到 Begin。
+	tickets map[string]*pendingTicket
+
+	issuer *policy.ApprovalTokenIssuer
+	sink   policy.ApprovalTokenSink
+}
+
+// pendingTicket 是去重的占位：第一个 Begin 负责建单，其余并发调用等它建完
+// 直接拿同一张工单，而不是各自再发一次 /approval/request。
+type pendingTicket struct {
+	ready  chan struct{}
+	ticket *policy.ApprovalTicket
+	err    error
 }
 
 func NewApprovalClient(cfg ApprovalClientConfig) (*ApprovalClient, error) {
@@ -82,6 +104,9 @@ func NewApprovalClient(cfg ApprovalClientConfig) (*ApprovalClient, error) {
 		now:          now,
 		rejected:     make(map[string]policy.ApprovalOutcome),
 		keys:         make(map[string]string),
+		tickets:      make(map[string]*pendingTicket),
+		issuer:       cfg.TokenIssuer,
+		sink:         cfg.TokenSink,
 	}, nil
 }
 
@@ -99,18 +124,50 @@ func (c *ApprovalClient) Begin(ctx context.Context, req policy.Request, tags []s
 	key := approvalRequestKey(req)
 	c.mu.Lock()
 	out, rejected := c.rejected[key]
-	c.mu.Unlock()
 	if rejected {
+		c.mu.Unlock()
 		return nil, fmt.Errorf("%w: %s", policy.ErrApprovalRejected, out.RuleID)
 	}
+	if existing, ok := c.tickets[key]; ok {
+		c.mu.Unlock()
+		<-existing.ready
+		if existing.err != nil {
+			return nil, existing.err
+		}
+		// 复用而不新建：同一调用（同租户/项目/任务/阶段/工具/参数）只应
+		// 有一张工单，否则模型每轮重试都会往审批队列里灌一张。
+		log.Printf("[approval] reusing pending ticket %s for %s/%s", existing.ticket.ID, req.TaskID, req.Tool)
+		return existing.ticket, nil
+	}
+	entry := &pendingTicket{ready: make(chan struct{})}
+	c.tickets[key] = entry
+	c.mu.Unlock()
 
+	ticket, err := c.createTicket(ctx, req, key, kind, ruleID)
+
+	c.mu.Lock()
+	if err != nil {
+		delete(c.tickets, key)
+		entry.err = err
+	} else {
+		entry.ticket = ticket
+		c.keys[ticket.ID] = key
+	}
+	close(entry.ready)
+	c.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	return ticket, nil
+}
+
+// createTicket 建单并返回带完整绑定的工单。绑定（task/tool/args_digest）就是
+// 之后签发令牌时要钉死的东西，所以建单时一次算好。
+func (c *ApprovalClient) createTicket(ctx context.Context, req policy.Request, key string, kind policy.HighRiskKind, ruleID string) (*policy.ApprovalTicket, error) {
 	id, err := c.create(ctx, req, kind, ruleID)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", policy.ErrApprovalUnavailable, err)
 	}
-	c.mu.Lock()
-	c.keys[id] = key
-	c.mu.Unlock()
 	return &policy.ApprovalTicket{
 		ID:          id,
 		Kind:        kind,
@@ -119,6 +176,10 @@ func (c *ApprovalClient) Begin(ctx context.Context, req policy.Request, tags []s
 		Stage:       req.Stage,
 		RequestedAt: c.now(),
 		ExpiresAt:   c.now().Add(c.timeout),
+		TenantID:    req.TenantID,
+		ProjectID:   req.ProjectID,
+		TaskID:      req.TaskID,
+		ArgsDigest:  policy.ArgumentsDigest(req.Args),
 	}, nil
 }
 
@@ -151,6 +212,15 @@ func (c *ApprovalClient) Await(ctx context.Context, ticket *policy.ApprovalTicke
 		}
 		switch status {
 		case agentapproval.StatusApproved:
+			// 批准生效的收尾：签发一次性令牌并注册到执行面。注册失败就不
+			// 放行——执行面没有令牌会照样拒，这里必须如实报错。
+			if err := c.deliverToken(ctx, ticket); err != nil {
+				out.Code = policy.CodeApprovalUnavailable
+				out.Err = policy.ErrApprovalUnavailable
+				out.Reason = "approval approved but token delivery failed: " + err.Error()
+				c.forget(ticket.ID)
+				return out
+			}
 			out.Allowed = true
 			out.Status = agentapproval.StatusApproved
 			out.Reason = "approval approved"
@@ -330,6 +400,31 @@ func (c *ApprovalClient) closeRemote(approvalID, reason string) {
 	_ = resp.Body.Close()
 }
 
+// deliverToken 给已批准的调用签一次性令牌并注册到执行面。未装配签发器/执行面
+// 时保持旧行为（不发令牌）；装配了就必须成功。
+func (c *ApprovalClient) deliverToken(ctx context.Context, ticket *policy.ApprovalTicket) error {
+	if c == nil || c.issuer == nil || c.sink == nil || ticket == nil {
+		return nil
+	}
+	token, _, err := c.issuer.Issue(policy.ApprovalTokenClaims{
+		TenantID:   ticket.TenantID,
+		ProjectID:  ticket.ProjectID,
+		TaskID:     ticket.TaskID,
+		Tool:       ticket.Tool,
+		Stage:      ticket.Stage,
+		ArgsDigest: ticket.ArgsDigest,
+		ApprovalID: ticket.ID,
+	})
+	if err != nil {
+		return err
+	}
+	if err := policy.RegisterApprovalTokenWithRetry(ctx, c.sink, token); err != nil {
+		return err
+	}
+	log.Printf("[approval] token issued and delivered for approval %s (task=%s tool=%s)", ticket.ID, ticket.TaskID, ticket.Tool)
+	return nil
+}
+
 func (c *ApprovalClient) rememberRejected(ticket *policy.ApprovalTicket, out policy.ApprovalOutcome) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -339,12 +434,17 @@ func (c *ApprovalClient) rememberRejected(ticket *policy.ApprovalTicket, out pol
 	}
 	c.rejected[key] = out
 	delete(c.keys, ticket.ID)
+	delete(c.tickets, key)
 }
 
 func (c *ApprovalClient) forget(approvalID string) {
 	c.mu.Lock()
+	defer c.mu.Unlock()
+	key, ok := c.keys[approvalID]
 	delete(c.keys, approvalID)
-	c.mu.Unlock()
+	if ok {
+		delete(c.tickets, key)
+	}
 }
 
 type approvalResponse struct {

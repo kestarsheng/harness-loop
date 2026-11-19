@@ -2,9 +2,11 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"agent-platform/pkg/agent"
+	"agent-platform/pkg/harnessloop/policy"
 )
 
 func TestToolPolicyContextFromVars(t *testing.T) {
@@ -65,5 +67,36 @@ func TestMergeToolPolicyContextClonesConfig(t *testing.T) {
 	nilConfig := mergeToolPolicyContext(nil, pc)
 	if nilConfig == nil || nilConfig.Extra["__policy_context__"] == nil {
 		t.Fatalf("nil config must still carry policy context: %+v", nilConfig)
+	}
+}
+
+func TestAnnotateApprovalBindingAddsExecBinding(t *testing.T) {
+	cfg := &agent.ToolSpecificConfig{Extra: map[string]any{
+		"__policy_context__": map[string]any{"stage": "c", "task_id": "task-1"},
+	}}
+	args := json.RawMessage(`{"command":"rm -f scratch/probe.txt"}`)
+	annotateApprovalBinding(cfg, "code_execute", args)
+
+	section, ok := cfg.Extra["__policy_context__"].(map[string]any)
+	if !ok {
+		t.Fatalf("policy context missing: %+v", cfg.Extra)
+	}
+	want := policy.ApprovalRef("task-1", "run_command", policy.ArgumentsDigest(policy.CanonicalArgsFromJSON(args)))
+	if section["approval_ref"] != want {
+		t.Fatalf("approval_ref = %v, want %s", section["approval_ref"], want)
+	}
+	if wait, ok := section["approval_wait_seconds"].(int); !ok || wait <= 0 {
+		t.Fatalf("wait budget missing: %+v", section)
+	}
+}
+
+func TestAnnotateApprovalBindingSkipsNonExecTools(t *testing.T) {
+	cfg := &agent.ToolSpecificConfig{Extra: map[string]any{
+		"__policy_context__": map[string]any{"stage": "c", "task_id": "task-1"},
+	}}
+	annotateApprovalBinding(cfg, "file_write", json.RawMessage(`{"path":"a.txt"}`))
+	section := cfg.Extra["__policy_context__"].(map[string]any)
+	if _, ok := section["approval_ref"]; ok {
+		t.Fatalf("non-exec calls must not carry an approval binding: %+v", section)
 	}
 }

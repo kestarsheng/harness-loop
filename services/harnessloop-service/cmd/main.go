@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/reflection"
@@ -35,6 +36,7 @@ import (
 	"agent-platform/pkg/observability"
 	codeindexpb "agent-platform/pkg/pb/codeindex"
 	harnesspb "agent-platform/pkg/pb/harnessloop"
+	mcppb "agent-platform/pkg/pb/mcp"
 	"agent-platform/pkg/pgindex"
 	"agent-platform/services/harnessloop-service/internal/config"
 	"agent-platform/services/harnessloop-service/internal/handler"
@@ -417,16 +419,76 @@ func buildApprovalGate(cfg config.Config) (service.ToolApprovalGate, error) {
 		log.Printf("harnessloop: approval config fallback to defaults: %v", err)
 		approvalCfg = policy.DefaultApprovalConfig()
 	}
-	client, err := service.NewApprovalClient(service.ApprovalClientConfig{
+	clientCfg := service.ApprovalClientConfig{
 		Address:      cfg.Approval.Address,
 		Timeout:      time.Duration(cfg.Approval.TimeoutSeconds) * time.Second,
 		PollInterval: time.Duration(cfg.Approval.PollMs) * time.Millisecond,
 		Approval:     approvalCfg,
-	})
+	}
+	// 批准之后必须把「这一次调用」的硬凭据送到执行面，否则批准只是把工单
+	// 置成 approved，mcp 仍会按 exec 白名单拒绝。密钥只在本服务里；投递走
+	// mcp 的 RegisterApprovalToken。地址没配就只签发不投递（执行面会拒）。
+	if issuer, err := policy.ApprovalTokenIssuerFromEnv(); err != nil {
+		log.Printf("harnessloop: approval token signing disabled: %v", err)
+	} else if sink, err := buildApprovalTokenSink(); err != nil {
+		log.Printf("harnessloop: approval token delivery disabled: %v", err)
+	} else if sink != nil {
+		clientCfg.TokenIssuer = issuer
+		clientCfg.TokenSink = sink
+		log.Printf("harnessloop: approval token signing enabled (ttl=%s, mcp=%s)", issuer.TTL(), approvalTokenMCPAddr())
+	}
+	client, err := service.NewApprovalClient(clientCfg)
 	if err != nil {
 		return nil, err
 	}
 	return client, nil
+}
+
+const approvalTokenMCPAddrEnv = "HARNESSLOOP_MCP_ADDR"
+
+func approvalTokenMCPAddr() string {
+	if addr := strings.TrimSpace(os.Getenv(approvalTokenMCPAddrEnv)); addr != "" {
+		return addr
+	}
+	return "127.0.0.1:50005"
+}
+
+// buildApprovalTokenSink 连上 mcp-service，用于注册一次性审批令牌。
+// gRPC 客户端是懒连接，启动时没起 mcp 不会阻塞；注册失败会由闸门
+// 按「批准未生效」处理（fail closed）。
+func buildApprovalTokenSink() (policy.ApprovalTokenSink, error) {
+	addr := strings.TrimSpace(os.Getenv(approvalTokenMCPAddrEnv))
+	if addr == "" {
+		return nil, nil
+	}
+	conn, err := grpc.Dial(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return nil, err
+	}
+	return &mcpTokenSink{client: mcppb.NewMCPServiceClient(conn)}, nil
+}
+
+// mcpTokenSink 实现 policy.ApprovalTokenSink：只投递令牌，不签发、不验签。
+type mcpTokenSink struct {
+	client mcppb.MCPServiceClient
+}
+
+func (s *mcpTokenSink) RegisterApprovalToken(ctx context.Context, token string) error {
+	if s == nil || s.client == nil {
+		return errors.New("mcp approval token sink is not configured")
+	}
+	resp, err := s.client.RegisterApprovalToken(ctx, &mcppb.RegisterApprovalTokenRequest{Token: token})
+	if err != nil {
+		return err
+	}
+	if resp == nil || !resp.Accepted {
+		reason := ""
+		if resp != nil {
+			reason = resp.Reason
+		}
+		return fmt.Errorf("mcp rejected approval token: %s", reason)
+	}
+	return nil
 }
 
 func subtaskExecutor(client *harnessclient.Client, cfg config.Config, harness *metrics.Harness, tracer *tracing.Tracer) service.SubtaskExecutor {

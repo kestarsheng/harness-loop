@@ -2,11 +2,14 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 
 	"agent-platform/pkg/agent"
+	"agent-platform/pkg/harnessloop/policy"
 )
 
 // toolPolicyContext is the per-request policy context forwarded from the
@@ -75,6 +78,46 @@ func mergeToolPolicyContext(cfg *agent.ToolSpecificConfig, pc toolPolicyContext)
 	}
 	out.Extra = extra
 	return &out
+}
+
+// agentApprovalWaitEnv 是 agent-service 给执行面的等待预算：批准是异步的，
+// 执行面在预算内等一枚 harnessloop 签发的一次性令牌。
+const agentApprovalWaitEnv = "AGENT_APPROVAL_WAIT_SECONDS"
+
+func agentApprovalWaitSeconds() int {
+	const fallback = 180
+	if raw := strings.TrimSpace(os.Getenv(agentApprovalWaitEnv)); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed >= 0 {
+			return parsed
+		}
+	}
+	return fallback
+}
+
+// annotateApprovalBinding 给 exec 调用补上审批绑定。
+//
+// agent-service 不持有签发密钥，也不替执行面做判定：它只把「这次调用是哪
+// 一个任务、哪个工具、哪份参数摘要」原样传给 mcp-service，并给出等待预算。
+// 令牌本身由 harnessloop 直接注册到 mcp；这里透传的是绑定指纹。
+func annotateApprovalBinding(cfg *agent.ToolSpecificConfig, toolName string, arguments json.RawMessage) {
+	if cfg == nil {
+		return
+	}
+	harnessTool := harnessToolName(toolName)
+	if harnessTool != "run_command" {
+		return
+	}
+	section, ok := cfg.Extra["__policy_context__"].(map[string]any)
+	if !ok {
+		return
+	}
+	taskID, _ := section["task_id"].(string)
+	if strings.TrimSpace(taskID) == "" {
+		return
+	}
+	digest := policy.ArgumentsDigest(policy.CanonicalArgsFromJSON(arguments))
+	section["approval_ref"] = policy.ApprovalRef(taskID, harnessTool, digest)
+	section["approval_wait_seconds"] = agentApprovalWaitSeconds()
 }
 
 func stringContextVar(vars map[string]any, key string) string {

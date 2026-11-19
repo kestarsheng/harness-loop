@@ -16,6 +16,7 @@ import (
 	mcp "agent-platform/pkg/mcp"
 	commonpb "agent-platform/pkg/pb/common"
 	pb "agent-platform/pkg/pb/mcp"
+	"agent-platform/services/mcp-service/internal/audit"
 	"agent-platform/services/mcp-service/internal/governance"
 	"agent-platform/services/mcp-service/internal/model"
 	"agent-platform/services/mcp-service/internal/tools"
@@ -40,6 +41,8 @@ type MCPService struct {
 	governance           *governance.GovernancePipeline // ★ 治理流水线
 	callCounts           map[string]int                 // ★ 工具调用计数
 	toolPolicy           ToolPolicy                     // ★ CallTool 权限决策单一入口
+	approvalTokens       *ApprovalTokenStore            // ★ 已批准调用的一次性令牌登记簿
+	approvalWait         time.Duration                  // ★ 等「批准后到达的令牌」的预算
 	mu                   sync.RWMutex
 	knowledgeServiceAddr string
 	browserServiceAddr   string
@@ -71,6 +74,17 @@ func NewMCPService(llmClient llm.Client, cfg *config.Config) *MCPService {
 		callCounts:           make(map[string]int),
 		knowledgeServiceAddr: gatewayAddr,
 		browserServiceAddr:   browserAddr,
+		approvalWait:         approvalWaitFromEnv(),
+	}
+	loggedTokenKey := false
+	if store, err := NewApprovalTokenStore(); err != nil {
+		log.Printf("[approval] token verification disabled: %v", err)
+	} else {
+		s.approvalTokens = store
+		loggedTokenKey = true
+	}
+	if loggedTokenKey {
+		log.Printf("[approval] approval token verification enabled (wait=%s)", s.approvalWait)
 	}
 
 	s.setupDefaultSLOs()
@@ -322,11 +336,16 @@ func (s *MCPService) registerBuiltInTools() {
 	}
 	s.toolExec["file_write"] = tools.NewFileWriteTool(fileRoot)
 
-	// Code execution tool is intentionally NOT registered.
-	// NewCodeExecTool is a non-functional stub ("Code execution is disabled for
-	// security") and the project has decided not to ship code execution. Leaving
-	// it registered wastes an agent turn: the model calls it, then discovers it
-	// does nothing. The implementation stays in tools.go for future use.
+	// code_execute is the exec-capable tool (harness name run_command). It never
+	// runs a shell: the policy gate must allow the command (exec allowlist) or a
+	// one-time approval token must release it, and the executor resolves every
+	// path inside the workspace root. rm/del are handled in-process.
+	s.tools["code_execute"] = model.Tool{
+		Name:        "code_execute",
+		Description: "Run a command in the task workspace and return its output. The command runs without a shell, with the workspace root as the working directory. Commands outside the exec allowlist need human approval.",
+		InputSchema: `{"type":"object","properties":{"command":{"type":"string","description":"Command line, e.g. \"go test ./...\" or \"rm -f scratch/probe.txt\""},"timeout_seconds":{"type":"integer","description":"Timeout in seconds (default 60, max 300)"}},"required":["command"]}`,
+	}
+	s.toolExec["code_execute"] = tools.NewCommandTool()
 
 	// Every built-in tool must carry permission tags so that callers can map
 	// tools onto role and stage constraints. Unclassified tools keep an empty
@@ -628,9 +647,23 @@ func (s *MCPService) CallTool(ctx context.Context, req *pb.CallToolRequest) (*pb
 	toolPolicy := s.toolPolicy
 	s.mu.RUnlock()
 	if toolPolicy != nil {
-		decision := toolPolicy.Authorize(ctx, s.toolPolicyInput(req))
+		// 审批令牌在策略之后判：普通放行不需要令牌；只有被 exec 白名单拒绝
+		// 的高危调用才会等一枚由 harnessloop 签发的一次性令牌。
+		policyInput := s.toolPolicyInput(req)
+		decision, _ := s.authorizeWithApproval(ctx, req, policyInput)
 		if !decision.Allowed {
 			fmt.Printf("[Policy] BLOCKED tool %s: %s (%s)\n", req.Name, decision.Code, decision.Reason)
+			// 策略拒绝落在执行面这一侧，必须留痕：批准链路里「拒了谁、
+			// 为什么拒、有没有令牌」要能事后对上。
+			audit.Emit(audit.Record{
+				Tool:          req.Name,
+				Decision:      audit.DecisionDeny,
+				Code:          decision.Code,
+				Reason:        decision.Reason,
+				WorkspaceRoot: policyInput.WorkspaceRoot,
+				TaskID:        policyInput.TaskID,
+				ApprovalRef:   approvalRefFor(policyInput),
+			})
 			return &pb.CallToolResponse{
 				IsError: true,
 				Content: fmt.Sprintf("工具调用被权限策略拒绝: %s (%s)", decision.Code, decision.Reason),
