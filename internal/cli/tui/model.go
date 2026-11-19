@@ -18,13 +18,15 @@ import (
 )
 
 const (
-	flushInterval = 100 * time.Millisecond
-	pollInterval  = time.Second
-	reconnectMin  = time.Second
-	reconnectMax  = 10 * time.Second
-	maxEvents     = 500
-	maxStream     = 500
-	maxEvidence   = 3
+	flushInterval    = 100 * time.Millisecond
+	pollInterval     = time.Second
+	spinnerInterval  = 500 * time.Millisecond
+	thinkingInterval = time.Second
+	reconnectMin     = time.Second
+	reconnectMax     = 10 * time.Second
+	maxEvents        = 500
+	maxStream        = 500
+	maxEvidence      = 3
 )
 
 type ViewMode int
@@ -96,11 +98,16 @@ type WatchEvent struct {
 
 // ChatLine is one rendered turn of the direct-chat conversation.
 type ChatLine struct {
-	Role      string // "user" or "assistant"
+	Role      string // "user", "assistant" or "tool"
 	Text      string
 	Err       bool
 	Streaming bool
 	Time      time.Time
+
+	// ToolName/ToolArgs are kept for the pending tool row so a tool_result
+	// without a name can still rewrite the right label.
+	ToolName string
+	ToolArgs string
 }
 
 type Source interface {
@@ -230,6 +237,13 @@ type Model struct {
 	chatStreaming bool
 	chatCh        <-chan ChatChunk
 	chatGen       int
+	chatCancel    context.CancelFunc
+	// Spinner / thinking state. spinnerFrame drives both the braille spinner
+	// and the alternating block cursor; thinkingStarted feeds "Thinking… 3s".
+	spinnerFrame    int
+	thinking        bool
+	thinkingText    string
+	thinkingStarted time.Time
 
 	// taskGen tags async messages so a late reply from a previous task can
 	// never be applied to the task now on screen.
@@ -314,6 +328,11 @@ type chatChunkMsg struct {
 	Gen   int
 	Chunk ChatChunk
 	OK    bool
+}
+
+// spinTickMsg advances the spinner, the blinking cursor and the thinking clock.
+type spinTickMsg struct {
+	Gen int
 }
 
 func NewModel(state TaskState, src Source, opts Options) *Model {
@@ -442,6 +461,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
+		if m.chatStreaming && msg.Type == tea.KeyEsc {
+			m.interruptChat()
+			return m, nil
+		}
 		if m.session != nil && m.awaitingInput {
 			// ? opens the help layer at the composer; Esc closes a panel
 			// before it clears the input buffer.
@@ -472,7 +495,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.chatCh = msg.Ch
-		return m, m.waitChatCmd(msg.Gen, msg.Ch)
+		return m, tea.Batch(m.waitChatCmd(msg.Gen, msg.Ch), m.spinTickCmd())
 
 	case chatChunkMsg:
 		if msg.Gen != m.chatGen {
@@ -485,6 +508,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.applyChatChunk(msg.Chunk)
 		return m, m.waitChatCmd(msg.Gen, m.chatCh)
+
+	case spinTickMsg:
+		if msg.Gen != m.chatGen || !m.chatStreaming {
+			return m, nil
+		}
+		m.spinnerFrame++
+		return m, m.spinTickCmd()
 
 	case taskCreatedMsg:
 		if msg.Err != nil {
@@ -703,6 +733,10 @@ func (m *Model) startChatSubmit(message string) tea.Cmd {
 	m.chatStreaming = true
 	m.chatCh = nil
 	m.chatGen++
+	m.spinnerFrame = 0
+	m.thinking = true
+	m.thinkingText = ""
+	m.thinkingStarted = now
 	return m.chatCmd(m.chatGen, message)
 }
 
@@ -711,12 +745,19 @@ func (m *Model) chatCmd(gen int, message string) tea.Cmd {
 	if cfg == nil || cfg.Chat == nil {
 		return nil
 	}
-	ctx := m.baseCtx()
+	ctx, cancel := context.WithCancel(m.baseCtx())
+	m.chatCancel = cancel
 	chat := cfg.Chat
 	return func() tea.Msg {
 		ch, err := chat(ctx, message)
 		return chatStartedMsg{Gen: gen, Ch: ch, Err: err}
 	}
+}
+
+// spinTickCmd drives the 500ms spinner while a reply streams.
+func (m *Model) spinTickCmd() tea.Cmd {
+	gen := m.chatGen
+	return tea.Tick(spinnerInterval, func(time.Time) tea.Msg { return spinTickMsg{Gen: gen} })
 }
 
 func (m *Model) waitChatCmd(gen int, ch <-chan ChatChunk) tea.Cmd {
@@ -731,13 +772,41 @@ func (m *Model) waitChatCmd(gen int, ch <-chan ChatChunk) tea.Cmd {
 
 // applyChatChunk folds one streamed chunk into the trailing assistant turn.
 func (m *Model) applyChatChunk(chunk ChatChunk) {
+	if chunk.Usage > 0 {
+		m.tokensUsed = chunk.Usage
+	}
 	switch chunk.Type {
+	case "think":
+		m.thinking = true
+		if chunk.Thinking != "" {
+			m.thinkingText = chunk.Thinking
+		}
+	case "tool_start":
+		m.thinking = false
+		name := chunk.ToolName
+		if name == "" {
+			name = strings.TrimSpace(chunk.Content)
+		}
+		m.chat = append(m.chat, ChatLine{
+			Role:      "tool",
+			Text:      toolCallLabel("⏺", name, chunk.ToolArgs),
+			ToolName:  name,
+			ToolArgs:  chunk.ToolArgs,
+			Streaming: true,
+			Time:      m.now(),
+		})
+	case "tool_result":
+		m.thinking = false
+		m.finishToolLine(chunk.ToolName, chunk.ToolArgs, chunk.ToolResult)
 	case "token":
+		m.thinking = false
 		m.appendAssistantText(chunk.Content)
 	case "response":
 		// Legacy alias for streamed text; kept so an older server still works.
+		m.thinking = false
 		m.appendAssistantText(chunk.Content)
 	case "final":
+		m.thinking = false
 		// final carries the full authoritative reply; replacing (instead of
 		// appending) keeps the text from being duplicated after the tokens.
 		if chunk.Content != "" {
@@ -745,19 +814,80 @@ func (m *Model) applyChatChunk(chunk ChatChunk) {
 		}
 		m.finishChat()
 	case "error":
+		m.thinking = false
 		content := strings.TrimSpace(chunk.Content)
 		if content == "" {
 			content = "agent-service returned an error chunk"
 		}
 		m.finishChat()
 		m.chat = append(m.chat, ChatLine{Role: "assistant", Text: content, Err: true, Time: m.now()})
-	case "think", "tool_start", "tool_result", "handoff", "approval":
-		// Reasoning/tool plumbing stays out of the conversation view.
+	case "handoff", "approval":
+		// Handoffs and approvals stay out of the conversation view.
 	default:
 		if chunk.Content != "" {
 			m.appendAssistantText(chunk.Content)
 		}
 	}
+}
+
+// finishToolLine rewrites the pending tool row with its ✓/✗ outcome.
+func (m *Model) finishToolLine(name, args, result string) {
+	for i := len(m.chat) - 1; i >= 0; i-- {
+		if m.chat[i].Role != "tool" {
+			continue
+		}
+		m.chat[i].Streaming = false
+		mark := "✓"
+		if toolFailed(result) {
+			mark = "✗"
+			m.chat[i].Err = true
+		}
+		if name == "" {
+			name = m.chat[i].ToolName
+		}
+		if args == "" {
+			args = m.chat[i].ToolArgs
+		}
+		m.chat[i].Text = toolCallLabel(mark, name, args)
+		return
+	}
+}
+
+func toolFailed(result string) bool {
+	low := strings.ToLower(result)
+	if low == "" {
+		return false
+	}
+	for _, marker := range []string{"error", "fail", "denied", "timeout", "refused"} {
+		if strings.Contains(low, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func toolCallLabel(mark, name, args string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = "tool"
+	}
+	args = compactToolArgs(args)
+	if args == "" {
+		return mark + " " + name
+	}
+	return mark + " " + name + "(" + args + ")"
+}
+
+func compactToolArgs(args string) string {
+	args = strings.TrimSpace(strings.ReplaceAll(args, "\n", " "))
+	if args == "" {
+		return ""
+	}
+	runes := []rune(args)
+	if len(runes) > 48 {
+		return string(runes[:47]) + "…"
+	}
+	return args
 }
 
 func (m *Model) appendAssistantText(text string) {
@@ -790,10 +920,52 @@ func (m *Model) setAssistantText(text string) {
 // chunk is never left unread; finishChat is idempotent.
 func (m *Model) finishChat() {
 	m.chatStreaming = false
+	m.thinking = false
+	m.chatCancel = nil
+	m.clearToolSpinners()
 	for i := len(m.chat) - 1; i >= 0; i-- {
 		if m.chat[i].Role == "assistant" && m.chat[i].Streaming && !m.chat[i].Err {
 			if strings.TrimSpace(m.chat[i].Text) == "" {
 				m.chat[i].Text = "(empty reply)"
+			}
+			m.chat[i].Streaming = false
+			break
+		}
+	}
+	if m.session != nil && !m.session.ExitOnComplete {
+		m.awaitingInput = true
+		m.submitting = false
+		if m.input != nil {
+			m.input.Reset()
+		}
+	}
+}
+
+func (m *Model) clearToolSpinners() {
+	for i := range m.chat {
+		if m.chat[i].Role == "tool" {
+			m.chat[i].Streaming = false
+		}
+	}
+}
+
+// interruptChat cancels the in-flight reply when the user presses Esc.
+func (m *Model) interruptChat() {
+	if m.chatCancel != nil {
+		m.chatCancel()
+		m.chatCancel = nil
+	}
+	m.chatGen++
+	m.chatCh = nil
+	m.chatStreaming = false
+	m.thinking = false
+	m.clearToolSpinners()
+	for i := len(m.chat) - 1; i >= 0; i-- {
+		if m.chat[i].Role == "assistant" && m.chat[i].Streaming && !m.chat[i].Err {
+			if strings.TrimSpace(m.chat[i].Text) == "" {
+				m.chat[i].Text = "(interrupted)"
+			} else {
+				m.chat[i].Text += "\n\n(interrupted)"
 			}
 			m.chat[i].Streaming = false
 			break
@@ -1067,7 +1239,7 @@ func (m *Model) renderBody(width, height int) string {
 		return views.RenderKB(m.kbData(), width, maxLinesFor(height, 12), m.theme)
 	}
 	if m.chatMode && m.session != nil {
-		return views.RenderChat(m.chatLines(), width, height, m.theme)
+		return views.RenderChatWithCursor(m.chatLines(), width, height, m.theme, m.cursorChar())
 	}
 	header := views.RenderHeader(m.stageData())
 	stage := views.RenderStage(m.stageData())
@@ -1095,6 +1267,9 @@ func (m *Model) renderBody(width, height int) string {
 // a reply streams or a task runs, so the body can use the whole middle.
 func (m *Model) composerBlock(width int) []string {
 	if m.session == nil || !m.awaitingInput {
+		if m.session != nil && m.chatStreaming {
+			return []string{"", "  " + m.streamingStatusLine(width)}
+		}
 		if m.session != nil && m.submitting && m.state.TaskID == "" {
 			return []string{"", "  creating task…"}
 		}
@@ -1135,6 +1310,39 @@ func (m *Model) statusBar(width int) string {
 		segments = segments[:len(segments)-1]
 	}
 	return m.theme.Muted.Render(prefix + "? help")
+}
+
+const spinnerFrames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+func (m *Model) spinnerChar() string {
+	frames := []rune(spinnerFrames)
+	return string(frames[m.spinnerFrame%len(frames)])
+}
+
+// cursorChar alternates between two block cursors every spinner tick.
+func (m *Model) cursorChar() string {
+	if m.spinnerFrame%2 == 0 {
+		return "▍"
+	}
+	return "▌"
+}
+
+func (m *Model) streamingStatusLine(width int) string {
+	elapsed := 0
+	if !m.thinkingStarted.IsZero() {
+		elapsed = int(m.now().Sub(m.thinkingStarted) / time.Second)
+		if elapsed < 0 {
+			elapsed = 0
+		}
+	}
+	line := fmt.Sprintf("%s Thinking… %ds · esc to interrupt", m.spinnerChar(), elapsed)
+	if width > 0 {
+		runes := []rune(line)
+		if len(runes) > width-3 && width > 4 {
+			line = string(runes[:width-4]) + "…"
+		}
+	}
+	return line
 }
 
 func shortWorkDir(dir string) string {

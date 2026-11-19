@@ -28,6 +28,15 @@ const (
 // the terminal is too short. width is the terminal width and maxLines bounds
 // the rendered area so the composer and footer stay on screen.
 func RenderChat(messages []ChatMessage, width, maxLines int, theme Theme) string {
+	return RenderChatWithCursor(messages, width, maxLines, theme, chatCursor)
+}
+
+// RenderChatWithCursor is RenderChat with an explicit streaming cursor, letting
+// the model blink it without changing the view contract.
+func RenderChatWithCursor(messages []ChatMessage, width, maxLines int, theme Theme, cursor string) string {
+	if cursor == "" {
+		cursor = chatCursor
+	}
 	if width < chatMinWidth {
 		width = chatMinWidth
 	}
@@ -45,6 +54,14 @@ func RenderChat(messages []ChatMessage, width, maxLines int, theme Theme) string
 	}
 
 	for _, msg := range messages {
+		if msg.Role == "tool" {
+			style := theme.Muted
+			if msg.Err {
+				style = theme.Err
+			}
+			lines = append(lines, fit(theme.paint(chatIndent+strings.TrimRight(msg.Text, "\n"), style), width))
+			continue
+		}
 		label := "you"
 		style := theme.Accent
 		switch {
@@ -68,7 +85,7 @@ func RenderChat(messages []ChatMessage, width, maxLines int, theme Theme) string
 			}
 		}
 		if msg.Streaming && body != "" && !msg.Err {
-			body += chatCursor
+			body += cursor
 		}
 		for _, row := range wrapWidth(body, bodyWidth) {
 			text := chatIndent + chatBodyPad + row

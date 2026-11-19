@@ -39,6 +39,15 @@ type ChatChunk struct {
 	Type    string
 	Content string
 	Agent   string
+	// Thinking carries reasoning text from a "think" chunk.
+	Thinking string
+	// ToolName/ToolArgs describe a "tool_start" call; ToolResult is filled on
+	// "tool_result" and doubles as the success/failure signal.
+	ToolName   string
+	ToolArgs   string
+	ToolResult string
+	// Usage is the cumulative token usage reported on the final step.
+	Usage int64
 }
 
 // ChatFunc sends one user message to agent-service and streams the reply back.
