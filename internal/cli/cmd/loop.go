@@ -114,7 +114,7 @@ func newLoopCmd() *cobra.Command {
 	cmd.Flags().Float64Var(&budgetCost, "budget-cost", 0, "cost budget")
 	cmd.Flags().DurationVar(&timeout, "timeout", 0, "max wait for terminal state (0 means no limit)")
 	cmd.Flags().BoolVar(&exitOnComplete, "exit-on-complete", false, "exit as soon as the task reaches a terminal state (legacy behaviour)")
-	cmd.Flags().StringVar(&stackRoot, "stack-root", "", "repository root of the dev stack (default: current directory)")
+	cmd.Flags().StringVar(&stackRoot, "stack-root", "", "repository root of the dev stack (default: executable dir or $HARNESS_STACK_ROOT)")
 	cmd.Flags().StringVar(&contractPath, "contract", devstack.DefaultContractPath, "dev stack contract file (relative to --stack-root)")
 
 	cmd.AddCommand(newLoopStartCmd(), newLoopStopCmd())
@@ -196,7 +196,7 @@ func newLoopStartCmd() *cobra.Command {
 			return emitBoardState(cmd, "start", st, runErr)
 		},
 	}
-	cmd.Flags().StringVar(&stackRoot, "stack-root", "", "repository root of the dev stack (default: current directory)")
+	cmd.Flags().StringVar(&stackRoot, "stack-root", "", "repository root of the dev stack (default: executable dir or $HARNESS_STACK_ROOT)")
 	cmd.Flags().StringVar(&contractPath, "contract", devstack.DefaultContractPath, "dev stack contract file (relative to --stack-root)")
 	cmd.Flags().StringVar(&ref, "ref", "", "terminal reference id (default: the parent terminal, or $HARNESS_LOOP_REF)")
 	return cmd
@@ -225,7 +225,7 @@ func newLoopStopCmd() *cobra.Command {
 			return emitBoardState(cmd, "stop", st, runErr)
 		},
 	}
-	cmd.Flags().StringVar(&stackRoot, "stack-root", "", "repository root of the dev stack (default: current directory)")
+	cmd.Flags().StringVar(&stackRoot, "stack-root", "", "repository root of the dev stack (default: executable dir or $HARNESS_STACK_ROOT)")
 	cmd.Flags().StringVar(&contractPath, "contract", devstack.DefaultContractPath, "dev stack contract file (relative to --stack-root)")
 	cmd.Flags().StringVar(&ref, "ref", "", "terminal reference id (default: the parent terminal, or $HARNESS_LOOP_REF)")
 	return cmd

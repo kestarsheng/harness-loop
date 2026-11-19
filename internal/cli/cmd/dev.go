@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -41,7 +42,7 @@ func newDevCmd() *cobra.Command {
 	}
 	pf := cmd.PersistentFlags()
 	pf.StringVar(&contractPath, "contract", devstack.DefaultContractPath, "stack contract file (relative to --root)")
-	pf.StringVar(&root, "root", "", "repository root (default current directory)")
+	pf.StringVar(&root, "root", "", "repository root (default: executable dir or $HARNESS_STACK_ROOT)")
 
 	cmd.AddCommand(&cobra.Command{
 		Use:   "up",
@@ -90,13 +91,38 @@ func newDevCmd() *cobra.Command {
 	return cmd
 }
 
-func newDevManager(root, contractPath string) (*devstack.Manager, error) {
-	if root == "" {
-		wd, err := os.Getwd()
-		if err != nil {
-			return nil, err
+// resolveStackRoot picks the dev-stack repository root when --stack-root is
+// empty. It must not depend on the caller's cwd: the same CLI binary is often
+// launched from another directory (absolute path, PATH, another terminal).
+// Order: explicit flag > HARNESS_STACK_ROOT > executable dir (or an ancestor
+// containing scripts/dev-stack.json) > cwd.
+func resolveStackRoot(root string) (string, error) {
+	if strings.TrimSpace(root) != "" {
+		return root, nil
+	}
+	if v := strings.TrimSpace(os.Getenv("HARNESS_STACK_ROOT")); v != "" {
+		return v, nil
+	}
+	if exe, err := os.Executable(); err == nil {
+		dir := filepath.Dir(exe)
+		for i := 0; i < 6; i++ {
+			if _, statErr := os.Stat(filepath.Join(dir, devstack.DefaultContractPath)); statErr == nil {
+				return dir, nil
+			}
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+			dir = parent
 		}
-		root = wd
+	}
+	return os.Getwd()
+}
+
+func newDevManager(root, contractPath string) (*devstack.Manager, error) {
+	root, err := resolveStackRoot(root)
+	if err != nil {
+		return nil, err
 	}
 	if !filepath.IsAbs(contractPath) {
 		contractPath = filepath.Join(root, contractPath)
@@ -114,12 +140,9 @@ func newDevManager(root, contractPath string) (*devstack.Manager, error) {
 // declared by the contract (board:true), so no port or command is duplicated
 // here.
 func newBoard(root, contractPath string) (*devstack.Board, error) {
-	if root == "" {
-		wd, err := os.Getwd()
-		if err != nil {
-			return nil, err
-		}
-		root = wd
+	root, err := resolveStackRoot(root)
+	if err != nil {
+		return nil, err
 	}
 	if !filepath.IsAbs(contractPath) {
 		contractPath = filepath.Join(root, contractPath)
