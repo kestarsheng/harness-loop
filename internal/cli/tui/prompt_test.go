@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"agent-platform/internal/cli/tui/views"
 )
 
 func newPrompt() *PromptModel {
@@ -17,14 +19,45 @@ func typeRunes(t *testing.T, m *PromptModel, text string) *PromptModel {
 	return next.(*PromptModel)
 }
 
-func TestPromptViewShowsFixedURL(t *testing.T) {
+func TestPromptViewShowsLogoAndComponentBox(t *testing.T) {
 	m := newPrompt()
 	view := m.View()
-	if !strings.Contains(view, URLFor(DefaultWebBaseURL)) {
-		t.Fatalf("prompt must show the fixed monitor URL:\n%s", view)
+	if !strings.Contains(view, views.LogoText) {
+		t.Fatalf("prompt must open with the wordmark:\n%s", view)
 	}
-	if !strings.Contains(view, "Harness Loop") || !strings.Contains(view, "Esc cancel") {
-		t.Fatalf("prompt chrome missing:\n%s", view)
+	for _, want := range []string{"╭", "╮", "╰", "╯", "Enter start   Esc cancel", "single line"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("prompt chrome missing %q:\n%s", want, view)
+		}
+	}
+	if strings.Contains(view, URLFor(DefaultWebBaseURL)) {
+		t.Fatalf("the URL bar must be gone from the prompt:\n%s", view)
+	}
+}
+
+func TestPromptInputLivesInTheBox(t *testing.T) {
+	m := newPrompt()
+	m = typeRunes(t, m, "修复 bug")
+	lines := strings.Split(m.View(), "\n")
+	inBox := false
+	for _, line := range lines {
+		if strings.Contains(line, "> 修复 bug") && strings.Contains(line, "│") {
+			inBox = true
+		}
+	}
+	if !inBox {
+		t.Fatalf("the typed goal must render inside the component box:\n%s", m.View())
+	}
+}
+
+func TestPromptNoColorHasNoColourEscapes(t *testing.T) {
+	m := newPrompt()
+	view := m.View()
+	if strings.Contains(view, "\x1b[38;") || strings.Contains(view, "\x1b[48;") {
+		t.Fatalf("NO_COLOR prompt must stay free of colour escapes:\n%q", view)
+	}
+	if !strings.Contains(view, views.LogoText) || !strings.Contains(view, "╭") {
+		t.Fatalf("NO_COLOR prompt must keep logo and border:\n%s", view)
 	}
 }
 
