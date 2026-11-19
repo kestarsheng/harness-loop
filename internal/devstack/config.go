@@ -16,12 +16,17 @@ import (
 
 var (
 	// host:port pairs such as "redis:6379" or "harnessloop-service:50008".
-	hostPortPattern = regexp.MustCompile(`\b([a-zA-Z][a-zA-Z0-9-]*):(\d+)\b`)
-	pathLinePattern = regexp.MustCompile(`^(\s*path:\s*).*$`)
-	dsnLinePattern  = regexp.MustCompile(`^(\s*dsn:\s*).*$`)
-	addrLinePattern = regexp.MustCompile(`^(\s*address:\s*)["']?[:0-9]+["']?\s*$`)
-	portLinePattern = regexp.MustCompile(`^(\s*(?:grpc_port|http_port):\s*)\d+\s*$`)
-	keyLinePattern  = regexp.MustCompile(`^(\s*[a-z_]+:\s*)`)
+	hostPortPattern   = regexp.MustCompile(`\b([a-zA-Z][a-zA-Z0-9-]*):(\d+)\b`)
+	pathLinePattern   = regexp.MustCompile(`^(\s*path:\s*).*$`)
+	dsnLinePattern    = regexp.MustCompile(`^(\s*dsn:\s*).*$`)
+	entryAgentPattern = regexp.MustCompile(`^(\s*entry_agent:\s*).*$`)
+	addrLinePattern   = regexp.MustCompile(`^(\s*address:\s*)["']?[:0-9]+["']?\s*$`)
+	portLinePattern   = regexp.MustCompile(`^(\s*(?:grpc_port|http_port):\s*)\d+\s*$`)
+	keyLinePattern    = regexp.MustCompile(`^(\s*[a-z_]+:\s*)`)
+	// llmLinePattern matches keys that must be filled from .harness/dev/env;
+	// the section guard keeps MCP server keys untouched.
+	llmLinePattern    = regexp.MustCompile(`^(\s+)(provider|api_key|base_url|model|embedding_model):\s*.*$`)
+	topSectionPattern = regexp.MustCompile(`^([a-z_]+):`)
 )
 
 // RenderConfig writes config_template to config_output with host-local values.
@@ -36,7 +41,7 @@ func RenderConfig(root string, contract *Contract, item Item) error {
 		return fmt.Errorf("read config template %s: %w", tpl, err)
 	}
 
-	rendered := localizeConfig(string(raw), contract, item)
+	rendered := localizeConfig(string(raw), contract, item, loadDevEnv(root))
 
 	if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
 		return fmt.Errorf("create config dir: %w", err)
@@ -47,13 +52,107 @@ func RenderConfig(root string, contract *Contract, item Item) error {
 	return nil
 }
 
-func localizeConfig(text string, contract *Contract, item Item) string {
+// loadDevEnv parses the bash-style .harness/dev/env. Missing files are treated
+// as empty so templates keep their placeholders and the service surfaces the
+// real error instead of inventing credentials.
+func loadDevEnv(root string) map[string]string {
+	raw, err := os.ReadFile(absJoin(root, ".harness/dev/env"))
+	if err != nil {
+		return nil
+	}
+	out := map[string]string{}
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		line = strings.TrimPrefix(line, "export ")
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		value = strings.Trim(strings.TrimSpace(value), `"'`)
+		if key != "" && value != "" {
+			out[key] = value
+		}
+	}
+	return out
+}
+
+// fillLLM mirrors scripts/dev-up.sh: it injects provider/api_key/base_url/
+// model/embedding_model into the llm: block only, so MCP server credentials
+// under tools:/services: are left alone.
+func fillLLM(text string, env map[string]string) string {
+	key := env["HARNESS_LLM_API_KEY"]
+	base := env["HARNESS_LLM_BASE_URL"]
+	model := env["HARNESS_LLM_MODEL"]
+	embeddingModel := env["HARNESS_EMBEDDING_MODEL"]
+	if embeddingModel == "" {
+		embeddingModel = model
+	}
+	if key == "" && base == "" && model == "" {
+		return text
+	}
+	provider := "openai"
+	if strings.Contains(base, "dashscope") {
+		provider = "dashscope"
+	}
+
+	lines := strings.Split(text, "\n")
+	section := ""
+	for i, line := range lines {
+		if m := topSectionPattern.FindStringSubmatch(line); m != nil {
+			section = m[1]
+			continue
+		}
+		if section != "llm" {
+			continue
+		}
+		m := llmLinePattern.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		switch m[2] {
+		case "provider":
+			if provider != "" {
+				lines[i] = m[1] + "provider: " + provider
+			}
+		case "api_key":
+			if key != "" {
+				lines[i] = m[1] + "api_key: " + strconv.Quote(key)
+			}
+		case "base_url":
+			if base != "" {
+				lines[i] = m[1] + "base_url: " + strconv.Quote(base)
+			}
+		case "model":
+			if model != "" {
+				lines[i] = m[1] + "model: " + strconv.Quote(model)
+			}
+		case "embedding_model":
+			if embeddingModel != "" {
+				lines[i] = m[1] + "embedding_model: " + strconv.Quote(embeddingModel)
+			}
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func localizeConfig(text string, contract *Contract, item Item, env map[string]string) string {
 	aliases := hostAliases(contract)
 	pgDSN := postgresDSN(contract)
 	dbName := strings.TrimSuffix(item.Name, "-service") + ".db"
 
+	text = fillLLM(text, env)
 	lines := strings.Split(text, "\n")
 	for i, line := range lines {
+		// dev-up.sh pins the harnessloop entry agent to the real registered one;
+		// "default" is only a placeholder in the template.
+		if m := entryAgentPattern.FindStringSubmatch(line); m != nil {
+			lines[i] = m[1] + `"main-agent"`
+			continue
+		}
 		// Containers use /app/data; host runs use .harness/dev/<name>.db.
 		if m := pathLinePattern.FindStringSubmatch(line); m != nil && strings.Contains(line, ".db") {
 			lines[i] = m[1] + filepath.ToSlash(filepath.Join(".harness", "dev", dbName))

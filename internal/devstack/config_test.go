@@ -19,7 +19,7 @@ qdrant:
   url: http://qdrant:6333
 redis:
   url: redis://redis:6379
-`, c, mem)
+`, c, mem, nil)
 
 	for _, want := range []string{
 		"grpc_port: 50003",
@@ -49,7 +49,7 @@ agent:
   target: "127.0.0.1:50006"
 memory:
   addr: "127.0.0.1:50003"
-`, c, loop)
+`, c, loop, nil)
 
 	wantDSN := "postgres://agent:agent_dev_password@127.0.0.1:55432/agent_platform?sslmode=disable"
 	for _, want := range []string{
@@ -79,7 +79,7 @@ services:
   harness_loop: harnessloop-service:50008
 llm:
   base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
-`, c, gw)
+`, c, gw, nil)
 
 	for _, want := range []string{
 		"chat: 127.0.0.1:50001",
@@ -101,13 +101,13 @@ llm:
 func TestRenderConfigKeepsUnrelatedHTTPPort(t *testing.T) {
 	c := loadContract(t)
 	chat, _ := c.Item("chat")
-	out := localizeConfig("server:\n  grpc_port: 50001\n  http_port: 8081\n", c, chat)
+	out := localizeConfig("server:\n  grpc_port: 50001\n  http_port: 8081\n", c, chat, nil)
 	if !strings.Contains(out, "grpc_port: 50001") || !strings.Contains(out, "http_port: 8081") {
 		t.Fatalf("unexpected rewrite for chat:\n%s", out)
 	}
 
 	a2a, _ := c.Item("a2a")
-	out = localizeConfig("server:\n  grpc_port: 50004\n  http_port: 50014\n", c, a2a)
+	out = localizeConfig("server:\n  grpc_port: 50004\n  http_port: 50014\n", c, a2a, nil)
 	if !strings.Contains(out, "grpc_port: 50004") || !strings.Contains(out, "http_port: 50014") {
 		t.Fatalf("unexpected rewrite for a2a:\n%s", out)
 	}
@@ -146,5 +146,83 @@ func TestRenderConfigWritesOutput(t *testing.T) {
 func TestRenderConfigWithoutTemplateIsNoop(t *testing.T) {
 	if err := RenderConfig(t.TempDir(), nil, Item{Name: "postgres"}); err != nil {
 		t.Fatalf("container config must be a no-op: %v", err)
+	}
+}
+
+func TestRenderConfigInjectsLLMFromDevEnv(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".harness", "dev"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	env := "export HARNESS_LLM_API_KEY='test-key'\n" +
+		"export HARNESS_LLM_BASE_URL='https://dashscope.example/v1'\n" +
+		"export HARNESS_LLM_MODEL='test-model'\n"
+	if err := os.WriteFile(filepath.Join(root, ".harness", "dev", "env"), []byte(env), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tpl := "server:\n  grpc_port: 50006\nllm:\n  provider: dashscope\n" +
+		"  api_key: \"<your-api-key>\"\n  base_url: \"https://dashscope.aliyuncs.com/compatible-mode/v1\"\n" +
+		"  model: \"qwen3.7-max\"\n  embedding_model: \"text-embedding-v3\"\n" +
+		"tools:\n  - name: demo\n    api_key: \"mcp-server-key\"\n"
+	if err := os.WriteFile(filepath.Join(root, "agent.example.yaml"), []byte(tpl), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := &Contract{Version: SupportedVersion}
+	item := Item{
+		Name: "agent", Kind: KindProcess, Port: 50006,
+		ConfigTemplate: "agent.example.yaml", ConfigOutput: ".harness/dev/conf/agent.yaml",
+	}
+	if err := RenderConfig(root, c, item); err != nil {
+		t.Fatalf("RenderConfig: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(root, ".harness/dev/conf/agent.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(raw)
+	for _, want := range []string{
+		`api_key: "test-key"`,
+		`base_url: "https://dashscope.example/v1"`,
+		`model: "test-model"`,
+		`provider: dashscope`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("rendered config missing %q:\n%s", want, out)
+		}
+	}
+	if !strings.Contains(out, `api_key: "mcp-server-key"`) {
+		t.Fatalf("MCP server key under tools: must not be overwritten:\n%s", out)
+	}
+}
+
+func TestRenderConfigKeepsPlaceholdersWithoutDevEnv(t *testing.T) {
+	root := t.TempDir()
+	tpl := "llm:\n  api_key: \"<your-api-key>\"\n"
+	if err := os.WriteFile(filepath.Join(root, "agent.example.yaml"), []byte(tpl), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	item := Item{Name: "agent", Port: 50006, ConfigTemplate: "agent.example.yaml", ConfigOutput: "agent.yaml"}
+	if err := RenderConfig(root, &Contract{Version: SupportedVersion}, item); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(filepath.Join(root, "agent.yaml"))
+	if !strings.Contains(string(raw), `<your-api-key>`) {
+		t.Fatalf("without .harness/dev/env the placeholder must stay:\n%s", raw)
+	}
+}
+
+func TestRenderConfigPinsEntryAgent(t *testing.T) {
+	root := t.TempDir()
+	tpl := "agent:\n  target: \"127.0.0.1:50006\"\n  entry_agent: \"default\"\n"
+	if err := os.WriteFile(filepath.Join(root, "harnessloop.example.yaml"), []byte(tpl), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	item := Item{Name: "harnessloop", Port: 50013, ConfigTemplate: "harnessloop.example.yaml", ConfigOutput: "harnessloop.yaml"}
+	if err := RenderConfig(root, &Contract{Version: SupportedVersion}, item); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(filepath.Join(root, "harnessloop.yaml"))
+	if !strings.Contains(string(raw), `entry_agent: "main-agent"`) {
+		t.Fatalf("entry_agent must be pinned to main-agent:\n%s", raw)
 	}
 }

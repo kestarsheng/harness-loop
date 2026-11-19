@@ -353,5 +353,13 @@ func ClassifyStageError(err error, streamErr string) retry.Classification {
 	if strings.Contains(strings.ToLower(streamErr), "content_filter") {
 		return retry.Classify(retry.ErrorEnvelope{Kind: retry.KindFinish, FinishReason: "content_filter"})
 	}
+	// Keep the agent's error text instead of collapsing every unknown failure
+	// into "unclassified": operators need the upstream message to act on it.
+	if msg := strings.TrimSpace(streamErr); msg != "" {
+		if len(msg) > 500 {
+			msg = msg[:500]
+		}
+		return retry.Classification{Category: retry.System, Retryable: true, Reason: msg, Fallback: true}
+	}
 	return retry.Classification{Category: retry.System, Retryable: true, Reason: "unclassified stage error", Fallback: true}
 }
