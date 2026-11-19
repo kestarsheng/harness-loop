@@ -114,7 +114,7 @@ func TestEnsureBackendReusesHealthyHarnessLoop(t *testing.T) {
 	}))
 	defer srv.Close()
 	writeContract(t, root, fmt.Sprintf(`{"version":1,"items":[{"name":"harnessloop","kind":"process",`+
-		`"port":50013,"command":"true","health":{"type":"http","url":%q,"expect_status":200}}]}`, srv.URL))
+		`"group":"agent","port":50013,"command":"true","health":{"type":"http","url":%q,"expect_status":200}}]}`, srv.URL))
 
 	cmd := &cobra.Command{}
 	cmd.SetContext(context.Background())
@@ -136,7 +136,7 @@ func TestEnsureBackendReusesHealthyHarnessLoop(t *testing.T) {
 // 50013 探测失败时必须走 devstack.Ensure（这里用一个必然启动失败的命令冷启动）。
 func TestEnsureBackendStartsColdStack(t *testing.T) {
 	root := t.TempDir()
-	writeContract(t, root, `{"version":1,"items":[{"name":"harnessloop","kind":"process","port":50099,`+
+	writeContract(t, root, `{"version":1,"items":[{"name":"harnessloop","kind":"process","group":"agent","port":50099,`+
 		`"command":"hlp-no-such-binary-xyz","health":{"type":"port","address":"127.0.0.1:50099"}}]}`)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)

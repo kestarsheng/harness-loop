@@ -36,6 +36,28 @@ const (
 	HealthExec = "exec"
 )
 
+// Group values allowed by the contract. A group is the unit `loop` uses to
+// bring up a subset of the stack: `loop` only needs infra+agent (the 4 data
+// containers, redis and the 9 services), while the monitor board is started
+// on demand by `loop start`.
+const (
+	// GroupInfra holds the data containers (postgres/mongo/qdrant/redis).
+	GroupInfra = "infra"
+	// GroupAgent holds the 9 backend services behind the agent session.
+	GroupAgent = "agent"
+	// GroupBoard holds the shared monitor board (the board:true item).
+	GroupBoard = "board"
+)
+
+// ValidGroup reports whether g is one of the contract's group names.
+func ValidGroup(g string) bool {
+	switch g {
+	case GroupInfra, GroupAgent, GroupBoard:
+		return true
+	}
+	return false
+}
+
 // Contract mirrors scripts/dev-stack.json.
 type Contract struct {
 	Version     int      `json:"version"`
@@ -56,8 +78,11 @@ type Defaults struct {
 
 // Item is one startable unit of the local stack.
 type Item struct {
-	Name           string            `json:"name"`
-	Kind           string            `json:"kind"`
+	Name string `json:"name"`
+	Kind string `json:"kind"`
+	// Group partitions the stack for partial startup (see GroupInfra & co).
+	// `loop` starts infra+agent only; `loop start` owns the board group.
+	Group          string            `json:"group"`
 	PidName        string            `json:"pid_name"`
 	Port           int               `json:"port"`
 	HTTPPort       int               `json:"http_port"`
@@ -125,7 +150,17 @@ func (c *Contract) Validate() error {
 	names := make(map[string]bool, len(c.Items))
 	ports := make(map[int]string, len(c.Items))
 	stems := make(map[string]string, len(c.Items))
-	boardItems := 0
+	// The board singleton is checked first so a contract with two board items
+	// reports that fact (not a per-item group complaint).
+	boardCount := 0
+	for _, it := range c.Items {
+		if it.Board {
+			boardCount++
+		}
+	}
+	if boardCount > 1 {
+		return fmt.Errorf("%d items are flagged board:true; the shared board must be a singleton", boardCount)
+	}
 	for i, it := range c.Items {
 		label := fmt.Sprintf("items[%d] %q", i, it.Name)
 		if strings.TrimSpace(it.Name) == "" {
@@ -164,15 +199,18 @@ func (c *Contract) Validate() error {
 		if err := it.Health.validate(label); err != nil {
 			return err
 		}
+		if !ValidGroup(it.Group) {
+			return fmt.Errorf("%s: unknown group %q (want one of %s/%s/%s)",
+				label, it.Group, GroupInfra, GroupAgent, GroupBoard)
+		}
 		if it.Board {
-			boardItems++
 			if it.Kind == KindContainer {
 				return fmt.Errorf("%s: the board item must be a process; its lifecycle is refcounted", label)
 			}
+			if it.Group != GroupBoard {
+				return fmt.Errorf("%s: the board item must be in group %q, got %q", label, GroupBoard, it.Group)
+			}
 		}
-	}
-	if boardItems > 1 {
-		return fmt.Errorf("%d items are flagged board:true; the shared board must be a singleton", boardItems)
 	}
 	return nil
 }
@@ -246,6 +284,27 @@ func (c *Contract) Names() []string {
 	out := make([]string, 0, len(c.Items))
 	for _, it := range c.Items {
 		out = append(out, it.Name)
+	}
+	return out
+}
+
+// ItemsInGroups returns the items whose group is in groups, in contract order.
+// It does not validate the group names; callers that take them from user input
+// must check ValidGroup first so a typo fails loudly instead of selecting
+// nothing.
+func (c *Contract) ItemsInGroups(groups ...string) []Item {
+	if c == nil || len(groups) == 0 {
+		return nil
+	}
+	want := make(map[string]bool, len(groups))
+	for _, g := range groups {
+		want[strings.TrimSpace(g)] = true
+	}
+	out := make([]Item, 0, len(c.Items))
+	for _, it := range c.Items {
+		if want[it.Group] {
+			out = append(out, it)
+		}
 	}
 	return out
 }
