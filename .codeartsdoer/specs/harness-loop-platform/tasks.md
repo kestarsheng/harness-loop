@@ -7,7 +7,7 @@
 | 状态 | 待评审 |
 | 上游文档 | `spec.md` v1.1（170 条 REQ + 38 条 DFX）、`design.md` v1.2（12 章，5 项锁定决策） |
 | 代码基线 | `agent-platform` @ `4a05ccb`，Go 1.22 |
-| 任务规模 | 106 个任务（P0 27 / P1 36 / P2 43） |
+| 任务规模 | 107 个任务（P0 27 / P1 36 / P2 44） |
 | 已锁定决策 | A 方案记忆事实源、PG 仅承载索引与事件（D2）、RAG 复用 Go knowledge-service（D3）、runtime 复用 `pkg/llm` + cobra/Bubble Tea（D4）、新增 :50008（D6/D14）、自研模板摘要唯一通道（D13）、多 Agent 8/20/20/2（U13-A）、审批一期留 agent-service（U17-A）、阶段模型默认继承（U18-A）、子任务验收复用父验收器（U19-A） |
 
 > 阅读约定：每个任务给出「目标 → 关联需求 → 设计章节 → 依赖 → 文件 → 实施要点 → 验收标准 → 复杂度」。`[N]` 表示新增文件，`[M]` 表示改造存量文件。验收标准优先给出可直接执行的命令或断言。本文件不含实现代码。
@@ -1397,7 +1397,19 @@
 | 验收标准 | `go test ./pkg/harnessloop/policy/sandbox/... ./services/mcp-service/internal/tools/...` 全绿；真实任务 c 阶段 `read_file(".")` 返回目录列表；`..`/绝对路径仍被拒；`AllowedSubpaths` 下 `.` 仍拒（最小权限）。 |
 | 复杂度 | S（0.5 天） |
 
-> P2 合计：实施 38 个 + 测试 5 个 = **43 个任务**。
+### T-P2-39 fail-fast 集合重入语义（重试 vs 重新规划）
+
+| 字段 | 内容 |
+|---|---|
+| 目标 | fail-fast 失败导致同组兄弟被 `cancelled` 时，d→c 重入不能只重试 failed 节点；按集合语义选择「整组重开」或「重新规划」，避免预算空转与兄弟永久取消。 |
+| 关联需求 | REQ-128、REQ-131、REQ-139；design 4.13.8 |
+| 依赖 | T-P2-34 |
+| 涉及文件 | [M] `pkg/harnessloop/orchestrator/{propagation,scheduler}.go`、[M] `pkg/harnessloop/subtask/model.go`、[M] `services/harnessloop-service/internal/service/orchestrator_bridge.go` 及测试 |
+| 实施要点 | 1) 区分失败集合策略：`tolerate` 只重试 failed 节点（保持 T-P2-34）；`fail-fast` 整组进入重入决策；2) fail-fast 重入时把同组 `cancelled` 兄弟一并重开为 pending，或走 replan 重新规划；3) 预算按集合级 attempt 上限，禁止同一集合无限重开；4) 事件与 DB 状态一致，`retry.scheduled` 带集合标识；5) 不得改变「终态不可随意回退」的既有约束，仍通过 `RequeueForRetry` 一类受控入口。 |
+| 验收标准 | fail-fast 集合重入后同组全部重跑或重新规划，不出现「只重试一个节点 + 兄弟永久取消」；集合级预算耗尽后整组 failed；tolerate 场景行为不变；`go test ./pkg/harnessloop/orchestrator/... ./services/harnessloop-service/...` 全绿。 |
+| 复杂度 | M（1 天） |
+
+> P2 合计：实施 39 个 + 测试 5 个 = **44 个任务**。
 
 ---
 
