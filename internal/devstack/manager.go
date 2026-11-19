@@ -240,6 +240,15 @@ func (m *Manager) Down(ctx context.Context, keepData bool) (*Report, error) {
 		rep.Items = append(rep.Items, st)
 	}
 
+	// dev down is an explicit operator stop. The singleton board lock and its
+	// refs belong to that same decision, so the next `loop start` begins clean
+	// instead of inheriting refs for a board this call just killed.
+	if _, ok := m.Contract.BoardItem(); ok {
+		if err := os.Remove(filepath.Join(m.Dirs.Run, BoardLockFile)); err != nil && !os.IsNotExist(err) {
+			fmt.Fprintf(m.Out, "devstack: remove board lock: %v\n", err)
+		}
+	}
+
 	if len(errs) > 0 {
 		return rep, errors.Join(errs...)
 	}

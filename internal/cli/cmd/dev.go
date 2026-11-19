@@ -110,6 +110,32 @@ func newDevManager(root, contractPath string) (*devstack.Manager, error) {
 	return m, nil
 }
 
+// newBoard resolves the singleton monitor board for root. The board item is
+// declared by the contract (board:true), so no port or command is duplicated
+// here.
+func newBoard(root, contractPath string) (*devstack.Board, error) {
+	if root == "" {
+		wd, err := os.Getwd()
+		if err != nil {
+			return nil, err
+		}
+		root = wd
+	}
+	if !filepath.IsAbs(contractPath) {
+		contractPath = filepath.Join(root, contractPath)
+	}
+	contract, err := devstack.LoadContract(contractPath)
+	if err != nil {
+		return nil, err
+	}
+	b, err := devstack.NewBoard(root, contract)
+	if err != nil {
+		return nil, err
+	}
+	b.Out = os.Stderr
+	return b, nil
+}
+
 func emitDevReport(cmd *cobra.Command, verb string, rep *devstack.Report, runErr error) error {
 	out := cmd.OutOrStdout()
 	if opts.JSON {

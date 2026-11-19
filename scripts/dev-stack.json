@@ -176,7 +176,8 @@
       "config_template": null,
       "env": { "VITE_API_URL": "http://localhost:9000" },
       "health": { "type": "http", "url": "http://localhost:5174/", "expect_status": 200 },
-      "required": true
+      "required": true,
+      "board": true
     }
   ]
 }
