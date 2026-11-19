@@ -179,6 +179,9 @@ func (e *Engine) RunStream(ctx context.Context, req *ExecutionRequest, callback 
 func (e *Engine) executeLoopStream(ctx context.Context, execCtx *ExecutionContext, startAgent *Agent, initialMessage string, callback StreamCallback) (*ExecutionResult, error) {
 	currentAgent := startAgent
 
+	// Tracks visited agents so A→B→A and B→B are rejected before any switch.
+	handoffGuard := NewHandoffGuardFromContext(execCtx, currentAgent.ID, e.maxHandoffHops())
+
 	// Check if the LLM client supports streaming
 	_, hasStreaming := e.llmClient.(LLMStreamingClient)
 
@@ -355,9 +358,11 @@ func (e *Engine) executeLoopStream(ctx context.Context, execCtx *ExecutionContex
 			if IsHandoffTool(tc.Name) {
 				targetID := ParseHandoffTarget(tc.Name)
 
-				// Validate handoff
-				if err := ValidateHandoff(currentAgent, targetID, e.registry); err != nil {
-					callback(StreamEvent{Type: EventError, Error: err.Error()})
+				// Validate handoff: static rules plus self/cycle/hop guards. A
+				// rejected handoff ends the run instead of being retried.
+				if err := ValidateHandoffStep(handoffGuard, currentAgent, targetID, e.registry); err != nil {
+					fmt.Printf("[AgentEngine] handoff rejected: %v\n", err)
+					callback(StreamEvent{Type: EventError, AgentID: currentAgent.ID, AgentName: currentAgent.Name, Error: err.Error()})
 					execCtx.MarkError(err.Error())
 					return e.buildResult(execCtx, ""), err
 				}
@@ -377,6 +382,11 @@ func (e *Engine) executeLoopStream(ctx context.Context, execCtx *ExecutionContex
 				}
 				execCtx.AddAgentRecord(record)
 
+				// Keep assistant tool_calls / tool results paired across the
+				// switch, otherwise the next agent's request carries an orphan
+				// tool_call and the gateway rejects it.
+				execCtx.AddToolMessage(tc.Name, tc.ID, fmt.Sprintf(`{"status":"handoff_accepted","target":"%s"}`, targetID))
+
 				// Emit handoff event
 				callback(StreamEvent{
 					Type:      EventHandoff,
@@ -386,8 +396,17 @@ func (e *Engine) executeLoopStream(ctx context.Context, execCtx *ExecutionContex
 					Step:      step + 1,
 				})
 
-				// Switch to target agent
+				// Switch to target agent. The next step rebuilds tools from the
+				// new agent's own Handoffs, so the previous agent's handoff
+				// targets never carry over.
 				currentAgent = e.registry.Get(targetID)
+				if currentAgent == nil {
+					err := newHandoffError(record.AgentID, targetID, "target agent not found")
+					callback(StreamEvent{Type: EventError, AgentID: record.AgentID, Error: err.Error()})
+					execCtx.MarkError(err.Error())
+					return e.buildResult(execCtx, ""), err
+				}
+				handoffGuard.Record(currentAgent.ID)
 				execCtx.SetCurrentAgent(targetID)
 
 				// Save context
