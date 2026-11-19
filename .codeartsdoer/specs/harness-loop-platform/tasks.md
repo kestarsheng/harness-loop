@@ -1493,7 +1493,19 @@
 | 验收标准 | workspace=`D:\Desktop`：`read_file`/`write_file` 传 `D:\Desktop\morning_greeting.vbs` 成功且真实落盘；传 `D:\Other\x`、`D:\Desktop\..\Windows\x`、UNC、`file:///etc/passwd`、指向 root 外的 symlink 仍拒绝；相对路径行为不变；`go test ./pkg/harnessloop/policy/... ./services/mcp-service/...`、`go build -p 1 ./...`、depcheck 0；真实 MCP 重启后一次 `file_write` 证据。 |
 | 复杂度 | S（0.5~1 天） |
 
-> P2 合计：实施 46 个 + 测试 5 个 = **51 个任务**。
+### T-P2-47 修复 handoff 自交环（切 agent 后不得再向自身交接）
+
+| 字段 | 内容 |
+|---|---|
+| 目标 | 直答「帮我写一个脚本」时，main-agent 能正常交接给 coder-agent 并返回结果；不再出现 `agent coder-agent cannot handoff to coder-agent`。 |
+| 关联需求 | REQ-171~176；design 4.9 handoff；T-P2-45 直答 |
+| 依赖 | T-P2-30（多 Agent handoff）、T-P2-45（直答入口） |
+| 涉及文件 | [M] `pkg/agent/handoff.go`、[M] `pkg/agent/engine.go`/`engine_stream.go`（切 agent 后工具重建）、[M] `pkg/agent/agent.go`/`registry.go`（如需）、[M] 对应 `_test.go` |
+| 实施要点 | 1) `BuildHandoffTools`/`BuildAllTools` 必须跳过 `targetID == agent.ID`，不得给 agent 生成 handoff 到自身的工具；2) handoff 执行前校验 `from == to` 直接返回明确错误（不重试、不循环）；3) 切到目标 agent 后按新 agent 的 `Handoffs` 重建工具集，禁止沿用上一个 agent 的 handoff 列表；4) 增加已访问 agent 集合/跳数上限，阻止 A→B→A/B→B 环；5) 错误文案统一 `agent X cannot handoff to Y`，附 `from/to`；6) 保持正常 A→B 一次交接成功，不影响 response/plain chat。 |
+| 验收标准 | 单元：self handoff 工具不出现；from=to 被拒；A→B 后 B 的工具不含 B 自身；A→B→A 环被拒；正常 A→B 成功。真实：直连 50006 发「帮我写一个脚本」，不再出现 `cannot handoff to coder-agent`，能返回 coder-agent 的结果；`go test ./pkg/agent/...`、`go build -p 1 ./...`、depcheck 0。 |
+| 复杂度 | S（0.5~1 天） |
+
+> P2 合计：实施 47 个 + 测试 5 个 = **52 个任务**。
 
 ---
 
@@ -1709,6 +1721,8 @@ flowchart LR
     P40 --> P45
     P28 --> P46
     P38 --> P46
+    P30 --> P47
+    P45 --> P47
     P01 --> PTT3
     P09 --> PTT4
     P11 --> PTT5
