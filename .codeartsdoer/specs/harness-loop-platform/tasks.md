@@ -1481,7 +1481,19 @@
 | 验收标准 | 真实 TTY 执行 `/harness loop` 发 `hi`：不创建 task、不出现 a~e 阶段，几秒内显示 assistant 回复；`/task 实现 xxx`：创建 task 并显示原有 a~e 视图；`loop --goal xxx` 仍走 a~e；`ExecuteStream` 报错时对话区显示具体错误；`go test ./internal/cli/...`、`go build -p 1 ./...`、depcheck 0；`loop start` 仍只打印 URL。 |
 | 复杂度 | M（1~2 天） |
 
-> P2 合计：实施 45 个 + 测试 5 个 = **50 个任务**。
+### T-P2-46 workspace 内绝对路径归一化（读写放行、越界仍拒）
+
+| 字段 | 内容 |
+|---|---|
+| 目标 | 当用户/模型给出**落在 workspace 内**的绝对路径（如 workspace=`D:\Desktop`、目标 `D:\Desktop\morning_greeting.vbs`）时，sandbox/MCP 将其归一化为相对路径放行；workspace 外的绝对路径、`..` 逃逸、UNC、`file://`、symlink 逃逸仍拒绝。修掉 `/task 写桌面脚本` 必然 `E_UNSAFE_PATH` 的阻塞。 |
+| 关联需求 | REQ-176；design 4.1.x 路径沙箱；T-P2-28 产物落盘、T-P2-38 `.` 归一化 |
+| 依赖 | T-P2-28、T-P2-38 |
+| 涉及文件 | [M] `pkg/harnessloop/policy/sandbox/{realpath,pathguard}.go`、[M] `services/mcp-service/internal/tools/tools.go` 及路径解析调用点、[M] 对应 `_test.go` |
+| 实施要点 | 1) 统一路径归一化：`decode → Clean → 若 IsAbs 且 isWithin(root, abs)` 则接受，返回 workspace 内路径（或相对 root）；2) root 外绝对路径保持 `E_UNSAFE_PATH`/`E_PATH_ESCAPE`；3) `..`、UNC（`\` 开头）、`file://`、`\?\` 仍拒绝；4) symlink/junction 先 `EvalSymlinks` 再判 root，逃逸仍拒；5) MCP `file_read`/`file_write` 与 `output_contract` 校验共用同一解析函数（先落盘再断言）；6) Windows 盘符大小写与正反斜杠等价（`d:\desktop` 与 `D:/Desktop`）；7) 不改写 workspace 外写入能力，不新增绝对路径白名单。 |
+| 验收标准 | workspace=`D:\Desktop`：`read_file`/`write_file` 传 `D:\Desktop\morning_greeting.vbs` 成功且真实落盘；传 `D:\Other\x`、`D:\Desktop\..\Windows\x`、UNC、`file:///etc/passwd`、指向 root 外的 symlink 仍拒绝；相对路径行为不变；`go test ./pkg/harnessloop/policy/... ./services/mcp-service/...`、`go build -p 1 ./...`、depcheck 0；真实 MCP 重启后一次 `file_write` 证据。 |
+| 复杂度 | S（0.5~1 天） |
+
+> P2 合计：实施 46 个 + 测试 5 个 = **51 个任务**。
 
 ---
 
@@ -1695,6 +1707,8 @@ flowchart LR
     P40 --> P44
     P20 --> P45
     P40 --> P45
+    P28 --> P46
+    P38 --> P46
     P01 --> PTT3
     P09 --> PTT4
     P11 --> PTT5
