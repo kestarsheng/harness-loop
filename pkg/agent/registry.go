@@ -297,22 +297,28 @@ func (r *Registry) Exists(agentID string) bool {
 	return exists
 }
 
-// ValidateHandoff validates that a handoff is possible
+// ValidateHandoff validates that a handoff is possible. The returned error is a
+// *HandoffError carrying both sides, so callers/logs read
+// "agent A cannot handoff to B: <reason>" instead of a bare sentinel.
 func (r *Registry) ValidateHandoff(fromID, toID string) error {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
 	fromAgent, exists := r.agents[fromID]
 	if !exists {
-		return ErrAgentNotFound
+		return newHandoffError(fromID, toID, "source agent not found")
+	}
+
+	if fromID == toID {
+		return newHandoffError(fromID, toID, "self handoff is not allowed")
 	}
 
 	if !fromAgent.CanHandoffTo(toID) {
-		return ErrInvalidHandoff
+		return newHandoffError(fromID, toID, "target agent is not declared in source agent handoffs")
 	}
 
 	if _, exists := r.agents[toID]; !exists {
-		return ErrAgentNotFound
+		return newHandoffError(fromID, toID, "target agent not found")
 	}
 
 	return nil

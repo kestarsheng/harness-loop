@@ -26,6 +26,11 @@ type EngineConfig struct {
 	// keeps the legacy behaviour: streamed tool calls are dropped and only text
 	// is returned, so the existing stage_finish text protocol is unaffected.
 	StreamToolCalls bool
+
+	// MaxHandoffHops bounds one handoff chain (A→B→C). Zero falls back to
+	// MaxHandoffHopsDefault. Cycles are already rejected by the visited set;
+	// this is the belt-and-braces stop for long non-cyclic chains.
+	MaxHandoffHops int
 }
 
 // DefaultEngineConfig returns default engine configuration
@@ -33,6 +38,7 @@ func DefaultEngineConfig() EngineConfig {
 	return EngineConfig{
 		MaxSteps:         10,
 		MaxHistoryLength: 50,
+		MaxHandoffHops:   MaxHandoffHopsDefault,
 	}
 }
 
@@ -656,6 +662,9 @@ func (e *Engine) executeLoop(ctx context.Context, execCtx *ExecutionContext, sta
 	currentAgent := startAgent
 	fmt.Printf("[AgentEngine] Starting executeLoop with agent: %s\n", currentAgent.ID)
 
+	// Tracks visited agents so A→B→A and B→B are rejected before any switch.
+	handoffGuard := NewHandoffGuardFromContext(execCtx, currentAgent.ID, e.maxHandoffHops())
+
 	// Register session with intervention manager
 	if e.interventionManager != nil {
 		e.interventionManager.RegisterSession(execCtx.SessionID, currentAgent.ID)
@@ -839,8 +848,11 @@ func (e *Engine) executeLoop(ctx context.Context, execCtx *ExecutionContext, sta
 		for _, tc := range handoffCalls {
 			targetID := ParseHandoffTarget(tc.Name)
 
-			// Validate handoff
-			if err := ValidateHandoff(currentAgent, targetID, e.registry); err != nil {
+			// Validate handoff: static rules first, then self/cycle/hop guards.
+			// A rejected handoff ends the run - it is never retried, so a bad
+			// target cannot turn into a loop.
+			if err := ValidateHandoffStep(handoffGuard, currentAgent, targetID, e.registry); err != nil {
+				fmt.Printf("[AgentEngine] handoff rejected: %v\n", err)
 				execCtx.MarkError(err.Error())
 				return e.buildResult(execCtx, ""), err
 			}
@@ -860,8 +872,22 @@ func (e *Engine) executeLoop(ctx context.Context, execCtx *ExecutionContext, sta
 			}
 			execCtx.AddAgentRecord(record)
 
-			// Switch to target agent
+			// Pair the handoff tool call with a tool result. Without it the
+			// transcript ends up with an assistant tool_calls turn that has no
+			// matching tool message, and OpenAI-compatible gateways reject the
+			// next request ("content is a required field" / orphan tool_call).
+			execCtx.AddToolMessage(tc.Name, tc.ID, fmt.Sprintf(`{"status":"handoff_accepted","target":"%s"}`, targetID))
+
+			// Switch to target agent. Tools for the next step are rebuilt from
+			// the new agent's Handoffs by buildAgentTools, so nothing from the
+			// previous agent's tool list leaks into the new one.
 			currentAgent = e.registry.Get(targetID)
+			if currentAgent == nil {
+				err := newHandoffError(record.AgentID, targetID, "target agent not found")
+				execCtx.MarkError(err.Error())
+				return e.buildResult(execCtx, ""), err
+			}
+			handoffGuard.Record(currentAgent.ID)
 			execCtx.SetCurrentAgent(targetID)
 
 			// Save context
@@ -1152,6 +1178,14 @@ func appendStageFinishTool(ctx context.Context, executor ToolExecutor, tools []m
 	return append(tools, mapped)
 }
 
+// maxHandoffHops returns the effective handoff hop budget for this engine.
+func (e *Engine) maxHandoffHops() int {
+	if e.config.MaxHandoffHops > 0 {
+		return e.config.MaxHandoffHops
+	}
+	return MaxHandoffHopsDefault
+}
+
 func (e *Engine) buildAgentTools(ctx context.Context, agent *Agent) ([]map[string]any, error) {
 	tools := make([]map[string]any, 0)
 	seen := make(map[string]bool) // dedup tool names across agent + skill sources
@@ -1195,13 +1229,17 @@ func (e *Engine) buildAgentTools(ctx context.Context, agent *Agent) ([]map[strin
 		}
 	}
 
-	// Add handoff tools
-	for _, targetID := range agent.Handoffs {
-		targetAgent := e.registry.Get(targetID)
-		if targetAgent != nil {
-			ht := NewHandoffTool(targetAgent)
-			tools = append(tools, ht.ToToolDefinition())
+	// Add handoff tools, rebuilt from THIS agent's Handoffs every step. After a
+	// handoff the loop carries the new agent, so its tool set must be derived
+	// from its own Handoffs rather than inherited from the previous agent, and
+	// an agent never receives a tool that transfers to itself.
+	for _, ht := range BuildHandoffTools(agent, e.registry) {
+		name := ht.ToolName()
+		if seen[name] {
+			continue
 		}
+		tools = append(tools, ht.ToToolDefinition())
+		seen[name] = true
 	}
 
 	// Add the load_skill built-in tool when the agent has mounted skills.
@@ -1402,6 +1440,10 @@ func (e *Engine) resumeLoop(ctx context.Context, execCtx *ExecutionContext, star
 	currentAgent := startAgent
 	fmt.Printf("[AgentEngine] Resuming executeLoop from step %d with agent: %s\n", startStep+1, currentAgent.ID)
 
+	// Seed the guard from the restored history so a resumed run cannot handoff
+	// back into an agent the original run already visited.
+	handoffGuard := NewHandoffGuardFromContext(execCtx, currentAgent.ID, e.maxHandoffHops())
+
 	// Register session with intervention manager
 	if e.interventionManager != nil {
 		e.interventionManager.RegisterSession(execCtx.SessionID, currentAgent.ID)
@@ -1548,7 +1590,8 @@ func (e *Engine) resumeLoop(ctx context.Context, execCtx *ExecutionContext, star
 		// Process handoff calls serially
 		for _, tc := range handoffCalls {
 			targetID := ParseHandoffTarget(tc.Name)
-			if err := ValidateHandoff(currentAgent, targetID, e.registry); err != nil {
+			if err := ValidateHandoffStep(handoffGuard, currentAgent, targetID, e.registry); err != nil {
+				fmt.Printf("[AgentEngine] handoff rejected: %v\n", err)
 				execCtx.MarkError(err.Error())
 				return e.buildResult(execCtx, ""), err
 			}
@@ -1567,7 +1610,16 @@ func (e *Engine) resumeLoop(ctx context.Context, execCtx *ExecutionContext, star
 			}
 			execCtx.AddAgentRecord(record)
 
+			// Keep assistant tool_calls / tool results paired across the switch.
+			execCtx.AddToolMessage(tc.Name, tc.ID, fmt.Sprintf(`{"status":"handoff_accepted","target":"%s"}`, targetID))
+
 			currentAgent = e.registry.Get(targetID)
+			if currentAgent == nil {
+				err := newHandoffError(record.AgentID, targetID, "target agent not found")
+				execCtx.MarkError(err.Error())
+				return e.buildResult(execCtx, ""), err
+			}
+			handoffGuard.Record(currentAgent.ID)
 			execCtx.SetCurrentAgent(targetID)
 
 			if e.store != nil {
