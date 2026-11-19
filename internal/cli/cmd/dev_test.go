@@ -2,10 +2,18 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/spf13/cobra"
 
 	"agent-platform/internal/cli/output"
 	"agent-platform/internal/devstack"
@@ -95,5 +103,67 @@ func TestEmitDevReportSuccess(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "reused running stack") {
 		t.Fatalf("output = %s", buf.String())
+	}
+}
+
+// loop 自举（T-P2-21 遗留）：50013 已起时必须直接复用，不要求用户先 dev-up。
+func TestEnsureBackendReusesHealthyHarnessLoop(t *testing.T) {
+	root := t.TempDir()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	writeContract(t, root, fmt.Sprintf(`{"version":1,"items":[{"name":"harnessloop","kind":"process",`+
+		`"port":50013,"command":"true","health":{"type":"http","url":%q,"expect_status":200}}]}`, srv.URL))
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	var buf bytes.Buffer
+	if err := ensureBackend(cmd, root, devstack.DefaultContractPath, &buf); err != nil {
+		t.Fatalf("ensureBackend: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "already up") || !strings.Contains(out, "reusing the running stack") {
+		t.Fatalf("a healthy stack must be reused, output:\n%s", out)
+	}
+
+	// Working directory of the probe is the fixture, so nothing was launched.
+	if _, err := os.Stat(filepath.Join(root, ".harness", "dev", "logs", "harnessloop.log")); !os.IsNotExist(err) {
+		t.Fatalf("reuse path must not launch anything: %v", err)
+	}
+}
+
+// 50013 探测失败时必须走 devstack.Ensure（这里用一个必然启动失败的命令冷启动）。
+func TestEnsureBackendStartsColdStack(t *testing.T) {
+	root := t.TempDir()
+	writeContract(t, root, `{"version":1,"items":[{"name":"harnessloop","kind":"process","port":50099,`+
+		`"command":"hlp-no-such-binary-xyz","health":{"type":"port","address":"127.0.0.1:50099"}}]}`)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	cmd := &cobra.Command{}
+	cmd.SetContext(ctx)
+	var buf bytes.Buffer
+	err := ensureBackend(cmd, root, devstack.DefaultContractPath, &buf)
+	if err == nil {
+		t.Fatal("a cold stack whose process cannot start must report the failure")
+	}
+	out := buf.String()
+	if !strings.Contains(out, "is down, starting the stack") {
+		t.Fatalf("cold path must announce the ensure, output:\n%s", out)
+	}
+	if !strings.Contains(out, "50099") && !strings.Contains(out, "harnessloop") {
+		t.Fatalf("cold path must report the failing item, output:\n%s", out)
+	}
+}
+
+func writeContract(t *testing.T, root, body string) {
+	t.Helper()
+	path := filepath.Join(root, devstack.DefaultContractPath)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }

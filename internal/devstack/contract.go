@@ -67,6 +67,9 @@ type Item struct {
 	Env            map[string]string `json:"env"`
 	Health         Health            `json:"health"`
 	Required       bool              `json:"required"`
+	// Board marks the item that serves the shared monitor board. Exactly one
+	// item may carry it; Board (see board.go) manages that item as a singleton.
+	Board bool `json:"board"`
 }
 
 // Health describes how an item is considered ready.
@@ -122,6 +125,7 @@ func (c *Contract) Validate() error {
 	names := make(map[string]bool, len(c.Items))
 	ports := make(map[int]string, len(c.Items))
 	stems := make(map[string]string, len(c.Items))
+	boardItems := 0
 	for i, it := range c.Items {
 		label := fmt.Sprintf("items[%d] %q", i, it.Name)
 		if strings.TrimSpace(it.Name) == "" {
@@ -160,6 +164,15 @@ func (c *Contract) Validate() error {
 		if err := it.Health.validate(label); err != nil {
 			return err
 		}
+		if it.Board {
+			boardItems++
+			if it.Kind == KindContainer {
+				return fmt.Errorf("%s: the board item must be a process; its lifecycle is refcounted", label)
+			}
+		}
+	}
+	if boardItems > 1 {
+		return fmt.Errorf("%d items are flagged board:true; the shared board must be a singleton", boardItems)
 	}
 	return nil
 }
@@ -212,6 +225,20 @@ func (c *Contract) Item(name string) (Item, bool) {
 // (harnessloop-service on 127.0.0.1:50013).
 func (c *Contract) HarnessLoop() (Item, bool) {
 	return c.Item("harnessloop")
+}
+
+// BoardItem returns the item flagged board:true, i.e. the process that serves
+// the shared monitor board (vite, port 5174, in the shipped contract).
+func (c *Contract) BoardItem() (Item, bool) {
+	if c == nil {
+		return Item{}, false
+	}
+	for _, it := range c.Items {
+		if it.Board {
+			return it, true
+		}
+	}
+	return Item{}, false
 }
 
 // Names returns item names in contract order.

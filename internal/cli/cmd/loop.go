@@ -2,8 +2,11 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -13,6 +16,7 @@ import (
 
 	"agent-platform/internal/cli/output"
 	"agent-platform/internal/cli/tui"
+	"agent-platform/internal/devstack"
 	harnesspb "agent-platform/pkg/pb/harnessloop"
 )
 
@@ -37,6 +41,8 @@ func newLoopCmd() *cobra.Command {
 		budgetCost     float64
 		timeout        time.Duration
 		exitOnComplete bool
+		stackRoot      string
+		contractPath   string
 	)
 
 	cmd := &cobra.Command{
@@ -46,7 +52,10 @@ func newLoopCmd() *cobra.Command {
 			"Each line you submit in the session creates a task; when a task reaches " +
 			"a terminal state the interface returns to the input box. Type exit (or " +
 			"/harness loop exit) to end only this terminal. Use --exit-on-complete " +
-			"for the legacy one-task-then-exit behaviour.",
+			"for the legacy one-task-then-exit behaviour.\n\n" +
+			"The dev stack is probed on 127.0.0.1:50013 first: a healthy stack is " +
+			"reused, a cold one is brought up automatically, so `dev up` is never a " +
+			"prerequisite. Use `loop start`/`loop stop` to manage the shared board.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if goalFile != "" {
 				raw, err := os.ReadFile(goalFile)
@@ -57,6 +66,11 @@ func newLoopCmd() *cobra.Command {
 			}
 			if !isatty.IsTerminal(os.Stdin.Fd()) || !isatty.IsTerminal(os.Stdout.Fd()) {
 				return fmt.Errorf("loop requires an interactive terminal; use `harness-cli run` in non-interactive contexts")
+			}
+
+			// T-P2-21 leftover: a cold `loop` must be self-sufficient.
+			if err := ensureBackend(cmd, stackRoot, contractPath, cmd.ErrOrStderr()); err != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "warning: dev stack not ready: %v\n", err)
 			}
 
 			cfg := loadFileConfig(opts.Config)
@@ -100,7 +114,178 @@ func newLoopCmd() *cobra.Command {
 	cmd.Flags().Float64Var(&budgetCost, "budget-cost", 0, "cost budget")
 	cmd.Flags().DurationVar(&timeout, "timeout", 0, "max wait for terminal state (0 means no limit)")
 	cmd.Flags().BoolVar(&exitOnComplete, "exit-on-complete", false, "exit as soon as the task reaches a terminal state (legacy behaviour)")
+	cmd.Flags().StringVar(&stackRoot, "stack-root", "", "repository root of the dev stack (default: current directory)")
+	cmd.Flags().StringVar(&contractPath, "contract", devstack.DefaultContractPath, "dev stack contract file (relative to --stack-root)")
+
+	cmd.AddCommand(newLoopStartCmd(), newLoopStopCmd())
 	return cmd
+}
+
+// ensureBackend makes a cold `loop` self-sufficient: it probes
+// 127.0.0.1:50013 and only on failure calls devstack.Ensure. A running stack is
+// reused untouched, so `loop` never requires a manual `dev up` first.
+func ensureBackend(cmd *cobra.Command, stackRoot, contractPath string, out io.Writer) error {
+	m, err := newDevManager(stackRoot, contractPath)
+	if err != nil {
+		return err
+	}
+	loop, ok := m.Contract.HarnessLoop()
+	if !ok {
+		return fmt.Errorf("contract has no %q item", "harnessloop")
+	}
+	addr := loop.Health.Address
+	if addr == "" {
+		addr = fmt.Sprintf("127.0.0.1:%d", loop.Port)
+	}
+	if healthy, detail := m.Prober.Healthy(cmd.Context(), loop); healthy {
+		fmt.Fprintf(out, "devstack: %s already up (%s), reusing the running stack\n", addr, detail)
+		return nil
+	}
+
+	fmt.Fprintf(out, "devstack: %s is down, starting the stack from %s\n", addr, m.Root)
+	rep, err := m.Ensure(cmd.Context())
+	if rep != nil {
+		ready := 0
+		for _, it := range rep.Items {
+			if it.Healthy {
+				ready++
+			}
+			if !it.Healthy {
+				fmt.Fprintf(out, "devstack: %-16s DOWN %s\n", it.Name, it.Detail)
+			}
+		}
+		fmt.Fprintf(out, "devstack: %d/%d item(s) healthy after ensure\n", ready, len(rep.Items))
+	}
+	return err
+}
+
+// boardRef resolves this terminal's reference id. The parent process is the
+// shell, so every `loop start`/`loop stop` typed in the same terminal inherits
+// the same ref while a second terminal gets its own. --ref and HARNESS_LOOP_REF
+// override it for scripted or nested invocations.
+func boardRef(flag string) string {
+	if v := strings.TrimSpace(flag); v != "" {
+		return v
+	}
+	if v := strings.TrimSpace(os.Getenv("HARNESS_LOOP_REF")); v != "" {
+		return v
+	}
+	return "terminal:" + strconv.Itoa(os.Getppid())
+}
+
+func newLoopStartCmd() *cobra.Command {
+	var (
+		stackRoot    string
+		contractPath string
+		ref          string
+	)
+	cmd := &cobra.Command{
+		Use:   "start",
+		Short: "Start or reuse the single shared monitor board and print its URL",
+		Long: "Register this terminal on the shared monitor board.\n\n" +
+			"The board is a singleton: the first call launches the process on its fixed " +
+			"port, every later call only records one more reference and prints the same " +
+			"URL. Registering twice from the same terminal does not add a second ref.",
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			b, err := newBoard(stackRoot, contractPath)
+			if err != nil {
+				return emitBoardState(cmd, "start", nil, err)
+			}
+			st, runErr := b.Start(cmd.Context(), boardRef(ref))
+			return emitBoardState(cmd, "start", st, runErr)
+		},
+	}
+	cmd.Flags().StringVar(&stackRoot, "stack-root", "", "repository root of the dev stack (default: current directory)")
+	cmd.Flags().StringVar(&contractPath, "contract", devstack.DefaultContractPath, "dev stack contract file (relative to --stack-root)")
+	cmd.Flags().StringVar(&ref, "ref", "", "terminal reference id (default: the parent terminal, or $HARNESS_LOOP_REF)")
+	return cmd
+}
+
+func newLoopStopCmd() *cobra.Command {
+	var (
+		stackRoot    string
+		contractPath string
+		ref          string
+	)
+	cmd := &cobra.Command{
+		Use:   "stop",
+		Short: "Release this terminal's reference to the shared board",
+		Long: "Release this terminal's reference to the shared monitor board.\n\n" +
+			"While other terminals still hold a reference the board keeps running and " +
+			"only the remaining count is printed. The last release stops the process " +
+			"and removes the lock, so the URL stops answering. Stopping twice is a no-op.",
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			b, err := newBoard(stackRoot, contractPath)
+			if err != nil {
+				return emitBoardState(cmd, "stop", nil, err)
+			}
+			st, runErr := b.Stop(cmd.Context(), boardRef(ref))
+			return emitBoardState(cmd, "stop", st, runErr)
+		},
+	}
+	cmd.Flags().StringVar(&stackRoot, "stack-root", "", "repository root of the dev stack (default: current directory)")
+	cmd.Flags().StringVar(&contractPath, "contract", devstack.DefaultContractPath, "dev stack contract file (relative to --stack-root)")
+	cmd.Flags().StringVar(&ref, "ref", "", "terminal reference id (default: the parent terminal, or $HARNESS_LOOP_REF)")
+	return cmd
+}
+
+func emitBoardState(cmd *cobra.Command, action string, st *devstack.BoardState, runErr error) error {
+	out := cmd.OutOrStdout()
+	if opts.JSON {
+		payload := map[string]any{"ok": runErr == nil, "action": action}
+		if st != nil {
+			payload["url"] = st.URL
+			payload["ref"] = st.Ref
+			payload["refs"] = st.Refs
+			payload["port"] = st.Port
+			payload["pid"] = st.PID
+			payload["started"] = st.Started
+			payload["reused"] = st.Reused
+			payload["released"] = st.Released
+			payload["healthy"] = st.Healthy
+			payload["detail"] = st.Detail
+		}
+		if runErr != nil {
+			payload["error"] = output.Redact(runErr.Error())
+		}
+		raw, err := json.MarshalIndent(payload, "", "  ")
+		if err == nil {
+			fmt.Fprintln(out, output.Redact(string(raw)))
+		}
+	} else if st != nil {
+		fmt.Fprintf(out, "url=%s\n", st.URL)
+		fmt.Fprintf(out, "refs=%d ref=%s state=%s\n", st.Refs, st.Ref, boardStateWord(st))
+		if st.PID > 0 {
+			fmt.Fprintf(out, "pid=%d port=%d\n", st.PID, st.Port)
+		}
+		if st.Detail != "" {
+			fmt.Fprintf(out, "detail=%s\n", st.Detail)
+		}
+	}
+	if runErr != nil {
+		if !opts.JSON {
+			fmt.Fprintln(out, output.Redact(runErr.Error()))
+		}
+		return &ExitError{Code: output.ExitFailed}
+	}
+	return nil
+}
+
+func boardStateWord(st *devstack.BoardState) string {
+	switch {
+	case st.Refs == 0:
+		return "stopped"
+	case st.Started:
+		return "started"
+	case st.Released:
+		return "released"
+	case st.Reused:
+		return "reused"
+	default:
+		return "released"
+	}
 }
 
 // runLoopSession is the resident default: submit as many goals as needed and
