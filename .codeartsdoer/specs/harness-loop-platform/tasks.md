@@ -1505,7 +1505,20 @@
 | 验收标准 | 单元：self handoff 工具不出现；from=to 被拒；A→B 后 B 的工具不含 B 自身；A→B→A 环被拒；正常 A→B 成功。真实：直连 50006 发「帮我写一个脚本」，不再出现 `cannot handoff to coder-agent`，能返回 coder-agent 的结果；`go test ./pkg/agent/...`、`go build -p 1 ./...`、depcheck 0。 |
 | 复杂度 | S（0.5~1 天） |
 
-> P2 合计：实施 47 个 + 测试 5 个 = **52 个任务**。
+### T-P2-48 Claude 式 TUI v2（骨架/状态/流式体感/Markdown）
+
+| 字段 | 内容 |
+|---|---|
+| 目标 | 把 `/harness loop` 从「带边框的 print」升级为有呼吸感、有状态反馈、固定骨架的 TUI：顶部 wordmark、可滚动消息区、固定输入框与状态栏；spinner/耗时/工具行；Markdown 渲染与统一语义色板。 |
+| 关联需求 | REQ-171~175；用户 2026-11-19 八点差距；T-P2-42、T-P2-45 |
+| 依赖 | T-P2-42（logo/box）、T-P2-45（直答） |
+| 涉及文件 | [M] `internal/cli/tui/{model,app,prompt,session}.go`、[M] `internal/cli/tui/views/{theme,chat,stage}.go`（可新增 `statusbar.go`/`wordmark.go`/`spinner.go`）、[M] `internal/cli/cmd/loop.go`（chunk 透传）、[M] `go.mod`/`go.sum`（仅 glamour 及其依赖）、[M] 对应 `_test.go` |
+| 实施要点 | **提交 1 骨架/状态栏/输入区**：`Model.View` 固定分区（wordmark → 可滚动消息区 → 输入框 → 状态栏），消息区高度=总高−固定区，输入/状态栏永远贴底；状态栏显示 model·cwd·git branch·tokens·`?`；`?` 弹出帮助层，移除平铺快捷键；`PromptModel` 支持 placeholder、Shift+Enter 换行、↑↓ 历史、粘贴多行、提交后清空并滚底。**提交 2 流式体感**：自研 spinner（`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`，500ms tick），`Thinking… 3s` + `esc to interrupt`；`ChatChunk` 扩 `ToolName/ToolArgs/ToolResult/Usage/Thinking`，`newAgentChatFunc` 透传 `think/tool_start/tool_result/final`；工具行 `⏺ Read(src/main.ts)` → `✓/✗`；token 流逐字 + 闪烁光标（`▍`/`▌` 交替）。**提交 3 Markdown/色板/wordmark**：assistant 最终文本用 `github.com/charmbracelet/glamour` 渲染（粗体/列表/代码块/行内 code），流式期间保持纯文本、final 后重渲染整段避免闪烁；`Theme` 收敛为 4 个语义色（Primary/Secondary/Border/Err），所有边框用 Border(dim)；`harness loop` 字符 wordmark（宽 ≥60 显示字符画，窄终端降级为单行加粗浅蓝）。 |
+| 技术约束 | 1) 继续 bubbletea + lipgloss，Markdown 仅新增 glamour（优先 v0.8.0，若与 lipgloss v1.0.0 冲突则用 v0.7.0，不得降级现有依赖）；spinner/多行输入自研，不引 bubbles；2) 不改变 `loop start`/`loop stop` 语义；3) `/task` 仍切换回现有 stage/事件视图；4) `NO_COLOR` 下无 ANSI 颜色，但保留 wordmark 文本与边框；5) 窄终端（<60 列）不溢出，消息硬换行。 |
+| 验收标准 | 真实 TTY：`/harness loop` 发 `hi` → 立即出现 spinner/Thinking + 逐字流式 + final Markdown；触发工具时有 `⏺ …→✓/✗` 行；输入框贴底、状态栏显示 model/cwd/git/tokens；`?` 弹帮助；`/task ...` 切回 a~e 视图；`NO_COLOR=1` 无颜色但结构完整。命令：`go test ./internal/cli/... -count=1`、`go build -p 1 ./...`、depcheck 0。无 TTY 时不得宣称已目视。 |
+| 复杂度 | M~L（2~3 天，内部 3 个提交） |
+
+> P2 合计：实施 48 个 + 测试 5 个 = **53 个任务**。
 
 ---
 
@@ -1723,6 +1736,8 @@ flowchart LR
     P38 --> P46
     P30 --> P47
     P45 --> P47
+    P42 --> P48
+    P45 --> P48
     P01 --> PTT3
     P09 --> PTT4
     P11 --> PTT5
