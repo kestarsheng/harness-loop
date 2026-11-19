@@ -1457,7 +1457,19 @@
 | 验收标准 | 契约仍 14 项；`EnsureGroups("obs")` 只按 `obs` 组自身健康判定，不再依赖 harnessloop 命名；`EnsureGroups(infra,agent)` 仍复用 50013；未声明 probe 的旧 fixture 仍按 harnessloop 回退；`go test ./internal/devstack/... ./internal/cli/...`、`go build -p 1 ./...`、depcheck 0。 |
 | 复杂度 | S（0.5 天） |
 
-> P2 合计：实施 43 个 + 测试 5 个 = **48 个任务**。
+### T-P2-44 devstack 配置渲染补齐模型凭据与入口 agent，并透传阶段错误
+
+| 字段 | 内容 |
+|---|---|
+| 目标 | `dev up` 冷启动后即可真实调用模型：配置渲染注入 `.harness/dev/env` 的 LLM 凭据、把 `entry_agent` 固定为已注册的 `main-agent`；阶段失败保留上游错误文本，不再一律显示 `unclassified stage error`。 |
+| 关联需求 | REQ-176；T-P2-21 自举、T-P2-40 分组启动 |
+| 依赖 | T-P2-21、T-P2-40 |
+| 涉及文件 | [M] `internal/devstack/{config,config_test}.go`、[M] `scripts/dev-stack.json`（agent env）、[M] `services/harnessloop-service/internal/service/stage_runner.go` |
+| 实施要点 | 1) `RenderConfig` 解析 `.harness/dev/env`，仅向 YAML 的 `llm:` 段注入 `provider/api_key/base_url/model`，MCP `tools/services` 下的 key 不得覆盖；2) `entry_agent` 渲染为 `main-agent`（模板里的 `default` 只是占位符，agent 注册表无 default）；3) agent 项补 `AGENT_LLM_EMIT_TOOL_CALL_MESSAGES=true`；4) `classifyStageError` 在未分类分支保留 `streamErr`（截断 500 字符），`content_filter` 分支不变；5) env 缺失时保留占位符，让服务暴露真实配置错误。 |
+| 验收标准 | 真实 `harness-cli run --goal "hi" --workspace . --no-tui` → `completed`，a~e 各 `attempts=1 accepted=true`；`conf/agent.yaml` 不再含 `your-api-key`；`conf/harnessloop.yaml` 的 `entry_agent=main-agent`；MCP server key 保持原值；失败事件包含上游错误文本；`go test ./internal/devstack/... ./services/harnessloop-service/... ./internal/cli/...`、`go build -p 1 ./...`、depcheck 0。 |
+| 复杂度 | S（已修复 `1b8dd91`） |
+
+> P2 合计：实施 44 个 + 测试 5 个 = **49 个任务**。
 
 ---
 
@@ -1667,6 +1679,8 @@ flowchart LR
     P20 --> P42
     P40 --> P42
     P40 --> P43
+    P21 --> P44
+    P40 --> P44
     P01 --> PTT3
     P09 --> PTT4
     P11 --> PTT5
