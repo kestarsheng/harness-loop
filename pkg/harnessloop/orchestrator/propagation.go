@@ -158,7 +158,9 @@ func (p *Propagator) Propagate(req PropagationRequest) (*PropagationResult, erro
 			canRetry := true
 			for _, failure := range failures {
 				st := subtasks[failure.SubtaskID]
-				if st == nil || st.AttemptNo >= p.cfg.RetryMaxAttempts {
+				// One budget definition, shared with Scheduler.RetrySubtask:
+				// attempt_no is 1-based, so max_attempts bounds the total runs.
+				if !st.RetryBudgetLeft(p.cfg.RetryMaxAttempts) {
 					canRetry = false
 					break
 				}
@@ -226,19 +228,31 @@ func applyFailFast(decision *PropagationDecision, members []*subtask.Subtask, fa
 	}
 }
 
-// Apply cancels the subtasks selected by a fail-fast decision. Retry decisions
-// are left to the runtime because they must re-enter the same subtask FSM.
+// Apply executes a propagation result against the scheduler: fail-fast
+// decisions cancel the remaining members of the set, retry decisions re-open
+// their failed subtasks for another attempt.
+//
+// Retry is applied through Scheduler.RetrySubtask, which is the only path from
+// failed back to pending and is bounded by the attempt budget, so an
+// ActionRetry decision can never turn into an unbounded loop: once the budget is
+// spent the next Propagate call degrades the set to fail-fast.
 func (p *Propagator) Apply(ctx context.Context, scheduler *Scheduler, result *PropagationResult) error {
 	if scheduler == nil || result == nil {
 		return nil
 	}
 	for _, decision := range result.Decisions {
-		if decision.Action != ActionCancelSet {
-			continue
-		}
-		for _, id := range decision.Cancelled {
-			if err := scheduler.MarkCancelled(ctx, id, "fail-fast:"+decision.ParallelSetID); err != nil {
-				return err
+		switch decision.Action {
+		case ActionCancelSet:
+			for _, id := range decision.Cancelled {
+				if err := scheduler.MarkCancelled(ctx, id, "fail-fast:"+decision.ParallelSetID); err != nil {
+					return err
+				}
+			}
+		case ActionRetry:
+			for _, id := range decision.Retry {
+				if _, err := scheduler.RetrySubtask(ctx, id, "retry:"+decision.ParallelSetID); err != nil {
+					return err
+				}
 			}
 		}
 	}

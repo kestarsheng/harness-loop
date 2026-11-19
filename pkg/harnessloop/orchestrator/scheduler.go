@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"sync"
 	"time"
@@ -39,6 +40,26 @@ type StatusSink interface {
 	StatusChanged(ctx context.Context, st *subtask.Subtask, from subtask.Status) error
 }
 
+// RetrySink persists a retry requeue. It is deliberately not folded into
+// StatusSink: a retry is not a failed→pending UPDATE of a terminal row. The
+// same DAG node is re-opened as pending with a new attempt number, which is an
+// upsert keyed by (parent_task_id, dag_id, dag_node_id). Implementations must
+// therefore treat it as idempotent and must not enforce the FSM's "terminal
+// states have no outgoing edge" rule — the scheduler already gated the retry on
+// the attempt budget before calling.
+type RetrySink interface {
+	RetryRequeued(ctx context.Context, st *subtask.Subtask, from subtask.Status) error
+}
+
+// Subtask retry events reuse the platform's retry vocabulary (retry.scheduled /
+// retry.exhausted). Both already carry subtask_id and feed the retry alert
+// rules, so a subtask retry is counted without inventing a new dictionary
+// entry; the orchestrator package stays free of the event schema.
+const (
+	EventSubtaskRetryScheduled = "retry.scheduled"
+	EventSubtaskRetryExhausted = "retry.exhausted"
+)
+
 // Scheduler drives one parent task. It owns quota, dependency gating, queue
 // events, timeout enforcement and the class circuit breaker. Execution of the
 // subtask itself stays in the runtime.
@@ -51,6 +72,7 @@ type Scheduler struct {
 	circuit   *CircuitBreaker
 	fair      *TenantFairness
 	status    StatusSink
+	retry     RetrySink
 	weight    float64
 	order     []string
 	items     map[string]*scheduledItem
@@ -93,6 +115,11 @@ func (s *Scheduler) WithStatusSink(sink StatusSink) *Scheduler {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.status = sink
+	// One object may serve both ports; a sink that only writes transitions
+	// still gets retries persisted through the fallback in persistRetryLocked.
+	if retrySink, ok := sink.(RetrySink); ok {
+		s.retry = retrySink
+	}
 	return s
 }
 
@@ -659,6 +686,93 @@ func (s *Scheduler) MarkCancelled(ctx context.Context, subtaskID, reason string)
 		DagNodeID:     item.subtask.DagNodeID,
 		ParallelSetID: item.subtask.ParallelSetID,
 		Payload:       map[string]any{"reason": reason},
+	})
+}
+
+// RetrySubtask re-opens one failed subtask for another attempt, bounded by the
+// configured retry budget. It reports true when the subtask is pending again and
+// the next Dispatch tick can start it.
+//
+// The failure is not erased: attempt_no is incremented, subtask.failed stays in
+// the event stream, and retry.scheduled records why the subtask was re-opened.
+// That is what keeps the retry count, the events and the row in agreement.
+//
+// Two callers rely on it: the propagation layer for retry-strategy sets
+// (ActionRetry) and the c-stage re-entry after a d→c rollback. Both are
+// budget-bounded, so no retry can loop forever; an exhausted subtask stays
+// failed and the parent closes through the d-stage gate (T-P2-29).
+func (s *Scheduler) RetrySubtask(ctx context.Context, subtaskID, reason string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item := s.items[subtaskID]
+	if item == nil {
+		return false, newError(CodeSubtaskNotFound, "unknown subtask %s", subtaskID)
+	}
+	if item.subtask.Status != subtask.StatusFailed {
+		return false, nil
+	}
+	maxAttempts := s.cfg.RetryMaxAttempts
+	if err := item.subtask.RequeueForRetry(maxAttempts); err != nil {
+		if !errors.Is(err, subtask.ErrRetryBudgetExhausted) {
+			return false, err
+		}
+		return false, s.emitRetryLocked(ctx, item, EventSubtaskRetryExhausted, reason, maxAttempts)
+	}
+	if err := s.persistRetryLocked(ctx, item); err != nil {
+		// Nothing was written: restore the row's real state so the next pass
+		// reports the same budget instead of charging an attempt that never
+		// reached the database.
+		item.subtask.Status = subtask.StatusFailed
+		item.subtask.AttemptNo--
+		return false, err
+	}
+	// Clear the previous run's bookkeeping so the requeued subtask behaves like
+	// a fresh pending item: no dangling deadline, and subtask.queued may be
+	// reported again for its new queue position.
+	item.running = false
+	item.deadline = time.Time{}
+	item.startedAt = time.Time{}
+	item.lastQueuePos = -1
+	return true, s.emitRetryLocked(ctx, item, EventSubtaskRetryScheduled, reason, maxAttempts)
+}
+
+// persistRetryLocked writes the requeue. A sink that cannot express the upsert
+// falls back to the transition port so in-memory-only reservations still run.
+func (s *Scheduler) persistRetryLocked(ctx context.Context, item *scheduledItem) error {
+	if item == nil {
+		return nil
+	}
+	if s.retry != nil {
+		return s.retry.RetryRequeued(ctx, item.subtask, subtask.StatusFailed)
+	}
+	return s.persistLocked(ctx, item, subtask.StatusFailed)
+}
+
+func (s *Scheduler) emitRetryLocked(ctx context.Context, item *scheduledItem, eventType, reason string, maxAttempts int) error {
+	severity := SeverityInfo
+	if eventType == EventSubtaskRetryExhausted {
+		severity = SeverityWarn
+	}
+	payload := map[string]any{
+		"from_status":  "failed",
+		"attempt_no":   item.subtask.AttemptNo,
+		"max_attempts": maxAttempts,
+	}
+	if reason != "" {
+		payload["reason"] = reason
+	}
+	if eventType == EventSubtaskRetryScheduled {
+		payload["to_status"] = string(subtask.StatusPending)
+	}
+	return emit(ctx, s.emitter, Event{
+		Type:          eventType,
+		Severity:      severity,
+		ParentTaskID:  item.subtask.ParentTaskID,
+		SubtaskID:     item.subtask.SubtaskID,
+		DagID:         item.subtask.DagID,
+		DagNodeID:     item.subtask.DagNodeID,
+		ParallelSetID: item.subtask.ParallelSetID,
+		Payload:       payload,
 	})
 }
 

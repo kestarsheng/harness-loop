@@ -106,8 +106,9 @@ type OrchestratorBridge struct {
 	emitter  *orchestrator.PublisherEmitter
 	executor SubtaskExecutor
 
-	quota     orchestrator.QuotaConfig
-	admission orchestrator.AdmissionConfig
+	quota      orchestrator.QuotaConfig
+	admission  orchestrator.AdmissionConfig
+	propagator *orchestrator.Propagator
 
 	mu       sync.Mutex
 	tasks    map[string]*orchestrationState
@@ -122,13 +123,14 @@ func NewOrchestratorBridge(enabled bool, emitter *orchestrator.PublisherEmitter,
 	// retry_after_ms），比"接单后干等别人的 15 分钟慢任务"更可预期。
 	admission.QueueWhenFull = false
 	return &OrchestratorBridge{
-		enabled:   enabled,
-		emitter:   emitter,
-		executor:  executor,
-		quota:     quota,
-		admission: admission,
-		tasks:     make(map[string]*orchestrationState),
-		pools:     make(map[string]*tenantPool),
+		enabled:    enabled,
+		emitter:    emitter,
+		executor:   executor,
+		quota:      quota,
+		admission:  admission,
+		propagator: orchestrator.NewPropagator(quota),
+		tasks:      make(map[string]*orchestrationState),
+		pools:      make(map[string]*tenantPool),
 	}
 }
 
@@ -155,6 +157,7 @@ func (b *OrchestratorBridge) withQuota(quota orchestrator.QuotaConfig) *Orchestr
 	defer b.mu.Unlock()
 	b.quota = quota
 	b.admission = admission
+	b.propagator = orchestrator.NewPropagator(quota)
 	b.pools = make(map[string]*tenantPool)
 	return b
 }
@@ -285,6 +288,13 @@ func (b *OrchestratorBridge) PlanBStage(ctx context.Context, ec OrchestratorStag
 // DispatchCStage starts every subtask the scheduler admits. With no executor
 // wired it only advances the scheduler bookkeeping; the runtime still keeps
 // running, which is why a missing executor is not treated as a task failure.
+//
+// A c stage can be entered more than once: the d-stage closure gate (T-P2-29)
+// rolls the parent back to c when children did not close. Re-entering must
+// therefore give the failed children another chance within their attempt budget
+// (requeueFailedForRerun); without it a failed child stays terminal, the next d
+// stage fails for the same reason, and the parent burns its whole acceptance
+// budget without ever re-running the subtask.
 func (b *OrchestratorBridge) DispatchCStage(ctx context.Context, ec OrchestratorStageContext) ([]*subtask.Subtask, error) {
 	if !b.Enabled() {
 		return nil, nil
@@ -292,6 +302,9 @@ func (b *OrchestratorBridge) DispatchCStage(ctx context.Context, ec Orchestrator
 	state := b.stateFor(ec.TaskID)
 	if state == nil || state.scheduler == nil {
 		return nil, fmt.Errorf("orchestrator bridge: no DAG was planned for task %s", ec.TaskID)
+	}
+	if err := b.requeueFailedForRerun(ctx, state, ec); err != nil {
+		return nil, err
 	}
 	running, err := state.scheduler.Dispatch(ctx)
 	if err != nil {
@@ -336,6 +349,90 @@ func (b *OrchestratorBridge) DispatchCStage(ctx context.Context, ec Orchestrator
 	return running, nil
 }
 
+// requeueFailedForRerun re-opens the failed subtasks of a DAG whose c stage is
+// being entered again (d→c rollback).
+//
+// The policy is not re-invented here: the same Propagator that decides a failure
+// is asked again, so a set that may retry is retried (ActionRetry → the
+// scheduler re-opens it) and a set that must fail fast still cancels its
+// survivors. What is added on top is the "tolerate 外" case: a failure the set
+// strategy did not absorb is exactly what forced the rollback, so its attempt
+// budget is spent before the parent gives up. Tolerated failures are left
+// terminal — tolerate means the loss was accepted, and replaying it would make
+// the ratio meaningless.
+//
+// Every retry goes through Scheduler.RetrySubtask, which is budget-bounded, so
+// repeated rollbacks terminate: once the last attempt is spent the subtask stays
+// failed and the d-stage gate closes the parent as failed (T-P2-29).
+func (b *OrchestratorBridge) requeueFailedForRerun(ctx context.Context, state *orchestrationState, ec OrchestratorStageContext) error {
+	if state == nil || state.scheduler == nil || state.plan == nil || state.plan.Plan == nil {
+		return nil
+	}
+	propagator := b.propagator
+	if propagator == nil {
+		return nil
+	}
+	var latest []*subtask.Subtask
+	var failed []orchestrator.FailedSubtask
+	for _, planned := range state.plan.Subtasks {
+		if planned == nil {
+			continue
+		}
+		st, ok := state.scheduler.Item(planned.SubtaskID)
+		if !ok || st == nil {
+			continue
+		}
+		latest = append(latest, st)
+		if st.Status == subtask.StatusFailed {
+			failed = append(failed, orchestrator.FailedSubtask{SubtaskID: st.SubtaskID})
+		}
+	}
+	if len(failed) == 0 {
+		return nil
+	}
+	decisions, err := propagator.Propagate(orchestrator.PropagationRequest{
+		ParentTaskID: ec.TaskID,
+		Sets:         state.plan.Plan.ParallelSets,
+		Subtasks:     latest,
+		Failed:       failed,
+	})
+	if err != nil {
+		return fmt.Errorf("orchestrator bridge: propagation for task %s: %w", ec.TaskID, err)
+	}
+	// Retry and fail-fast decisions take the d-stage path, so a rollback cannot
+	// invent a third failure policy.
+	if err := propagator.Apply(ctx, state.scheduler, decisions); err != nil {
+		return fmt.Errorf("orchestrator bridge: apply propagation for task %s: %w", ec.TaskID, err)
+	}
+	tolerated := toleratedSubtasks(decisions.Decisions)
+	for _, failure := range failed {
+		if _, ok := tolerated[failure.SubtaskID]; ok {
+			continue
+		}
+		if st, ok := state.scheduler.Item(failure.SubtaskID); !ok || st.Status != subtask.StatusFailed {
+			continue // already re-opened by an ActionRetry decision
+		}
+		if _, err := state.scheduler.RetrySubtask(ctx, failure.SubtaskID, "rollback:d->c"); err != nil {
+			return fmt.Errorf("orchestrator bridge: retry subtask %s: %w", failure.SubtaskID, err)
+		}
+	}
+	return nil
+}
+
+// toleratedSubtasks collects the failures a tolerate set explicitly absorbed.
+func toleratedSubtasks(decisions []orchestrator.PropagationDecision) map[string]struct{} {
+	out := make(map[string]struct{})
+	for _, decision := range decisions {
+		if !decision.Tolerated {
+			continue
+		}
+		for _, failure := range decision.Failures {
+			out[failure.SubtaskID] = struct{}{}
+		}
+	}
+	return out
+}
+
 // applySubtaskResult writes the executor outcome back onto the subtask the
 // scheduler holds. The aggregator reads these fields in the d stage.
 func applySubtaskResult(st *subtask.Subtask, res *SubtaskResult) {
@@ -374,6 +471,30 @@ func (b *OrchestratorBridge) statusSink() orchestrator.StatusSink {
 
 type subtaskRepoStatusSink struct {
 	repo *repository.SubtaskRepo
+}
+
+// RetryRequeued persists a failed→pending retry. It cannot be a status UPDATE:
+// the subtask FSM makes failed terminal and the repository refuses any write
+// that would rewind a terminal row. A retry is instead an upsert of the same
+// (parent_task_id, dag_id, dag_node_id) node with status=pending, which is
+// exactly the "replan this node" path InsertBatch already owns.
+//
+// attempt_no is not written by that upsert; it reaches the row with the next
+// transition (pending→running), so the row never claims a retry that has not
+// started. The scheduler is the authority in between, and its budget check and
+// the retry.scheduled event carry the same number.
+func (s *subtaskRepoStatusSink) RetryRequeued(ctx context.Context, st *subtask.Subtask, from subtask.Status) error {
+	if st == nil {
+		return nil
+	}
+	rows := subtaskRows([]*subtask.Subtask{st})
+	if len(rows) == 0 {
+		return nil
+	}
+	if err := s.repo.InsertBatch(ctx, rows); err != nil {
+		return fmt.Errorf("orchestrator bridge: requeue subtask %s (from %s): %w", st.SubtaskID, from, err)
+	}
+	return nil
 }
 
 func (s *subtaskRepoStatusSink) StatusChanged(ctx context.Context, st *subtask.Subtask, from subtask.Status) error {
