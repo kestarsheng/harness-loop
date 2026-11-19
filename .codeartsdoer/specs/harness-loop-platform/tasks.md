@@ -1445,7 +1445,19 @@
 | 验收标准 | 真实终端执行 `/harness loop`：顶部可见加粗浅蓝 `harness loop`，输入区有圆角组件框，界面无 URL 行；`NO_COLOR=1` 时无 ANSI 颜色但仍有 logo 文本与边框；TUI 宽度 < 60 时不溢出；单测覆盖 logo/框/降级；用户目视确认（无 TTY 时如实说明，不得宣称已目视）。 |
 | 复杂度 | M（1 天） |
 
-> P2 合计：实施 42 个 + 测试 5 个 = **47 个任务**。
+### T-P2-43 契约显式声明栈探针（probe:true）
+
+| 字段 | 内容 |
+|---|---|
+| 目标 | 把 `Ensure`/`EnsureGroups` 的复用判定从「选中集里有没有 harnessloop」改为契约显式声明的 `probe:true` 项，消除新增分组（如 `obs`）时的隐式耦合；未声明时回退 harnessloop，保持旧契约兼容。 |
+| 关联需求 | REQ-176；T-P2-19 契约唯一数据源、T-P2-40 分组启动 |
+| 依赖 | T-P2-40 |
+| 涉及文件 | [M] `scripts/dev-stack.json`、[M] `internal/devstack/contract.go`、[M] `internal/devstack/manager.go`、[M] 对应 `*_test.go` |
+| 实施要点 | 1) `Item` 增 `Probe bool`（json:`probe`）；`Contract.ProbeItem()` 返回 `probe:true` 项；2) `Validate`：probe 至多一个、必须是 process、health 必须非空、必须属于 `agent` 组；3) `dev-stack.json` 只给 `harnessloop` 标 `"probe": true`，14 项/端口/命令不变；4) `Ensure`/`EnsureGroups` 统一规则：取「选中集 ∩ probe 项」，命中则用该探针健康判定复用，未命中则退化为「选中项全健康才复用」；5) probe 未声明时回退 `HarnessLoop()`（harnessloop），旧契约与脚本不受影响；6) 测试覆盖：probe 缺失回退、probe 在选中集、probe 不在选中集、多个 probe 拒绝、probe 非 process 拒绝、`obs` 新组不因命名产生隐式耦合。 |
+| 验收标准 | 契约仍 14 项；`EnsureGroups("obs")` 只按 `obs` 组自身健康判定，不再依赖 harnessloop 命名；`EnsureGroups(infra,agent)` 仍复用 50013；未声明 probe 的旧 fixture 仍按 harnessloop 回退；`go test ./internal/devstack/... ./internal/cli/...`、`go build -p 1 ./...`、depcheck 0。 |
+| 复杂度 | S（0.5 天） |
+
+> P2 合计：实施 43 个 + 测试 5 个 = **48 个任务**。
 
 ---
 
@@ -1654,6 +1666,7 @@ flowchart LR
     P40 --> P41
     P20 --> P42
     P40 --> P42
+    P40 --> P43
     P01 --> PTT3
     P09 --> PTT4
     P11 --> PTT5
