@@ -335,6 +335,18 @@ func (t *FileReadTool) ExecuteWithConfig(ctx context.Context, args map[string]in
 		audit.Deny("file_read", codeForPathError(err), path, root, err.Error())
 		return "", err
 	}
+	// The argument may name a directory — "." is the ordinary case, an agent
+	// opening its workspace. Stat before reading so a directory never reaches
+	// os.ReadFile, which fails per-platform (EISDIR, "Incorrect function", ...)
+	// and would make `read_file(".")` look like a sandbox refusal when the path
+	// was in fact fine.
+	info, err := os.Stat(abs)
+	if err != nil {
+		return "", fmt.Errorf("read %s: %w", relPathForResult(root, abs), err)
+	}
+	if info.IsDir() {
+		return renderDirectory(root, abs)
+	}
 	raw, err := os.ReadFile(abs)
 	if err != nil {
 		return "", fmt.Errorf("read %s: %w", relPathForResult(root, abs), err)
@@ -344,6 +356,61 @@ Workspace root: %s
 Bytes: %d
 
 %s`, relPathForResult(root, abs), root, len(raw), string(raw)), nil
+}
+
+// maxDirEntries caps a directory read: an agent asking to open the workspace
+// root must not pull a whole `vendor/` or `node_modules/` into its context by
+// accident. The listing stays deterministic because os.ReadDir sorts by name,
+// so the first maxDirEntries entries are always the same ones.
+const maxDirEntries = 200
+
+// renderDirectory renders a non-recursive listing of dir: name, is_dir, size.
+//
+// Entries come from os.ReadDir, which Lstats every name, so a symlink is
+// reported as a link (is_dir=false, size of the link itself) instead of being
+// resolved into whatever it points at. That matters for containment: following
+// a link here would let the listing describe entities outside the workspace
+// that Resolve had already cleared the *path* for, not the target.
+//
+// Directory sizes are reported as 0 — Info().Size() on a directory is
+// filesystem-dependent filler, and a stable 0 keeps the output diffable across
+// platforms.
+func renderDirectory(root, dir string) (string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", fmt.Errorf("read %s: %w", relPathForResult(root, dir), err)
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "Directory: %s\n", relPathForResult(root, dir))
+	fmt.Fprintf(&b, "Workspace root: %s\n", root)
+	if len(entries) > maxDirEntries {
+		fmt.Fprintf(&b, "Entries: %d (truncated: showing first %d)\n", len(entries), maxDirEntries)
+	} else {
+		fmt.Fprintf(&b, "Entries: %d\n", len(entries))
+	}
+	if len(entries) == 0 {
+		// Spelled out rather than left as an empty section: "no entries" and
+		// "the listing broke" must not look alike to the caller.
+		b.WriteString("(empty directory)\n")
+		return b.String(), nil
+	}
+
+	b.WriteString("\nname\tis_dir\tsize\n")
+	for i, entry := range entries {
+		if i >= maxDirEntries {
+			break
+		}
+		isDir := entry.IsDir()
+		var size int64
+		if !isDir {
+			if info, infoErr := entry.Info(); infoErr == nil {
+				size = info.Size()
+			}
+		}
+		fmt.Fprintf(&b, "%s\t%t\t%d\n", entry.Name(), isDir, size)
+	}
+	return b.String(), nil
 }
 
 // GetInfo returns tool information for LLM

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -198,6 +199,162 @@ func TestFileReadToolReadsInsideWorkspace(t *testing.T) {
 	}
 	if len(audit.Records()) != 1 || audit.Records()[0].Tool != "file_read" {
 		t.Fatalf("read denial must be audited, got %v", audit.Records())
+	}
+}
+
+// read_file(".") is what an agent does to open its workspace. It has to come
+// back as a listing of the root — not as a sandbox refusal, and not as a
+// platform errno leaking out of os.ReadFile.
+func TestFileReadToolListsDotAsWorkspaceRoot(t *testing.T) {
+	audit.Reset()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("hello"), 0o644); err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "pkg", "sub"), 0o755); err != nil {
+		t.Fatalf("seed dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "pkg", "sub", "deep.go"), []byte("package sub\n"), 0o644); err != nil {
+		t.Fatalf("seed nested: %v", err)
+	}
+
+	tool := NewFileReadTool("")
+	out, err := tool.ExecuteWithConfig(context.Background(), map[string]interface{}{
+		"path": ".",
+	}, callConfig(t, root))
+	if err != nil {
+		t.Fatalf(`read_file(".") must succeed: %v`, err)
+	}
+
+	if !strings.Contains(out, "Directory: .\n") {
+		t.Fatalf(`listing does not name the argument as ".": %q`, out)
+	}
+	if !strings.Contains(out, "Entries: 2\n") {
+		t.Fatalf("listing entry count is wrong (non-recursive listing of root): %q", out)
+	}
+	if !strings.Contains(out, "README.md\tfalse\t5\n") {
+		t.Fatalf("file entry must carry is_dir=false and its size: %q", out)
+	}
+	if !strings.Contains(out, "pkg\ttrue\t0\n") {
+		t.Fatalf("directory entry must carry is_dir=true: %q", out)
+	}
+	// Non-recursive: the nested file is reachable but must not be listed here.
+	if strings.Contains(out, "deep.go") {
+		t.Fatalf(`listing recursed into subdirectories: %q`, out)
+	}
+}
+
+func TestFileReadToolEmptyDirectoryIsExplicit(t *testing.T) {
+	audit.Reset()
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "emptydir"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	tool := NewFileReadTool("")
+	out, err := tool.ExecuteWithConfig(context.Background(), map[string]interface{}{
+		"path": "emptydir",
+	}, callConfig(t, root))
+	if err != nil {
+		t.Fatalf("read empty dir: %v", err)
+	}
+	if !strings.Contains(out, "Entries: 0\n") || !strings.Contains(out, "(empty directory)") {
+		t.Fatalf("empty directory must say so explicitly: %q", out)
+	}
+	if strings.Contains(out, "name\tis_dir\tsize") {
+		t.Fatalf("empty directory must not render a table header: %q", out)
+	}
+}
+
+func TestFileReadToolTruncatesLargeDirectory(t *testing.T) {
+	audit.Reset()
+	root := t.TempDir()
+	const seeded = maxDirEntries + 5
+	for i := 0; i < seeded; i++ {
+		name := filepath.Join(root, fmt.Sprintf("f%03d.txt", i))
+		if err := os.WriteFile(name, []byte("x"), 0o644); err != nil {
+			t.Fatalf("seed %s: %v", name, err)
+		}
+	}
+
+	tool := NewFileReadTool("")
+	out, err := tool.ExecuteWithConfig(context.Background(), map[string]interface{}{
+		"path": ".",
+	}, callConfig(t, root))
+	if err != nil {
+		t.Fatalf("read large dir: %v", err)
+	}
+	if !strings.Contains(out, "truncated") {
+		t.Fatalf("listing must be marked truncated: %q", out)
+	}
+	if !strings.Contains(out, fmt.Sprintf("Entries: %d", seeded)) {
+		t.Fatalf("truncated listing must still report the real count: %q", out)
+	}
+
+	rows := 0
+	for _, line := range strings.Split(out, "\n") {
+		if line == "" || line == "name\tis_dir\tsize" {
+			continue
+		}
+		if strings.Count(line, "\t") == 2 {
+			rows++
+		}
+	}
+	if rows != maxDirEntries {
+		t.Fatalf("truncated listing rendered %d entry rows, want %d", rows, maxDirEntries)
+	}
+}
+
+// A symlink entry is reported as a link, never as its target: following it here
+// would let the listing describe something the path guard never approved.
+func TestFileReadToolDoesNotFollowSymlinkEntries(t *testing.T) {
+	audit.Reset()
+	root := t.TempDir()
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "secret.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed outside: %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "link")); err != nil {
+		t.Skipf("symlink not available: %v", err)
+	}
+
+	tool := NewFileReadTool("")
+	out, err := tool.ExecuteWithConfig(context.Background(), map[string]interface{}{
+		"path": ".",
+	}, callConfig(t, root))
+	if err != nil {
+		t.Fatalf(`read_file("."): %v`, err)
+	}
+	if !strings.Contains(out, "link\tfalse\t") {
+		t.Fatalf("symlink entry must be is_dir=false and not followed: %q", out)
+	}
+	if strings.Contains(out, "secret.txt") {
+		t.Fatalf("listing followed the symlink: %q", out)
+	}
+}
+
+// The directory branch must not become a bypass: a path the sandbox refuses is
+// still refused before any listing happens.
+func TestFileReadToolDirectoryDoesNotBypassPathGuard(t *testing.T) {
+	audit.Reset()
+	root := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(root, "link")); err != nil {
+		t.Skipf("symlink not available: %v", err)
+	}
+
+	tool := NewFileReadTool("")
+	if _, err := tool.ExecuteWithConfig(context.Background(), map[string]interface{}{
+		"path": "link",
+	}, callConfig(t, root)); err == nil {
+		t.Fatal("a symlink that escapes the workspace must not be listed")
+	}
+	for _, rel := range []string{"..", "../", "/etc"} {
+		if _, err := tool.ExecuteWithConfig(context.Background(), map[string]interface{}{
+			"path": rel,
+		}, callConfig(t, root)); err == nil {
+			t.Fatalf("%q must be refused", rel)
+		}
 	}
 }
 
