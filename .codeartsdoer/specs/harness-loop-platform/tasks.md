@@ -1380,9 +1380,9 @@
 | 目标 | harness 批准后，agent/mcp 执行面真正执行该命令；同一调用在有效期内复用同一工单，消除「反复重发 → 每次新工单」的风暴。 |
 | 关联需求 | REQ-160~166；design 4.15.3 |
 | 依赖 | T-P2-31 |
-| 涉及文件 | [M] `services/agent-service/internal/**`、[M] `services/mcp-service/internal/**`、[M] `pkg/harnessloop/policy/**`（凭据签发/校验）、必要时 [M] `proto/mcp/**` |
-| 实施要点 | 1) harness 批准后签发一次性 `approval_token`（task_id + tool + args_digest + expiry + 签名）；2) agent/mcp 执行前校验 token，无 token 仍走各自白名单（fail closed），token 无效/过期拒绝；3) 同一 `(task_id, tool, args_digest)` 在有效期内复用同一工单，不重复建单；4) 审计记录 token 校验结果与工单复用情况；5) 保留执行面独立白名单作为兜底，不做「审批即跳过所有执行面校验」。 |
-| 验收标准 | 真实任务批准后 `rm scratch/probe.txt` 真的执行（文件消失）；同一调用不产生第二个工单；未批准/过期 token 被拒且留痕；`go test ./services/agent-service/... ./services/mcp-service/... ./pkg/harnessloop/policy/...` 全绿。 |
+| 涉及文件 | [M] `services/harnessloop-service/internal/service/approval_client.go`（**唯一业务扩域，方案 B，2026-11-19 拍板**）、[M] `services/harnessloop-service/cmd/**`（仅装配）、[M] `pkg/harnessloop/policy/**`（token 结构 + HMAC 签发/校验）、[M] `services/mcp-service/internal/**`（验签 + nonce 一次性）、[M] `services/agent-service/internal/**`（仅透传 token，**不得持有签发密钥**） |
+| 实施要点 | 1) 签发权威在 harness：`ApprovalClient.Await` 观察到 `approved` 时签发一次性 `approval_token`（task_id + tool + args_digest + expiry + nonce + HMAC）；2) agent-service 只透传 token，mcp 执行前验签、校验绑定/过期/一次性，无 token 仍走各自白名单（fail closed）；3) 同一 `(task_id, tool, args_digest)` 在有效期内复用同一工单，**在 `ApprovalClient` 建单前**去重；4) 审计记录 token 校验结果、nonce 消费与工单复用；5) **不得**把签发器放进 agent-service 侧；不得改 `runtime.go`、`orchestrator/**`、`internal/cli/**`、`frontend/**`、`go.mod`。 |
+| 验收标准 | 真实任务批准后 `rm scratch/probe.txt` 真的执行（文件消失）；同一调用不产生第二个工单；未批准/过期/重复 nonce 的 token 被拒且留痕；`go test ./services/harnessloop-service/... ./services/mcp-service/... ./services/agent-service/... ./pkg/harnessloop/policy/...` 全绿；回报必须包含签发者、密钥持有方、工单复用证据。 |
 | 复杂度 | M（1~2 天） |
 
 ### T-P2-38 sandbox 点路径语义（`read_file(".")` 必败）
