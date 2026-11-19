@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -137,6 +139,101 @@ func TestResolveDetectsSymlinkEscape(t *testing.T) {
 	}
 	if _, err := Resolve(root, "link/secret.txt"); !errors.Is(err, ErrPathEscape) {
 		t.Fatalf("symlink escape must be rejected: %v", err)
+	}
+}
+
+// The agent names artifacts the way the user did: workspace=D:\Desktop and
+// path=D:\Desktop\morning_greeting.vbs. That absolute path is inside the root
+// and must normalize to the same file as the relative spelling instead of
+// being refused.
+func TestResolveAcceptsAbsolutePathInsideWorkspace(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "desktop", "morning_greeting.vbs")
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	want := filepath.Clean(target)
+	if evaluated, err := filepath.EvalSymlinks(target); err == nil {
+		want = filepath.Clean(evaluated)
+	}
+
+	variants := []string{target, filepath.ToSlash(target)}
+	if runtime.GOOS == "windows" {
+		// Drive-letter case and separator style must not change the verdict.
+		variants = append(variants,
+			strings.ToLower(target),
+			strings.ToUpper(target),
+			strings.ToUpper(filepath.ToSlash(target)),
+		)
+	}
+	for _, in := range variants {
+		got, err := Resolve(root, in)
+		if err != nil {
+			t.Fatalf("Resolve(%q) must accept an absolute path inside the root: %v", in, err)
+		}
+		if normalize(got) != normalize(want) {
+			t.Fatalf("Resolve(%q) = %s, want %s", in, got, want)
+		}
+		if !isWithin(root, got) {
+			t.Fatalf("Resolve(%q) escaped the root: %s", in, got)
+		}
+
+		cached, err := ResolveCached(root, in)
+		if err != nil {
+			t.Fatalf("ResolveCached(%q): %v", in, err)
+		}
+		if normalize(cached) != normalize(want) {
+			t.Fatalf("ResolveCached(%q) = %s, want %s", in, cached, want)
+		}
+	}
+}
+
+// Absolute paths that lexically sit outside the root stay refused, including
+// the `..` route and the URL/UNC/device spellings.
+func TestResolveRejectsAbsolutePathOutsideWorkspace(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "ws")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(parent, "other", "x.txt")
+
+	cases := []string{
+		outside,
+		filepath.ToSlash(outside),
+		filepath.Join(root, "..", "Windows", "x"),
+		"file:///etc/passwd",
+		`\\server\share\x`,
+		`\\?\C:\Windows\x`,
+		`\\.\C:\Windows\x`,
+		"%5c%5cserver%5cshare%5cx",
+	}
+	if runtime.GOOS == "windows" {
+		// The literal examples from the incident report.
+		cases = append(cases, `D:\Other\x`, `D:\Desktop\..\Windows\x`)
+	}
+	for _, in := range cases {
+		if _, err := Resolve(root, in); !errors.Is(err, ErrUnsafePath) {
+			t.Fatalf("%q must fail with E_UNSAFE_PATH, got %v", in, err)
+		}
+	}
+}
+
+// An absolute path inside the root that goes through a symlink pointing
+// outside must still be refused, and refused as an escape.
+func TestResolveRejectsAbsoluteSymlinkEscape(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	link := filepath.Join(root, "link")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlink not available: %v", err)
+	}
+	if _, err := Resolve(root, filepath.Join(link, "secret.txt")); !errors.Is(err, ErrPathEscape) {
+		t.Fatalf("absolute symlink escape must fail with E_PATH_ESCAPE, got %v", err)
 	}
 }
 
