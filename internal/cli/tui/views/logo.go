@@ -33,15 +33,17 @@ func RenderLogo(noColor bool) string {
 
 // WordmarkWidth is the terminal width at which the banner wordmark replaces
 // the single-line wordmark.
-const WordmarkWidth = 60
+const WordmarkWidth = 72
 
-// wordmarkArt is the "harness loop" banner. Every row is 56 columns wide, so
-// the banner still fits at WordmarkWidth.
+// wordmarkArt is the "harness loop" banner in the figlet "standard" face.
+// Every row is at most 60 columns wide.
 var wordmarkArt = []string{
-	"█  █ ████ ████ █  █ ████ ████ ████   ██   ████ ████ ████",
-	"█  █ █  █ █  █ ██ █ ██   ██   ██     ██   █  █ █  █ █  █",
-	"████ ████ ████ █ ██ ████ ████ ████   ██   █  █ █  █ ████",
-	"█  █ █  █ █  █ █  █ ████ ████ ████   ██   ████ ████ █   ",
+	" _                                      _                   ",
+	"| |__   __ _ _ __ _ __   ___  ___ ___  | | ___   ___  _ __  ",
+	"| '_ \\ / _` | '__| '_ \\ / _ \\/ __/ __| | |/ _ \\ / _ \\| '_ \\ ",
+	"| | | | (_| | |  | | | |  __/\\__ \\__ \\ | | (_) | (_) | |_) |",
+	"|_| |_|\\__,_|_|  |_| |_|\\___||___/___/ |_|\\___/ \\___/| .__/ ",
+	"                                                     |_|    ",
 }
 
 // RenderWordmark renders the width-aware wordmark. Narrow terminals get the
@@ -54,7 +56,7 @@ func RenderWordmark(width int, noColor bool) string {
 	style := LogoStyle(noColor)
 	rows := make([]string, 0, len(wordmarkArt))
 	for _, row := range wordmarkArt {
-		rows = append(rows, style.Render(row))
+		rows = append(rows, style.Render(strings.TrimRight(row, " ")))
 	}
 	return strings.Join(rows, "\n")
 }

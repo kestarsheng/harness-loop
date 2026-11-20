@@ -76,13 +76,20 @@ func TestThemeHasOnlySemanticFields(t *testing.T) {
 }
 
 func TestWordmarkWideAndNarrow(t *testing.T) {
+	if WordmarkWidth != 72 {
+		t.Fatalf("WordmarkWidth = %d, want 72 (T-P2-49 re-measured threshold)", WordmarkWidth)
+	}
 	wide := RenderWordmark(80, true)
 	rows := strings.Split(wide, "\n")
-	if len(rows) != 4 {
-		t.Fatalf("wide wordmark has %d rows, want 4:\n%s", len(rows), wide)
+	if len(rows) != 6 {
+		// The figlet "standard" face renders "harness loop" in six rows: the
+		// descender of the trailing "p" needs its own row.
+		t.Fatalf("wide wordmark has %d rows, want 6:\n%s", len(rows), wide)
 	}
-	if !strings.Contains(wide, "█") {
-		t.Fatalf("wide wordmark must be character art:\n%s", wide)
+	for _, want := range []string{"| |__", "|_| |_|", "_ __"} {
+		if !strings.Contains(wide, want) {
+			t.Fatalf("wide wordmark missing %q:\n%s", want, wide)
+		}
 	}
 	if strings.Contains(wide, "\x1b[") {
 		t.Fatalf("NO_COLOR wordmark must stay ANSI-free:\n%q", wide)
@@ -93,11 +100,23 @@ func TestWordmarkWideAndNarrow(t *testing.T) {
 		}
 	}
 
-	narrow := RenderWordmark(40, true)
-	if narrow != LogoText {
-		t.Fatalf("narrow wordmark = %q, want %q", narrow, LogoText)
+	// 72 shows the banner; 71, 60 and 59 fall back to the single bold line.
+	for _, width := range []int{WordmarkWidth - 1, 60, 59} {
+		narrow := RenderWordmark(width, true)
+		if narrow != LogoText {
+			t.Fatalf("width %d wordmark = %q, want %q", width, narrow, LogoText)
+		}
+		if strings.Contains(narrow, "\n") {
+			t.Fatalf("width %d wordmark must be a single line: %q", width, narrow)
+		}
 	}
-	if strings.Contains(narrow, "\n") {
-		t.Fatalf("narrow wordmark must be a single line: %q", narrow)
+	for _, width := range []int{WordmarkWidth, 80, 120} {
+		got := RenderWordmark(width, true)
+		if !strings.Contains(got, "\n") {
+			t.Fatalf("width %d wordmark must use the banner: %q", width, got)
+		}
+	}
+	if coloured := RenderWordmark(WordmarkWidth, false); !strings.Contains(coloured, "| |__") {
+		t.Fatalf("coloured wordmark lost its glyphs:\n%q", coloured)
 	}
 }

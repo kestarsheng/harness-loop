@@ -10,7 +10,7 @@ import (
 
 // hasWordmark accepts either the single-line wordmark or the wide banner.
 func hasWordmark(view string) bool {
-	return strings.Contains(view, "harness loop") || strings.Contains(view, "█  █ ████")
+	return strings.Contains(view, "harness loop") || strings.Contains(view, "| |__")
 }
 
 func sizedSessionModel(t *testing.T, width, height int, opts Options) *Model {

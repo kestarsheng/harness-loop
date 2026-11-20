@@ -8,6 +8,12 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
+func TestSpinnerIntervalIsThirtyPercentFaster(t *testing.T) {
+	if spinnerInterval != 385*time.Millisecond {
+		t.Fatalf("spinner interval = %v, want 385ms", spinnerInterval)
+	}
+}
+
 func TestSpinnerFrames(t *testing.T) {
 	want := "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 	if spinnerFrames != want {

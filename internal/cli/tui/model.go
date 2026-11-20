@@ -20,7 +20,7 @@ import (
 const (
 	flushInterval       = 100 * time.Millisecond
 	pollInterval        = time.Second
-	spinnerInterval     = 500 * time.Millisecond
+	spinnerInterval     = 385 * time.Millisecond
 	cursorBlinkInterval = 530 * time.Millisecond
 	thinkingInterval    = time.Second
 	reconnectMin        = time.Second
