@@ -897,7 +897,7 @@ func (m *Model) applyChatChunk(chunk ChatChunk) {
 		}
 		m.chat = append(m.chat, ChatLine{
 			Role:      "tool",
-			Text:      toolCallLabel("⏺", name, chunk.ToolArgs),
+			Text:      toolCallLabel(views.ToolMarkPending, name, chunk.ToolArgs),
 			ToolName:  name,
 			ToolArgs:  chunk.ToolArgs,
 			Streaming: true,

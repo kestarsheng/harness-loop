@@ -6,6 +6,8 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"agent-platform/internal/cli/tui/views"
 )
 
 func TestSpinnerIntervalIsThirtyPercentFaster(t *testing.T) {
@@ -70,8 +72,8 @@ func TestToolLineSuccessAndFailure(t *testing.T) {
 	m, wait := submitChat(t, m, "hi")
 
 	m, wait = pushChunk(t, m, wait, ChatChunk{Type: "tool_start", ToolName: "Read", ToolArgs: "src/main.ts"})
-	if !strings.Contains(m.View(), "⏺ Read(src/main.ts)") {
-		t.Fatalf("pending tool row missing:\n%s", m.View())
+	if !strings.Contains(m.View(), views.ToolMarkPending+" Read(src/main.ts)") {
+		t.Fatalf("pending tool row missing %s:\n%s", views.ToolMarkPending, m.View())
 	}
 	m, _ = pushChunk(t, m, wait, ChatChunk{Type: "tool_result", ToolName: "Read", ToolResult: "ok"})
 	if !strings.Contains(m.View(), "✓ Read(src/main.ts)") {
