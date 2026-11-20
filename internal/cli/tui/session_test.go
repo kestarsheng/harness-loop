@@ -139,18 +139,26 @@ func TestSessionExitOnCompleteKeepsLegacyBehaviour(t *testing.T) {
 }
 
 // TestSessionComposerUsesComponentBox checks the composer frame: the focused
-// composer is open (top rule plus ╰─ cap, no bottom edge) and the input row sits
-// right under the rule, while the hint line stays above it.
+// composer keeps the ╭───╮ rule and opens the input row with ╰─, closing it on
+// the right with ─╯ on that same row (T-P2-51), while the hint line stays above
+// the rule.
 func TestSessionComposerUsesComponentBox(t *testing.T) {
 	m := sessionModel(t, SessionConfig{})
 	view := m.View()
-	for _, want := range []string{"╭", "╮", "Enter to send", promptPrefix, views.ComposerCap} {
+	for _, want := range []string{"╭", "╮", "Enter to send", promptPrefix, views.ComposerCap, views.ComposerTail} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("session screen missing %q:\n%s", want, view)
 		}
 	}
-	if strings.Contains(view, "╯") {
-		t.Fatalf("the focused composer must stay open:\n%s", view)
+	// The close lives on the input row; there is still no separate bottom
+	// border row under it.
+	lines := strings.Split(view, "\n")
+	last := lines[len(lines)-1]
+	if !strings.Contains(last, views.ComposerTail) {
+		t.Fatalf("the input row must carry the %q close: %q", views.ComposerTail, last)
+	}
+	if strings.Count(view, "╯") != 1 {
+		t.Fatalf("exactly one ╯ may appear (on the input row):\n%s", view)
 	}
 	if !hasWordmark(view) {
 		t.Fatalf("session screen missing the wordmark:\n%s", view)
