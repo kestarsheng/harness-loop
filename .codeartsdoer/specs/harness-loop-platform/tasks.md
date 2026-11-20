@@ -1545,7 +1545,20 @@
 | 验收标准 | 真实 TTY：`◇ user` 与 `◆ assistant` 缩进对齐、颜色与 logo 一致；用户背景块左右有可见间隙、不再全宽贴边；输入框有收尾感、不似截断，且中文 IME 仍落在输入行；工具行符号单宽对齐；spinner 明显更快。命令：`go test ./internal/cli/... -count=1`、`go build -p 1 ./...`、depcheck 0；`composer_test.go`/`skeleton_test.go`/`stream_test.go`/`markdown_test.go` 不回退。无 TTY 时不得宣称已目视。 |
 | 复杂度 | S~M（1 天，内部 2 个提交） |
 
-> P2 合计：实施 50 个 + 测试 5 个 = **55 个任务**。
+### T-P2-51 输入行右侧收尾与用户块紧贴（不做圆角、不加高）
+
+| 字段 | 内容 |
+|---|---|
+| 目标 | 输入框不再像被截断：聚焦时输入行显示为 `╰─ > text ─╯`（右侧 `╯` 与输入行同一行），输入行仍是 View 最后一行；用户消息块保持矩形、不加高、不做圆角；`◇ user` 与背景块不新增整行空行（终端行高不可分割，1/4 行无法精确实现，按 0 行紧贴处理）。 |
+| 关联需求 | REQ-171~175；用户 2026-11-20 拍板：输入框方案 A、不做圆角、不加高 |
+| 依赖 | T-P2-50（已合入 7941d75） |
+| 涉及文件 | [M] `internal/cli/tui/views/box.go`、[M] `internal/cli/tui/model.go`（宽度/光标映射/布局）、[M] `internal/cli/tui/prompt.go`（如需）、[M] 对应 `_test.go` |
+| 实施要点 | 1) `RenderOpenComposer` 在输入行末补 `╯`，显示 `╰─ > text ─╯`；右侧 `╯` 与输入行同一行，输入行后不得新增非空行；2) 计算 `ComposerContentWidth`/`ComposerPromptColumn`/`SetCursorByCell` 时扣除右侧 `╯` 与中间的 `─` 列，保证中文/emoji 点击落点不偏；3) 输入文本换行时，仅最后一行带 `╯`，中间行保持开口；4) 用户块保持现状：矩形背景、无圆角、无上下新增行；header 与块紧贴（`chatUserGapRows=0`，若需要常量便于后续改 1 行）；5) `NO_COLOR` 保留 `╰─`/`╯` 字形，去颜色。 |
+| 技术约束 | 1) 输入行必须是 View 最后一行（IME 硬约束）；2) 不在输入行之后新增任何非空行；3) 不新增依赖、`go.mod/go.sum` 零改动；4) 不做圆角、不加高用户块；5) 终端无法实现 1/4 行，按 0 行紧贴；6) 禁止 sed/awk/python 批量替换中文/…/—。 |
+| 验收标准 | 真实 TTY：输入框显示 `╰─ > text ─╯`，不再像缺右边/底边；中文输入候选仍贴输入行（`╯` 不挡候选）；点击输入行中/英文/emoji 落点正确；`◇ user` 与背景块紧贴、无额外空行、无圆角、块高不变。命令：`go test ./internal/cli/... -count=1`、`go build -p 1 ./...`、depcheck 0；`composer_test.go`/`skeleton_test.go`/`stream_test.go`/`markdown_test.go`/`chat_test.go` 不回退。无 TTY 时不得宣称已目视。 |
+| 复杂度 | S（0.5 天） |
+
+> P2 合计：实施 51 个 + 测试 5 个 = **56 个任务**。
 
 ---
 
@@ -1766,6 +1779,7 @@ flowchart LR
     P42 --> P48
     P48 --> P49
     P49 --> P50
+    P50 --> P51
     P45 --> P48
     P01 --> PTT3
     P09 --> PTT4
