@@ -95,6 +95,7 @@ func Run(ctx context.Context, client harnesspb.HarnessLoopServiceClient, tenant 
 		tea.WithContext(ctx),
 		tea.WithFPS(10),
 		tea.WithAltScreen(),
+		tea.WithMouseCellMotion(),
 	)
 	if _, err := program.Run(); err != nil {
 		return RunResult{}, err
@@ -124,6 +125,7 @@ func RunSession(ctx context.Context, client harnesspb.HarnessLoopServiceClient, 
 		tea.WithContext(ctx),
 		tea.WithFPS(10),
 		tea.WithAltScreen(),
+		tea.WithMouseCellMotion(),
 	)
 	if _, err := program.Run(); err != nil {
 		return SessionResult{}, err

@@ -18,15 +18,16 @@ import (
 )
 
 const (
-	flushInterval    = 100 * time.Millisecond
-	pollInterval     = time.Second
-	spinnerInterval  = 500 * time.Millisecond
-	thinkingInterval = time.Second
-	reconnectMin     = time.Second
-	reconnectMax     = 10 * time.Second
-	maxEvents        = 500
-	maxStream        = 500
-	maxEvidence      = 3
+	flushInterval       = 100 * time.Millisecond
+	pollInterval        = time.Second
+	spinnerInterval     = 500 * time.Millisecond
+	cursorBlinkInterval = 530 * time.Millisecond
+	thinkingInterval    = time.Second
+	reconnectMin        = time.Second
+	reconnectMax        = 10 * time.Second
+	maxEvents           = 500
+	maxStream           = 500
+	maxEvidence         = 3
 )
 
 type ViewMode int
@@ -244,6 +245,9 @@ type Model struct {
 	thinking        bool
 	thinkingText    string
 	thinkingStarted time.Time
+	cursorOn        bool
+	// blinkRunning guards the single caret-blink chain (see blinkTickCmd).
+	blinkRunning bool
 
 	// taskGen tags async messages so a late reply from a previous task can
 	// never be applied to the task now on screen.
@@ -335,6 +339,9 @@ type spinTickMsg struct {
 	Gen int
 }
 
+// blinkTickMsg toggles the composer caret while the session waits for input.
+type blinkTickMsg struct{}
+
 func NewModel(state TaskState, src Source, opts Options) *Model {
 	now := opts.Now
 	if now == nil {
@@ -388,6 +395,7 @@ func NewModel(state TaskState, src Source, opts Options) *Model {
 		workDir:          workDir,
 		gitBranch:        branch,
 		modelName:        modelName,
+		cursorOn:         true,
 	}
 	if m.kbTopK <= 0 {
 		m.kbTopK = 8
@@ -426,11 +434,13 @@ func (m *Model) Init() tea.Cmd {
 			// always creates a task, even without a /task prefix. Only exit
 			// words still short-circuit.
 			if DispatchSessionLine(goal).Action != SessionSubmit {
-				return nil
+				return m.blinkTickCmd()
 			}
+			// The seeded task hides the input, so the blink chain starts when
+			// the task finishes (terminalCmd) instead of now.
 			return m.startTaskSubmit(goal)
 		}
-		return nil
+		return m.blinkTickCmd()
 	}
 	cmds := []tea.Cmd{
 		tea.Tick(flushInterval, func(time.Time) tea.Msg { return flushMsg{} }),
@@ -461,6 +471,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
+		m.setCursorVisible(true)
 		if m.chatStreaming && msg.Type == tea.KeyEsc {
 			m.interruptChat()
 			return m, nil
@@ -478,6 +489,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.input.HandleKey(msg)
 		}
 		return m.handleKey(msg)
+
+	case tea.MouseMsg:
+		m.handleMouse(msg)
+		return m, nil
 
 	case promptSubmitMsg:
 		return m.handleSessionSubmit(msg.Value)
@@ -516,10 +531,22 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.spinnerFrame++
 		return m, m.spinTickCmd()
 
+	case blinkTickMsg:
+		m.blinkRunning = false
+		if m.session == nil || m.exitRequested {
+			return m, nil
+		}
+		m.cursorOn = !m.cursorOn
+		if m.awaitingInput && !m.chatStreaming {
+			m.setInputCursorVisible(m.cursorOn)
+		}
+		return m, m.blinkTickCmd()
+
 	case taskCreatedMsg:
 		if msg.Err != nil {
 			m.submitting = false
 			m.awaitingInput = true
+			m.setCursorVisible(true)
 			m.errText = "create task failed: " + msg.Err.Error()
 			return m, nil
 		}
@@ -754,10 +781,91 @@ func (m *Model) chatCmd(gen int, message string) tea.Cmd {
 	}
 }
 
-// spinTickCmd drives the 500ms spinner while a reply streams.
+// spinTickCmd drives the spinner while a reply streams.
 func (m *Model) spinTickCmd() tea.Cmd {
 	gen := m.chatGen
 	return tea.Tick(spinnerInterval, func(time.Time) tea.Msg { return spinTickMsg{Gen: gen} })
+}
+
+// blinkTickCmd keeps exactly one caret-blink tick in flight. The flag makes
+// the chain idempotent, so a path that hands the input back (terminalCmd) can
+// ask for it without starting a second chain that would halve the interval.
+func (m *Model) blinkTickCmd() tea.Cmd {
+	if m.blinkRunning {
+		return nil
+	}
+	m.blinkRunning = true
+	return tea.Tick(cursorBlinkInterval, func(time.Time) tea.Msg { return blinkTickMsg{} })
+}
+
+func (m *Model) setCursorVisible(visible bool) {
+	m.cursorOn = visible
+	m.setInputCursorVisible(visible)
+}
+
+func (m *Model) setInputCursorVisible(visible bool) {
+	if m.input != nil {
+		m.input.SetCursorVisible(visible)
+	}
+}
+
+// composerRegion returns the first row, the height and the row of the input's
+// first display line inside the fixed composer block. inputRow is -1 when the
+// block holds no input, so a mouse press can tell "focus the composer" from
+// "move the caret there".
+func (m *Model) composerRegion() (top, height, inputRow int) {
+	width := m.viewWidth()
+	height = m.viewHeight()
+	lines, row := m.composerLines(width)
+	if len(lines) == 0 {
+		return 0, 0, -1
+	}
+	top = height - len(lines) - 1
+	if top < 0 {
+		top = 0
+	}
+	if row >= len(lines) {
+		row = -1
+	}
+	return top, len(lines), row
+}
+
+func (m *Model) viewWidth() int {
+	if m.width > 0 {
+		return m.width
+	}
+	return 100
+}
+
+func (m *Model) viewHeight() int {
+	if m.height > 0 {
+		return m.height
+	}
+	return 30
+}
+
+// handleMouse focuses the composer on a left click and, when the click lands on
+// the input rows, moves the caret to the clicked display column. Wide runes
+// (CJK, emoji) are measured in cells, never in runes.
+func (m *Model) handleMouse(msg tea.MouseMsg) {
+	if msg.Button != tea.MouseButtonLeft || msg.Action != tea.MouseActionPress {
+		return
+	}
+	if m.session == nil || !m.awaitingInput {
+		return
+	}
+	width := m.viewWidth()
+	top, height, inputRow := m.composerRegion()
+	if height == 0 || msg.Y < top || msg.Y >= top+height {
+		return // click outside the composer is ignored
+	}
+	m.setCursorVisible(true)
+	if inputRow < 0 || msg.Y < top+inputRow {
+		return // hint / top rule: focus only
+	}
+	row := msg.Y - (top + inputRow)
+	col := msg.X - views.ComposerIndent
+	m.input.SetCursorByCell(row, col, views.ComposerContentWidth(width))
 }
 
 func (m *Model) waitChatCmd(gen int, ch <-chan ChatChunk) tea.Cmd {
@@ -938,6 +1046,7 @@ func (m *Model) finishChat() {
 		if m.input != nil {
 			m.input.Reset()
 		}
+		m.setCursorVisible(true)
 	}
 }
 
@@ -977,6 +1086,7 @@ func (m *Model) interruptChat() {
 		if m.input != nil {
 			m.input.Reset()
 		}
+		m.setCursorVisible(true)
 	}
 }
 
@@ -1003,7 +1113,11 @@ func (m *Model) terminalCmd() tea.Cmd {
 		m.submitting = false
 		m.mode = ViewMain
 		m.input.Reset()
+		m.setCursorVisible(true)
 		m.cancelTaskContext()
+		// Idempotent: for a plain session the chain is already alive, for a
+		// --goal session it starts now that the input is back.
+		return m.blinkTickCmd()
 	}
 	return nil
 }
@@ -1182,8 +1296,10 @@ func (m *Model) toggleView(target ViewMode, load tea.Cmd) (tea.Model, tea.Cmd) {
 }
 
 // View renders the fixed Claude-style skeleton: wordmark, the scrollable body,
-// the fixed composer and the status bar. The body height is whatever is left
-// after the fixed rows, so the composer and status bar always hug the bottom.
+// the status bar, the hint line and finally the composer. The input line is
+// the last row of the whole view, so the terminal caret and the IME candidate
+// window sit at the bottom edge. The body height is whatever is left after the
+// fixed rows.
 func (m *Model) View() string {
 	width := m.width
 	if width <= 0 {
@@ -1206,8 +1322,8 @@ func (m *Model) View() string {
 
 	out := splitLines(logo)
 	out = append(out, body...)
-	out = append(out, composer...)
 	out = append(out, status)
+	out = append(out, composer...)
 	return strings.Join(out, "\n")
 }
 
@@ -1263,27 +1379,45 @@ func (m *Model) renderBody(width, height int) string {
 	}, "\n")
 }
 
-// composerBlock is the fixed input area above the status bar. It is empty while
-// a reply streams or a task runs, so the body can use the whole middle.
+// composerBlock is the fixed bottom stack. Its last row is always the input
+// line (or the streaming notice), so the terminal caret and the IME candidate
+// window attach to the bottom of the screen instead of floating under it.
 func (m *Model) composerBlock(width int) []string {
-	if m.session == nil || !m.awaitingInput {
-		if m.session != nil && m.chatStreaming {
-			return []string{"", "  " + m.streamingStatusLine(width)}
-		}
-		if m.session != nil && m.submitting && m.state.TaskID == "" {
-			return []string{"", "  creating task…"}
-		}
-		return nil
-	}
-	lines := []string{""}
-	lines = append(lines, splitLines(views.RenderBoxWithTheme(m.theme, "", m.input.InputLine(), width))...)
-	if errText := m.input.ErrorText(); errText != "" {
-		lines = append(lines, "  "+errText)
-	}
-	if m.errText != "" {
-		lines = append(lines, "  "+m.errText)
-	}
+	lines, _ := m.composerLines(width)
 	return lines
+}
+
+// composerLines renders the composer and reports which row of the returned
+// slice holds the first display row of the input (-1 when there is none).
+func (m *Model) composerLines(width int) ([]string, int) {
+	if m.session == nil {
+		return nil, -1
+	}
+	switch {
+	case m.awaitingInput:
+		// Hint and validation errors stay above the frame: nothing may follow
+		// the input line.
+		lines := []string{"", clipRunes("  "+PromptHint, width)}
+		if errText := m.input.ErrorText(); errText != "" {
+			lines = append(lines, clipRunes("  "+errText, width))
+		}
+		if m.errText != "" {
+			lines = append(lines, clipRunes("  "+m.errText, width))
+		}
+		// Reserved row: the complete box drawn after a submit is one row
+		// taller, so this blank keeps the layout from jumping on focus change.
+		lines = append(lines, "")
+		block := splitLines(views.RenderOpenComposer(m.theme, m.input.InputLine(), width))
+		inputRow := len(lines) + 1 // block[0] is the top rule
+		return append(lines, block...), inputRow
+	case m.submitting && m.state.TaskID == "":
+		// Blurred: the complete frame returns while the task is created.
+		lines := []string{"", ""}
+		return append(lines, splitLines(views.RenderBoxWithTheme(m.theme, "", "creating task…", width))...), -1
+	case m.chatStreaming:
+		return []string{"", "  " + m.streamingStatusLine(width)}, -1
+	}
+	return nil, -1
 }
 
 // statusBar is the single-line footer: model · cwd · branch · tokens · ? help.
@@ -1367,6 +1501,20 @@ func formatStatusTokens(n int64) string {
 	default:
 		return fmt.Sprintf("%d tokens", n)
 	}
+}
+
+func clipRunes(s string, width int) string {
+	if width <= 0 {
+		return s
+	}
+	runes := []rune(s)
+	if len(runes) <= width {
+		return s
+	}
+	if width == 1 {
+		return string(runes[:1])
+	}
+	return string(runes[:width-1]) + "…"
 }
 
 func splitLines(s string) []string { return strings.Split(s, "\n") }

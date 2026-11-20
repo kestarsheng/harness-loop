@@ -35,6 +35,20 @@ func TestPromptViewShowsLogoAndComponentBox(t *testing.T) {
 	}
 }
 
+func TestPromptEmptyInputShowsCaretNotPlaceholder(t *testing.T) {
+	m := newPrompt()
+	if got := m.InputLine(); got != "> "+promptCursorMark {
+		t.Fatalf("empty input = %q, want caret", got)
+	}
+	if strings.Contains(m.InputLine(), "Send a message") {
+		t.Fatalf("placeholder must stay out of the input line: %q", m.InputLine())
+	}
+	m.SetCursorVisible(false)
+	if got := m.InputLine(); got != "> " {
+		t.Fatalf("hidden caret input = %q", got)
+	}
+}
+
 func TestPromptInputLivesInTheBox(t *testing.T) {
 	m := newPrompt()
 	m = typeRunes(t, m, "修复 bug")

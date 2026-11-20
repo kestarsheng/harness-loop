@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/glamour"
+	"github.com/charmbracelet/lipgloss"
 )
 
 // ansiEscape matches the colour/cursor sequences glamour's dark style emits so
@@ -25,10 +26,12 @@ type ChatMessage struct {
 }
 
 const (
-	chatIndent   = "  "
-	chatBodyPad  = "  "
-	chatCursor   = "▍"
-	chatMinWidth = 20
+	chatIndent     = "  "
+	chatBodyPad    = "  "
+	chatCursor     = "▍"
+	chatMinWidth   = 20
+	chatUserMarker = "▌"
+	chatUserBg     = "236"
 )
 
 // RenderChat draws the conversation transcript with the newest turns kept when
@@ -47,9 +50,9 @@ func RenderChatWithCursor(messages []ChatMessage, width, maxLines int, theme The
 	if width < chatMinWidth {
 		width = chatMinWidth
 	}
-	lines := []string{fit(theme.paint("Conversation", theme.Primary), width)}
+	lines := []string{}
 	if len(messages) == 0 {
-		hint := chatIndent + "send a message, or /task <goal> to run the a~e loop"
+		hint := chatIndent + "⏺ send a message, or /task <goal> to run the a~e loop"
 		for _, row := range wrapWidth(hint, width) {
 			lines = append(lines, theme.paint(row, theme.Secondary))
 		}
@@ -66,24 +69,31 @@ func RenderChatWithCursor(messages []ChatMessage, width, maxLines int, theme The
 			if msg.Err {
 				style = theme.Err
 			}
-			lines = append(lines, fit(theme.paint(chatIndent+strings.TrimRight(msg.Text, "\n"), style), width))
+			text := strings.TrimRight(msg.Text, "\n")
+			if text == "" {
+				continue
+			}
+			if !hasToolMark(text) {
+				text = toolMark(msg) + " " + text
+			}
+			lines = append(lines, fit(theme.paint(chatIndent+text, style), width))
 			continue
 		}
-		label := "you"
+		if msg.Role == "user" {
+			lines = append(lines, chatHeader(theme, "❯ you", msg.Time, theme.Primary, width))
+			for _, row := range wrapWidth(strings.TrimRight(msg.Text, "\n"), bodyWidth) {
+				lines = append(lines, userRow(theme, row, width))
+			}
+			lines = append(lines, "")
+			continue
+		}
+		label := "assistant"
 		style := theme.Primary
-		switch {
-		case msg.Err:
+		if msg.Err {
 			label = "error"
 			style = theme.Err
-		case msg.Role == "assistant":
-			label = "assistant"
-			style = theme.Primary
 		}
-		header := chatIndent + label
-		if !msg.Time.IsZero() {
-			header += " " + msg.Time.Format("15:04:05")
-		}
-		lines = append(lines, fit(theme.paint(header, style), width))
+		lines = append(lines, chatHeader(theme, "⏺ "+label, msg.Time, style, width))
 
 		body := strings.TrimRight(msg.Text, "\n")
 		if body == "" {
@@ -115,6 +125,11 @@ func RenderChatWithCursor(messages []ChatMessage, width, maxLines int, theme The
 			}
 			lines = append(lines, fit(text, width))
 		}
+		lines = append(lines, "")
+	}
+
+	for len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
 	}
 
 	if maxLines > 0 && len(lines) > maxLines {
@@ -122,6 +137,69 @@ func RenderChatWithCursor(messages []ChatMessage, width, maxLines int, theme The
 		lines = lines[len(lines)-maxLines:]
 	}
 	return strings.TrimRight(strings.Join(lines, "\n"), "\n")
+}
+
+// chatHeader paints "<label>" in style and the timestamp as dim small text. The
+// stamp is dropped, not truncated, when the terminal is too narrow.
+func chatHeader(theme Theme, label string, at time.Time, style lipgloss.Style, width int) string {
+	head := chatIndent + label
+	if at.IsZero() {
+		return theme.paint(head, style)
+	}
+	stamp := at.Format("15:04")
+	if lipgloss.Width(head)+1+lipgloss.Width(stamp) > width {
+		return theme.paint(head, style)
+	}
+	return theme.paint(head, style) + " " + theme.paint(stamp, theme.Secondary)
+}
+
+// hasToolMark reports whether a tool row already carries its ⏺/✓/✗ status.
+func hasToolMark(text string) bool {
+	for _, mark := range []string{"⏺", "✓", "✗"} {
+		if strings.HasPrefix(text, mark) {
+			return true
+		}
+	}
+	return false
+}
+
+// toolMark is the symbol a tool row gets when the stream did not supply one:
+// pending while running, ✗ on failure, ✓ once finished.
+func toolMark(msg ChatMessage) string {
+	switch {
+	case msg.Err:
+		return "✗"
+	case msg.Streaming:
+		return "⏺"
+	default:
+		return "✓"
+	}
+}
+
+// chatUserStyle is the dark block behind the user's own message. It is a chat
+// constant on purpose: Theme keeps only Primary/Secondary/Border/Err.
+func chatUserStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Background(lipgloss.Color(chatUserBg))
+}
+
+// userRow renders one line of user input as a left-accented block. The
+// background is dropped under NO_COLOR, leaving the ▌ marker as the signal.
+func userRow(theme Theme, row string, width int) string {
+	if width < 3 {
+		return fit(row, width)
+	}
+	marker := theme.paint(chatUserMarker, theme.Primary)
+	if theme.NoColor {
+		return fit(marker+" "+row, width)
+	}
+	contentWidth := width - 2
+	content := fit(row, contentWidth)
+	padding := contentWidth - lipgloss.Width(content)
+	if padding < 0 {
+		padding = 0
+	}
+	block := chatUserStyle().Render(content + strings.Repeat(" ", padding))
+	return marker + " " + block
 }
 
 // markdownRows renders a finished assistant reply with glamour. NO_COLOR uses
