@@ -1532,7 +1532,20 @@
 | 验收标准 | 真实 TTY：中文拼音/候选落在输入行附近、placeholder 不再残留；空输入时 `> ▍` 常闪；点击输入框能定位并闪烁；`❯`/`⏺`/`✓/✗` 区分清楚、turn 间有空行；宽 ≥72 的 wordmark 字形可读不粘连、窄终端降级；spinner 明显更快。命令：`go test ./internal/cli/... -count=1`、`go build -p 1 ./...`、depcheck 0；`skeleton_test.go`/`stream_test.go`/`markdown_test.go` 不回退。无 TTY 时不得宣称已目视。 |
 | 复杂度 | M（1~2 天，内部 2 个提交） |
 
-> P2 合计：实施 49 个 + 测试 5 个 = **54 个任务**。
+### T-P2-50 TUI 视觉收口（◆/◇ 角色、品牌色、背景间隙、输入框收尾、spinner 275ms）
+
+| 字段 | 内容 |
+|---|---|
+| 目标 | 修复 T-P2-49 真实观感暴露的收口问题：角色标记不用 emoji，改为 `◆ assistant` / `◇ user` 并对齐；角色词颜色与 `harness loop` logo 一致（#8FD3FF）；用户消息背景块不再全宽+零 padding，留出左右间隙；底部输入框不再像被截断；spinner 再加快约 40%。 |
+| 关联需求 | REQ-171~175；用户 2026-11-20 观感反馈；T-P2-49 |
+| 依赖 | T-P2-49（已合入 7c46d78） |
+| 涉及文件 | [M] `internal/cli/tui/views/chat.go`、[M] `internal/cli/tui/views/theme.go`、[M] `internal/cli/tui/views/box.go`、[M] `internal/cli/tui/model.go`（spinner 常量/布局收尾）、[M] 对应 `_test.go` |
+| 实施要点 | **提交 1（对话视觉）**：1) user/assistant 角色标记固定为 `◇ user` / `◆ assistant`，两者文字起点对齐（`◆`/`◇` 同宽，标签后时间 dim）；2) 角色词颜色统一为 logo 浅蓝 `#8FD3FF`：优先把 `Theme.Primary` 改为 `LogoColor`（Logo 与角色同源），不得新增第五语义字段；3) 用户背景块留间隙：左右各至少 1 格外边距、块内左右各 1 格 padding，背景块不得铺满整行、不得零 padding；`NO_COLOR` 去背景但保留 `◇/◆`；4) 工具行不使用 emoji，符号必须单宽（如 `▸/✓/✗`，或保留 `⏺` 但必须验证 `lipgloss.Width==1`；若宽度不稳则改单宽符号），并同步 `hasToolMark`。**提交 2（输入框收尾 + spinner）**：5) 在**不破坏**「输入行是 View 最后一行」的前提下，让输入框不再像被截断：允许用输入行内左侧收尾符（如 `╰─ > text`）、同色下划线或上边框加粗等方案，但**禁止在输入行之后新增非空行**（否则 IME 光标会离开输入行）；聚焦/失焦切换不得跳动；6) `spinnerInterval` 385ms → 约 275ms（385/1.4），帧序列与 `esc interrupt` 语义不变，同步单测。 |
+| 技术约束 | 1) 不升级 bubbletea v2、不新增依赖、`go.mod/go.sum` 零改动；2) 不改 `loop start/stop`、`/task` 语义；3) Theme 保持四色，角色色复用 Primary/LogoColor；4) 输入行必须是 View 最后一行（硬约束，IME 依赖）；5) 背景/角色/工具符号在 `NO_COLOR` 下仍可区分，不依赖颜色；6) 窄终端 <60 列不溢出；7) 禁止 sed/awk/python 批量替换含中文/…/— 的字符串，保持 UTF-8。 |
+| 验收标准 | 真实 TTY：`◇ user` 与 `◆ assistant` 缩进对齐、颜色与 logo 一致；用户背景块左右有可见间隙、不再全宽贴边；输入框有收尾感、不似截断，且中文 IME 仍落在输入行；工具行符号单宽对齐；spinner 明显更快。命令：`go test ./internal/cli/... -count=1`、`go build -p 1 ./...`、depcheck 0；`composer_test.go`/`skeleton_test.go`/`stream_test.go`/`markdown_test.go` 不回退。无 TTY 时不得宣称已目视。 |
+| 复杂度 | S~M（1 天，内部 2 个提交） |
+
+> P2 合计：实施 50 个 + 测试 5 个 = **55 个任务**。
 
 ---
 
@@ -1752,6 +1765,7 @@ flowchart LR
     P45 --> P47
     P42 --> P48
     P48 --> P49
+    P49 --> P50
     P45 --> P48
     P01 --> PTT3
     P09 --> PTT4
