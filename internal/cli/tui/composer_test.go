@@ -59,9 +59,9 @@ func TestStatusBarSitsAboveHintAndInput(t *testing.T) {
 	}
 }
 
-// TestComposerOpensWhileFocusedAndClosesOnSubmit covers the open composer: only
-// the top rule while the user types, the complete frame once the input is
-// submitted and the composer is blurred.
+// TestComposerOpensWhileFocusedAndClosesOnSubmit covers the open composer: the
+// ╭───╮ rule plus the ╰─ … ─╯ input row while the user types, the complete frame
+// once the input is submitted and the composer is blurred.
 func TestComposerOpensWhileFocusedAndClosesOnSubmit(t *testing.T) {
 	factory := func(ctx context.Context, goal string) (*harnesspb.TaskView, error) {
 		return &harnesspb.TaskView{TaskId: "task-1", Status: "running", CurrentStage: "a"}, nil
@@ -74,8 +74,15 @@ func TestComposerOpensWhileFocusedAndClosesOnSubmit(t *testing.T) {
 	if !strings.Contains(focused, views.ComposerCap) {
 		t.Fatalf("focused composer must carry the %q cap:\n%q", views.ComposerCap, focused)
 	}
-	if strings.Contains(focused, "╯") {
-		t.Fatalf("focused composer must stay open (no bottom frame):\n%s", focused)
+	// The close is on the input row itself; no second border row may follow it.
+	lines := strings.Split(focused, "\n")
+	if !strings.Contains(lines[len(lines)-1], views.ComposerTail) {
+		t.Fatalf("focused composer must close on the input row:\n%s", focused)
+	}
+	for _, row := range lines[:len(lines)-1] {
+		if strings.Contains(row, "╯") {
+			t.Fatalf("the close must only appear on the last row: %q", row)
+		}
 	}
 
 	m = typeLine(t, m, "/task ship it")
@@ -292,8 +299,8 @@ func TestSeededGoalSessionStillBlinksCaret(t *testing.T) {
 }
 
 // TestComposerInputLineCarriesTheCap checks the visual close of the open
-// composer: the last row is the input line itself and it starts with the ╰─ cap,
-// so the field reads as finished without any row below it.
+// composer: the last row is the input line itself, it starts with the ╰─ cap and
+// ends with ─╯, so the field reads as finished without any row below it.
 func TestComposerInputLineCarriesTheCap(t *testing.T) {
 	m := sessionModel(t, SessionConfig{})
 	m = typeLine(t, m, "你好")
@@ -309,8 +316,11 @@ func TestComposerInputLineCarriesTheCap(t *testing.T) {
 	if idx := strings.Index(last, views.ComposerCap); idx != views.ComposerIndent {
 		t.Fatalf("cap must sit at column %d: %q", views.ComposerIndent, last)
 	}
-	if strings.Contains(last, "╯") {
-		t.Fatalf("input row must not carry a bottom-right corner: %q", last)
+	if !strings.Contains(last, views.ComposerTail) {
+		t.Fatalf("input row must end with the %q close: %q", views.ComposerTail, last)
+	}
+	if !strings.HasSuffix(last, "╯") {
+		t.Fatalf("╯ must be the very last glyph of the input row: %q", last)
 	}
 	if lines[len(lines)-1] == "" || strings.TrimSpace(last) == "" {
 		t.Fatal("the last row must hold the input, not padding")
@@ -370,5 +380,134 @@ func TestComposerFitsNarrowTerminals(t *testing.T) {
 				t.Fatalf("width %d: status bar below the input:\n%s", width, m.View())
 			}
 		}
+	}
+}
+
+// TestComposerClosesOnlyTheLastInputRow pins the T-P2-51 shape: the ╭───╮ rule,
+// then rows opened by ╰─, and exactly one ╯ on the final row. Wrapped
+// continuation rows stay open like a field still being typed into, and no row
+// may follow the input.
+func TestComposerClosesOnlyTheLastInputRow(t *testing.T) {
+	for _, tc := range []struct {
+		width int
+		text  string
+	}{
+		{76, "你好"},
+		{60, "这是一段很长很长的中文输入，用来确认窄终端换行时只有最后一行带右收尾"},
+		{40, "emoji 🙂 也要能换行"},
+	} {
+		m := sizedSessionModel(t, tc.width, 20, Options{NoColor: true, WorkDir: "/w", GitBranch: "b", ModelName: "m"})
+		m = typeLine(t, m, tc.text)
+		lines := strings.Split(m.View(), "\n")
+
+		ruleAt := -1
+		for i, line := range lines {
+			if strings.Contains(line, "╭") {
+				ruleAt = i
+			}
+		}
+		if ruleAt < 0 {
+			t.Fatalf("width %d: no top rule:/n%s", tc.width, m.View())
+		}
+		if ruleAt+1 >= len(lines) {
+			t.Fatalf("width %d: rule is the last row:/n%s", tc.width, m.View())
+		}
+		if !strings.Contains(lines[ruleAt], "╮") {
+			t.Fatalf("width %d: rule not closed on the right: %q", tc.width, lines[ruleAt])
+		}
+
+		// The block runs to the end of the view: nothing may follow the input.
+		block := lines[ruleAt:]
+		lastRow := block[len(block)-1]
+		if !strings.Contains(lastRow, views.ComposerTail) {
+			t.Fatalf("width %d: last input row must carry %q: %q", tc.width, views.ComposerTail, lastRow)
+		}
+		if !strings.HasSuffix(lastRow, "╯") {
+			t.Fatalf("width %d: ╯ must be the final glyph: %q", tc.width, lastRow)
+		}
+		for _, row := range block[:len(block)-1] {
+			if strings.Contains(row, "╯") {
+				t.Fatalf("width %d: only the last input row may close: %q", tc.width, row)
+			}
+		}
+		for _, row := range lines {
+			if lipgloss.Width(row) > tc.width {
+				t.Fatalf("width %d: row overflows (%d cells): %q", tc.width, lipgloss.Width(row), row)
+			}
+		}
+	}
+}
+
+// TestComposerCloseAlignsWithTheTopRule keeps the frame square: the ─╯ row and
+// the ╭───╮ row must end in the same column.
+func TestComposerCloseAlignsWithTheTopRule(t *testing.T) {
+	m := sessionModel(t, SessionConfig{})
+	m = typeLine(t, m, "hi")
+	lines := strings.Split(m.View(), "\n")
+	last := lines[len(lines)-1]
+	rule := lines[len(lines)-2]
+	if lipgloss.Width(last) != lipgloss.Width(rule) {
+		t.Fatalf("frame is ragged: rule=%d close=%d\n%q\n%q",
+			lipgloss.Width(rule), lipgloss.Width(last), rule, last)
+	}
+}
+
+// TestComposerClickOnCloseClampsToTextEnd keeps a click over the ─╯ right edge
+// from pushing the caret past the last rune.
+func TestComposerClickOnCloseClampsToTextEnd(t *testing.T) {
+	const typed = "你好ab"
+	m := sessionModel(t, SessionConfig{})
+	m = typeLine(t, m, typed)
+	top, _, inputRow := m.composerRegion()
+	width := m.viewWidth()
+
+	for _, x := range []int{
+		views.ComposerIndent + views.ComposerInnerWidth(width) - 1, // inside ─╯
+		width + 8, // past the frame entirely
+	} {
+		next, _ := m.Update(tea.MouseMsg{
+			X:      x,
+			Y:      top + inputRow,
+			Button: tea.MouseButtonLeft,
+			Action: tea.MouseActionPress,
+		})
+		m = next.(*Model)
+		if want := len([]rune(typed)); m.input.cursor != want {
+			t.Fatalf("x=%d: caret = %d, want %d (end of text)", x, m.input.cursor, want)
+		}
+	}
+}
+
+// TestComposerClickOnWrappedRowMapsRunes covers a click on a continuation row:
+// the column is measured from the row's own indent, so the caret still lands on
+// the rune under the pointer.
+func TestComposerClickOnWrappedRowMapsRunes(t *testing.T) {
+	const typed = "这是一段很长很长的中文输入，用来确认窄终端换行时落点仍然正确"
+	m := sizedSessionModel(t, 40, 20, Options{NoColor: true, WorkDir: "/w", GitBranch: "b", ModelName: "m"})
+	m = typeLine(t, m, typed)
+	top, _, inputRow := m.composerRegion()
+
+	textWidth := views.ComposerContentWidth(m.viewWidth())
+	runes := []rune(typed)
+
+	// Click the second display row, one cell in: that is the rune right after
+	// the first row's worth of text.
+	x := views.ComposerPromptColumn(1) + 1
+	next, _ := m.Update(tea.MouseMsg{
+		X:      x,
+		Y:      top + inputRow + 1,
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+	})
+	m = next.(*Model)
+
+	cells := 0
+	want := 0
+	for want < len(runes) && cells+lipgloss.Width(string(runes[want])) <= textWidth {
+		cells += lipgloss.Width(string(runes[want]))
+		want++
+	}
+	if m.input.cursor != want {
+		t.Fatalf("caret = %d, want %d (first rune of the second row)", m.input.cursor, want)
 	}
 }

@@ -234,3 +234,51 @@ func TestUserBlockLeavesGapsAndPadding(t *testing.T) {
 		t.Fatalf("text is flush against the block edge: %q", body)
 	}
 }
+
+// TestUserBlockHugsTheHeader pins the T-P2-51 decision: the "◇ user" label and
+// its background block are adjacent, with no blank row in between (a terminal
+// row cannot be split, so the half-row gap is not representable).
+func TestUserBlockHugsTheHeader(t *testing.T) {
+	if chatUserGapRows != 0 {
+		t.Fatalf("chatUserGapRows = %d, want 0 (block hugs the header)", chatUserGapRows)
+	}
+	out := RenderChat([]ChatMessage{{Role: "user", Text: "hi"}}, 80, 20, NewTheme(true))
+	lines := strings.Split(out, "\n")
+	if len(lines) != 2 {
+		t.Fatalf("one turn must be header + one block row, got %d rows:/n%s", len(lines), out)
+	}
+	if !strings.Contains(lines[0], chatUserRole) {
+		t.Fatalf("first row is not the header: %q", lines[0])
+	}
+	if strings.TrimSpace(lines[1]) == "" {
+		t.Fatalf("blank row between header and block:/n%s", out)
+	}
+	if !strings.Contains(lines[1], "hi") {
+		t.Fatalf("second row is not the block: %q", lines[1])
+	}
+}
+
+// TestUserBlockIsRectangularWithNoRoundedCorners keeps the block square: one
+// row per wrapped line, no border glyphs, and exactly one blank row between
+// turns (unchanged by the gap decision).
+func TestUserBlockIsRectangularWithNoRoundedCorners(t *testing.T) {
+	out := RenderChat([]ChatMessage{
+		{Role: "user", Text: "one"},
+		{Role: "user", Text: "two"},
+	}, 80, 20, NewTheme(false))
+	lines := strings.Split(out, "\n")
+	if len(lines) != 5 {
+		t.Fatalf("two turns must be 2*(header+block)+1 separator = 5 rows, got %d:/n%s", len(lines), out)
+	}
+	for _, row := range lines {
+		if strings.ContainsAny(row, "╭╮╰╯│─") {
+			t.Fatalf("user block must stay rectangular, found a border glyph: %q", row)
+		}
+	}
+	if strings.TrimSpace(lines[2]) != "" {
+		t.Fatalf("turns must still be separated by exactly one blank row: %q", lines[2])
+	}
+	if !strings.Contains(lines[3], chatUserRole) {
+		t.Fatalf("third row should start the second turn: %q", lines[3])
+	}
+}

@@ -52,6 +52,13 @@ const (
 	// never runs into the edge of the message area.
 	chatUserPadX = 1
 	chatUserGapX = 1
+
+	// chatUserGapRows is how many blank rows sit between the "◇ user" header
+	// and its background block. A terminal row cannot be split, so the
+	// quarter-row gap would need a half-height cell the cell grid does not
+	// have; the block hugs the header instead. Keeping it a constant makes the
+	// zero explicit and testable rather than an accident.
+	chatUserGapRows = 0
 )
 
 // RenderChat draws the conversation transcript with the newest turns kept when
@@ -102,6 +109,9 @@ func RenderChatWithCursor(messages []ChatMessage, width, maxLines int, theme The
 		}
 		if msg.Role == "user" {
 			lines = append(lines, chatHeader(theme, chatUserRole, msg.Time, theme.Primary, width))
+			for i := 0; i < chatUserGapRows; i++ {
+				lines = append(lines, "")
+			}
 			for _, row := range wrapWidth(strings.TrimRight(msg.Text, "\n"), userContentWidth(width)) {
 				lines = append(lines, userRow(theme, row, width))
 			}

@@ -866,7 +866,16 @@ func (m *Model) handleMouse(msg tea.MouseMsg) {
 	row := msg.Y - (top + inputRow)
 	// The first input row carries the ╰─ cap, later rows only the indent.
 	col := msg.X - views.ComposerPromptColumn(row)
-	m.input.SetCursorByCell(row, col, views.ComposerContentWidth(width))
+	textWidth := views.ComposerContentWidth(width)
+	// A click over the ─╯ close (or past the frame) must land at the end of the
+	// text, never beyond it.
+	if col > textWidth {
+		col = textWidth
+	}
+	if col < 0 {
+		col = 0
+	}
+	m.input.SetCursorByCell(row, col, textWidth)
 }
 
 func (m *Model) waitChatCmd(gen int, ch <-chan ChatChunk) tea.Cmd {
