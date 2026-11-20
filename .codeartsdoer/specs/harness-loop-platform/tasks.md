@@ -1558,7 +1558,20 @@
 | 验收标准 | 真实 TTY：输入框显示 `╰─ > text ─╯`，不再像缺右边/底边；中文输入候选仍贴输入行（`╯` 不挡候选）；点击输入行中/英文/emoji 落点正确；`◇ user` 与背景块紧贴、无额外空行、无圆角、块高不变。命令：`go test ./internal/cli/... -count=1`、`go build -p 1 ./...`、depcheck 0；`composer_test.go`/`skeleton_test.go`/`stream_test.go`/`markdown_test.go`/`chat_test.go` 不回退。无 TTY 时不得宣称已目视。 |
 | 复杂度 | S（0.5 天） |
 
-> P2 合计：实施 51 个 + 测试 5 个 = **56 个任务**。
+### T-P2-52 消息区滚动与滚动条（滚轮/键盘/自动跟随）
+
+| 字段 | 内容 |
+|---|---|
+| 目标 | 当对话内容超过消息区高度时，右侧显示滚动条，鼠标滚轮与键盘都能回看历史，不再只显示最后一屏；流式/新消息默认自动跟随底部，用户上滚后暂停跟随并提示有新内容。 |
+| 关联需求 | REQ-171~175；用户 2026-11-21 反馈；T-P2-51 |
+| 依赖 | T-P2-51（已合入 c45a67f） |
+| 涉及文件 | [M] `internal/cli/tui/model.go`、[M] `internal/cli/tui/views/chat.go`、[M] 对应 `_test.go` |
+| 实施要点 | 1) Model 增加滚动状态：`chatScroll`（距底行数，0=底部）与总行数；`renderBody` 把 offset/visible 传给新的 viewport 渲染；2) `RenderChatViewport(messages,width,visible,offset,theme,cursor)`：计算全部行，取 `[total-visible-offset, total-offset)`；消息区宽度减 1 列画滚动条；3) 滚动条：按 `visible/total` 计算滑块高度，最右一列用 `█`（滑块）/`░`（轨道）或 `│`；`NO_COLOR` 保留字符；不覆盖文本、不占输入行；4) 鼠标：处理 `tea.MouseMsg` 的 `WheelUp/WheelDown`（每次 3 行），点击 composer 逻辑保持不变；5) 键盘：`PgUp/PgDn`（visible-2 行）、`End` 回底、`Home` 到顶（可选）；不得抢占输入历史/光标键；6) 自动跟随：`chatScroll==0` 时流式/新消息跟随底部；上滚后保持偏移，流式结束时在消息区底部/状态栏显示「↓ new」提示；回底清除；7) 输入行仍是 View 最后一行，滚动条只在消息区。 |
+| 技术约束 | 1) 输入行最后一行（IME 硬约束）不变；2) 不新增依赖、`go.mod/go.sum` 零改动；3) 滚动条宽度/滑块比例在 40/80/120 列下不溢出；4) 鼠标滚轮不可用时键盘必须可用；5) 禁止 sed/awk/python 批量替换中文/…/—。 |
+| 验收标准 | 真实 TTY：长对话右侧出现滚动条；滚轮上下可回看；PgUp/PgDn/End 有效；流式时默认贴底，上滚后不被强制拉回并出现新内容提示，按 End 回底恢复跟随；`NO_COLOR` 仍有滚动条字符；窄终端不溢出。命令：`go test ./internal/cli/... -count=1`、`go build -p 1 ./...`、depcheck 0；composer/chat/skeleton/stream/markdown 测试不回退。无 TTY 时不得宣称已目视。 |
+| 复杂度 | S~M（1 天） |
+
+> P2 合计：实施 52 个 + 测试 5 个 = **57 个任务**。
 
 ---
 
@@ -1780,6 +1793,7 @@ flowchart LR
     P48 --> P49
     P49 --> P50
     P50 --> P51
+    P51 --> P52
     P45 --> P48
     P01 --> PTT3
     P09 --> PTT4
