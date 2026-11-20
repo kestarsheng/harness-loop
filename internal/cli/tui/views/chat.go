@@ -26,12 +26,32 @@ type ChatMessage struct {
 }
 
 const (
-	chatIndent     = "  "
-	chatBodyPad    = "  "
-	chatCursor     = "▍"
-	chatMinWidth   = 20
-	chatUserMarker = "▌"
-	chatUserBg     = "236"
+	chatIndent   = "  "
+	chatBodyPad  = "  "
+	chatCursor   = "▍"
+	chatMinWidth = 20
+	chatUserBg   = "236"
+
+	// Role labels use single-width geometric glyphs, never emoji: ◇ for the
+	// user and ◆ for the assistant/error turn. Both markers are exactly one
+	// cell wide, so the labels start in the same column.
+	chatUserRole      = "◇ user"
+	chatAssistantRole = "◆ assistant"
+	chatErrorRole     = "◆ error"
+
+	// Tool rows carry a single-width mark: ▸ pending, ✓ done, ✗ failed.
+	chatToolPending = "▸"
+	chatToolOK      = "✓"
+	chatToolFail    = "✗"
+	// ToolMarkPending is exported for the model, which labels a tool row when
+	// the stream starts it; the renderer recognises the mark again below.
+	ToolMarkPending = chatToolPending
+
+	// chatUserPadX is the padding inside the user block on each side and
+	// chatUserGapX the gap the block leaves on the right, so the background
+	// never runs into the edge of the message area.
+	chatUserPadX = 1
+	chatUserGapX = 1
 )
 
 // RenderChat draws the conversation transcript with the newest turns kept when
@@ -52,7 +72,8 @@ func RenderChatWithCursor(messages []ChatMessage, width, maxLines int, theme The
 	}
 	lines := []string{}
 	if len(messages) == 0 {
-		hint := chatIndent + "⏺ send a message, or /task <goal> to run the a~e loop"
+		hint := chatIndent + chatUserRole + " · " + chatAssistantRole +
+			" · send a message, or /task <goal> to run the a~e loop"
 		for _, row := range wrapWidth(hint, width) {
 			lines = append(lines, theme.paint(row, theme.Secondary))
 		}
@@ -80,20 +101,20 @@ func RenderChatWithCursor(messages []ChatMessage, width, maxLines int, theme The
 			continue
 		}
 		if msg.Role == "user" {
-			lines = append(lines, chatHeader(theme, "❯ you", msg.Time, theme.Primary, width))
-			for _, row := range wrapWidth(strings.TrimRight(msg.Text, "\n"), bodyWidth) {
+			lines = append(lines, chatHeader(theme, chatUserRole, msg.Time, theme.Primary, width))
+			for _, row := range wrapWidth(strings.TrimRight(msg.Text, "\n"), userContentWidth(width)) {
 				lines = append(lines, userRow(theme, row, width))
 			}
 			lines = append(lines, "")
 			continue
 		}
-		label := "assistant"
+		label := chatAssistantRole
 		style := theme.Primary
 		if msg.Err {
-			label = "error"
+			label = chatErrorRole
 			style = theme.Err
 		}
-		lines = append(lines, chatHeader(theme, "⏺ "+label, msg.Time, style, width))
+		lines = append(lines, chatHeader(theme, label, msg.Time, style, width))
 
 		body := strings.TrimRight(msg.Text, "\n")
 		if body == "" {
@@ -153,9 +174,9 @@ func chatHeader(theme Theme, label string, at time.Time, style lipgloss.Style, w
 	return theme.paint(head, style) + " " + theme.paint(stamp, theme.Secondary)
 }
 
-// hasToolMark reports whether a tool row already carries its ⏺/✓/✗ status.
+// hasToolMark reports whether a tool row already carries its ▸/✓/✗ status.
 func hasToolMark(text string) bool {
-	for _, mark := range []string{"⏺", "✓", "✗"} {
+	for _, mark := range []string{chatToolPending, chatToolOK, chatToolFail} {
 		if strings.HasPrefix(text, mark) {
 			return true
 		}
@@ -168,13 +189,17 @@ func hasToolMark(text string) bool {
 func toolMark(msg ChatMessage) string {
 	switch {
 	case msg.Err:
-		return "✗"
+		return chatToolFail
 	case msg.Streaming:
-		return "⏺"
+		return chatToolPending
 	default:
-		return "✓"
+		return chatToolOK
 	}
 }
+
+// chatIndentWidth is the display width of the message area's left margin. It is
+// a variable only because lipgloss measures at runtime.
+var chatIndentWidth = lipgloss.Width(chatIndent)
 
 // chatUserStyle is the dark block behind the user's own message. It is a chat
 // constant on purpose: Theme keeps only Primary/Secondary/Border/Err.
@@ -182,24 +207,31 @@ func chatUserStyle() lipgloss.Style {
 	return lipgloss.NewStyle().Background(lipgloss.Color(chatUserBg))
 }
 
-// userRow renders one line of user input as a left-accented block. The
-// background is dropped under NO_COLOR, leaving the ▌ marker as the signal.
+// userContentWidth is the text width inside the user background block: the
+// message area minus the left indent, the right gap and both paddings.
+func userContentWidth(width int) int {
+	w := width - chatIndentWidth - chatUserGapX - 2*chatUserPadX
+	if w < chatMinWidth/2 {
+		w = chatMinWidth / 2
+	}
+	return w
+}
+
+// userRow renders one line of user input as an inset block: one cell of padding
+// on each side of the text and one cell of gap before the right edge, so the
+// background never spans the whole row. NO_COLOR drops the background and keeps
+// the same columns; the ◇ on the header line carries the role instead.
 func userRow(theme Theme, row string, width int) string {
-	if width < 3 {
-		return fit(row, width)
-	}
-	marker := theme.paint(chatUserMarker, theme.Primary)
-	if theme.NoColor {
-		return fit(marker+" "+row, width)
-	}
-	contentWidth := width - 2
+	contentWidth := userContentWidth(width)
 	content := fit(row, contentWidth)
-	padding := contentWidth - lipgloss.Width(content)
-	if padding < 0 {
-		padding = 0
+	if pad := contentWidth - lipgloss.Width(content); pad > 0 {
+		content += strings.Repeat(" ", pad)
 	}
-	block := chatUserStyle().Render(content + strings.Repeat(" ", padding))
-	return marker + " " + block
+	body := strings.Repeat(" ", chatUserPadX) + content + strings.Repeat(" ", chatUserPadX)
+	if theme.NoColor {
+		return chatIndent + body
+	}
+	return chatIndent + chatUserStyle().Render(body)
 }
 
 // markdownRows renders a finished assistant reply with glamour. NO_COLOR uses

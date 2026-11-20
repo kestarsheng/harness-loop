@@ -45,32 +45,65 @@ const ComposerIndent = 2
 
 // ComposerContentWidth is the display width available to composer content at a
 // given terminal width, matching RenderOpenComposer. It is what the model needs
-// to map a click column onto a rune index when the input wraps.
+// to map a click column onto a rune index when the input wraps. Unlike a
+// component box it does not enforce MinBoxWidth: on a narrow terminal the
+// composer must shrink instead of overflowing the screen.
 func ComposerContentWidth(width int) int {
-	outer := ClampBoxWidth(width - ComposerIndent)
+	outer := width - ComposerIndent
+	if outer > MaxBoxWidth {
+		outer = MaxBoxWidth
+	}
 	if outer < boxBorder+2 {
 		outer = boxBorder + 2
 	}
 	return outer - boxBorder
 }
 
-// RenderOpenComposer draws the focused composer: a single top rule plus the
-// input rows, with no bottom frame. Leaving the bottom open keeps the terminal
-// caret (and the IME candidate window) free of box glyphs. width is the
-// terminal width, so the block fits with its indent.
+// ComposerCap closes the open composer on its first input row: the top rule and
+// the cap form the left frame, while the right side and the bottom stay open so
+// the terminal caret keeps its own row (the IME requirement from T-P2-49).
+const ComposerCap = "╰─ "
+
+// ComposerPromptColumn is the cell where the input's "> " prefix starts on the
+// given display row: the first row carries the cap, later rows only the indent.
+func ComposerPromptColumn(row int) int {
+	if row <= 0 {
+		return ComposerIndent + lipgloss.Width(ComposerCap)
+	}
+	return ComposerIndent
+}
+
+// RenderOpenComposer draws the focused composer: a top rule, then the input
+// rows with the ╰─ cap on the first one. Nothing is drawn below the last input
+// row, so the caret and the IME popup stay on the bottom line.
 func RenderOpenComposer(theme Theme, body string, width int) string {
 	content := ComposerContentWidth(width)
 	indent := strings.Repeat(" ", ComposerIndent)
 	top := "╭" + strings.Repeat("─", content+boxBorder-2) + "╮"
+	cap := ComposerCap
 	if !theme.NoColor {
 		top = theme.Border.Render(top)
+		cap = theme.Border.Render(cap)
 	}
 	rows := []string{indent + top}
-	wrapped := lipgloss.NewStyle().Width(content).Render(strings.TrimRight(body, "\n"))
-	for _, row := range strings.Split(wrapped, "\n") {
-		// The Width style pads to the content width; the padding is invisible
-		// but noisy in captured output, so drop it.
-		rows = append(rows, strings.TrimRight(indent+row, " "))
+	for i, line := range strings.Split(strings.TrimRight(body, "\n"), "\n") {
+		prefix, avail := indent, content
+		if i == 0 {
+			prefix = indent + cap
+			avail = content - lipgloss.Width(ComposerCap)
+		}
+		if avail < 1 {
+			avail = 1
+		}
+		wrapped := lipgloss.NewStyle().Width(avail).Render(line)
+		for j, row := range strings.Split(wrapped, "\n") {
+			if j > 0 {
+				prefix = indent
+			}
+			// The Width style pads to the content width; the padding is
+			// invisible but noisy in captured output, so drop it.
+			rows = append(rows, strings.TrimRight(prefix+row, " "))
+		}
 	}
 	return strings.Join(rows, "\n")
 }

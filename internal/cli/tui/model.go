@@ -20,7 +20,7 @@ import (
 const (
 	flushInterval       = 100 * time.Millisecond
 	pollInterval        = time.Second
-	spinnerInterval     = 385 * time.Millisecond
+	spinnerInterval     = 275 * time.Millisecond
 	cursorBlinkInterval = 530 * time.Millisecond
 	thinkingInterval    = time.Second
 	reconnectMin        = time.Second
@@ -864,7 +864,8 @@ func (m *Model) handleMouse(msg tea.MouseMsg) {
 		return // hint / top rule: focus only
 	}
 	row := msg.Y - (top + inputRow)
-	col := msg.X - views.ComposerIndent
+	// The first input row carries the ╰─ cap, later rows only the indent.
+	col := msg.X - views.ComposerPromptColumn(row)
 	m.input.SetCursorByCell(row, col, views.ComposerContentWidth(width))
 }
 
@@ -897,7 +898,7 @@ func (m *Model) applyChatChunk(chunk ChatChunk) {
 		}
 		m.chat = append(m.chat, ChatLine{
 			Role:      "tool",
-			Text:      toolCallLabel("⏺", name, chunk.ToolArgs),
+			Text:      toolCallLabel(views.ToolMarkPending, name, chunk.ToolArgs),
 			ToolName:  name,
 			ToolArgs:  chunk.ToolArgs,
 			Streaming: true,

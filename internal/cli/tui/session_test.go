@@ -8,6 +8,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"agent-platform/internal/cli/tui/views"
 	harnesspb "agent-platform/pkg/pb/harnessloop"
 )
 
@@ -137,18 +138,18 @@ func TestSessionExitOnCompleteKeepsLegacyBehaviour(t *testing.T) {
 	}
 }
 
-// TestSessionComposerUsesComponentBox checks the T-P2-49 composer frame: the
-// focused composer is open (top rule only) and the input row sits right under
-// it, while the hint line stays above the rule.
+// TestSessionComposerUsesComponentBox checks the composer frame: the focused
+// composer is open (top rule plus ╰─ cap, no bottom edge) and the input row sits
+// right under the rule, while the hint line stays above it.
 func TestSessionComposerUsesComponentBox(t *testing.T) {
 	m := sessionModel(t, SessionConfig{})
 	view := m.View()
-	for _, want := range []string{"╭", "╮", "Enter to send", promptPrefix} {
+	for _, want := range []string{"╭", "╮", "Enter to send", promptPrefix, views.ComposerCap} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("session screen missing %q:\n%s", want, view)
 		}
 	}
-	if strings.Contains(view, "╰") {
+	if strings.Contains(view, "╯") {
 		t.Fatalf("the focused composer must stay open:\n%s", view)
 	}
 	if !hasWordmark(view) {

@@ -19,7 +19,9 @@ func NewTheme(noColor bool) Theme {
 	}
 	dim := lipgloss.Color("8")
 	return Theme{
-		Primary:   lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12")),
+		// Primary is the logo accent so role labels, panel titles and the
+		// wordmark all read as one colour (T-P2-50).
+		Primary:   lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(LogoColor)),
 		Secondary: lipgloss.NewStyle().Foreground(dim),
 		Border:    lipgloss.NewStyle().Foreground(dim),
 		Err:       lipgloss.NewStyle().Foreground(lipgloss.Color("9")),
