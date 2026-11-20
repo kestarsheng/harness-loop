@@ -239,6 +239,14 @@ type Model struct {
 	chatCh        <-chan ChatChunk
 	chatGen       int
 	chatCancel    context.CancelFunc
+	// chatScroll is how many rows the transcript is scrolled up from the
+	// bottom: 0 keeps the newest row on screen and follows the stream, any
+	// larger value means the reader is looking at history. chatTotal is the
+	// rendered row count of the last frame and chatNew marks rows that
+	// arrived while the reader was scrolled up ("↓ new" in the status bar).
+	chatScroll int
+	chatTotal  int
+	chatNew    bool
 	// Spinner / thinking state. spinnerFrame drives both the braille spinner
 	// and the alternating block cursor; thinkingStarted feeds "Thinking… 3s".
 	spinnerFrame    int
@@ -474,6 +482,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.setCursorVisible(true)
 		if m.chatStreaming && msg.Type == tea.KeyEsc {
 			m.interruptChat()
+			return m, nil
+		}
+		if m.handleChatScrollKey(msg) {
 			return m, nil
 		}
 		if m.session != nil && m.awaitingInput {
@@ -757,6 +768,9 @@ func (m *Model) startChatSubmit(message string) tea.Cmd {
 		ChatLine{Role: "user", Text: message, Time: now},
 		ChatLine{Role: "assistant", Streaming: true, Time: now},
 	)
+	// A new turn is the reader's own doing: drop back to live output.
+	m.chatScroll = 0
+	m.chatNew = false
 	m.chatStreaming = true
 	m.chatCh = nil
 	m.chatGen++
@@ -846,8 +860,19 @@ func (m *Model) viewHeight() int {
 
 // handleMouse focuses the composer on a left click and, when the click lands on
 // the input rows, moves the caret to the clicked display column. Wide runes
-// (CJK, emoji) are measured in cells, never in runes.
+// (CJK, emoji) are measured in cells, never in runes. The wheel scrolls the
+// transcript from anywhere on screen and never touches the composer click path.
 func (m *Model) handleMouse(msg tea.MouseMsg) {
+	if msg.Action == tea.MouseActionPress {
+		switch msg.Button {
+		case tea.MouseButtonWheelUp:
+			m.scrollChat(chatWheelRows)
+			return
+		case tea.MouseButtonWheelDown:
+			m.scrollChat(-chatWheelRows)
+			return
+		}
+	}
 	if msg.Button != tea.MouseButtonLeft || msg.Action != tea.MouseActionPress {
 		return
 	}
@@ -913,6 +938,7 @@ func (m *Model) applyChatChunk(chunk ChatChunk) {
 			Streaming: true,
 			Time:      m.now(),
 		})
+		m.noteChatGrowth()
 	case "tool_result":
 		m.thinking = false
 		m.finishToolLine(chunk.ToolName, chunk.ToolArgs, chunk.ToolResult)
@@ -939,6 +965,7 @@ func (m *Model) applyChatChunk(chunk ChatChunk) {
 		}
 		m.finishChat()
 		m.chat = append(m.chat, ChatLine{Role: "assistant", Text: content, Err: true, Time: m.now()})
+		m.noteChatGrowth()
 	case "handoff", "approval":
 		// Handoffs and approvals stay out of the conversation view.
 	default:
@@ -1012,6 +1039,7 @@ func (m *Model) appendAssistantText(text string) {
 	if text == "" {
 		return
 	}
+	m.noteChatGrowth()
 	for i := len(m.chat) - 1; i >= 0; i-- {
 		if m.chat[i].Role != "assistant" || m.chat[i].Err {
 			continue
@@ -1023,6 +1051,7 @@ func (m *Model) appendAssistantText(text string) {
 }
 
 func (m *Model) setAssistantText(text string) {
+	m.noteChatGrowth()
 	for i := len(m.chat) - 1; i >= 0; i-- {
 		if m.chat[i].Role != "assistant" || m.chat[i].Err {
 			continue
@@ -1110,6 +1139,7 @@ func (m *Model) failChat(err error) {
 		Err:  true,
 		Time: m.now(),
 	})
+	m.noteChatGrowth()
 }
 
 // terminalCmd decides what happens when the current task reaches a terminal
@@ -1324,10 +1354,7 @@ func (m *Model) View() string {
 	composer := m.composerBlock(width)
 	status := m.statusBar(width)
 
-	bodyHeight := height - lineCount(logo) - len(composer) - 1
-	if bodyHeight < 1 {
-		bodyHeight = 1
-	}
+	bodyHeight := bodyRows(height, lineCount(logo), len(composer))
 	body := padLines(splitLines(m.renderBody(width, bodyHeight)), bodyHeight)
 
 	out := splitLines(logo)
@@ -1365,7 +1392,7 @@ func (m *Model) renderBody(width, height int) string {
 		return views.RenderKB(m.kbData(), width, maxLinesFor(height, 12), m.theme)
 	}
 	if m.chatMode && m.session != nil {
-		return views.RenderChatWithCursor(m.chatLines(), width, height, m.theme, m.cursorChar())
+		return m.chatViewport(width, height)
 	}
 	header := views.RenderHeader(m.stageData())
 	stage := views.RenderStage(m.stageData())
@@ -1387,6 +1414,123 @@ func (m *Model) renderBody(width, height int) string {
 		views.RenderStream(m.stream, width, streamMax, m.theme),
 		views.RenderEvents(m.events, width, eventsMax, m.theme),
 	}, "\n")
+}
+
+// chatWheelRows is how many transcript rows one wheel notch moves; three is the
+// terminal convention and matches less(1). chatNewMark is the status-bar flag
+// shown while the reader is scrolled up and rows are still arriving underneath.
+const (
+	chatWheelRows = 3
+	chatNewMark   = "↓ new"
+)
+
+// chatViewport renders the conversation window and keeps the scroll state in
+// step with it: the total row count refreshes every frame, new rows that land
+// while the reader is scrolled up are absorbed into the offset so the text
+// under their eyes does not slide, and reaching the bottom clears "↓ new".
+func (m *Model) chatViewport(width, height int) string {
+	msgs := m.chatLines()
+	view, total := views.RenderChatViewportSize(msgs, width, height, m.chatScroll, m.theme, m.cursorChar())
+	if total > m.chatTotal && m.chatScroll > 0 {
+		// Grown above: add the delta to the offset so the window keeps showing
+		// the same rows instead of being dragged down by the stream.
+		m.chatScroll = max(m.chatScroll+total-m.chatTotal, 0)
+		view, total = views.RenderChatViewportSize(msgs, width, height, m.chatScroll, m.theme, m.cursorChar())
+	}
+	limit := max(total-height, 0)
+	if m.chatScroll > limit {
+		m.chatScroll = limit
+	}
+	m.chatTotal = total
+	if m.chatScroll == 0 {
+		m.chatNew = false
+	}
+	return view
+}
+
+// chatPane reports whether the conversation viewport is the visible body, so
+// scroll input never leaks into the other panels.
+func (m *Model) chatPane() bool {
+	return m.session != nil && m.chatMode && m.mode == ViewMain
+}
+
+// scrollChat moves the window by delta rows (positive = older content) and
+// clamps to the transcript, clearing "↓ new" once the bottom is reached.
+func (m *Model) scrollChat(delta int) {
+	if !m.chatPane() {
+		return
+	}
+	m.chatScroll = max(0, min(m.chatScroll+delta, m.chatMaxScroll()))
+	if m.chatScroll == 0 {
+		m.chatNew = false
+	}
+}
+
+// chatMaxScroll is the largest offset the last rendered frame allows.
+func (m *Model) chatMaxScroll() int {
+	return max(m.chatTotal-m.chatViewportHeight(), 0)
+}
+
+// chatPageRows is one PgUp/PgDn step: the window minus two rows of overlap so
+// the reader keeps a line of context across the jump.
+func (m *Model) chatPageRows() int {
+	return max(m.chatViewportHeight()-2, 1)
+}
+
+// jumpChatTop pins the window to the first row; jumpChatBottom returns to live
+// output and hands the follow behaviour back to the stream.
+func (m *Model) jumpChatTop()    { m.scrollChat(m.chatMaxScroll()) }
+func (m *Model) jumpChatBottom() { m.scrollChat(-m.chatMaxScroll()) }
+
+// handleChatScrollKey consumes the transcript-scrolling keys when the chat
+// viewport is up. PgUp/PgDn are never used by the composer; Home/End stay caret
+// keys while the user has typed something, so editing is untouched.
+func (m *Model) handleChatScrollKey(msg tea.KeyMsg) bool {
+	if !m.chatPane() {
+		return false
+	}
+	switch msg.Type {
+	case tea.KeyPgUp:
+		m.scrollChat(m.chatPageRows())
+		return true
+	case tea.KeyPgDown:
+		m.scrollChat(-m.chatPageRows())
+		return true
+	case tea.KeyEnd:
+		if m.input != nil && !m.input.Empty() {
+			return false
+		}
+		m.jumpChatBottom()
+		return true
+	case tea.KeyHome:
+		if m.input != nil && !m.input.Empty() {
+			return false
+		}
+		m.jumpChatTop()
+		return true
+	}
+	return false
+}
+
+// noteChatGrowth flags rows that landed while the reader was scrolled up. It is
+// called from every place that adds to or grows the transcript.
+func (m *Model) noteChatGrowth() {
+	if m.chatScroll > 0 {
+		m.chatNew = true
+	}
+}
+
+// chatViewportHeight is the row count of the scrollable middle area. It mirrors
+// View's arithmetic through bodyRows so the two can never drift apart.
+func (m *Model) chatViewportHeight() int {
+	width := m.viewWidth()
+	logo := views.RenderWordmark(width, m.theme.NoColor)
+	return bodyRows(m.viewHeight(), lineCount(logo), len(m.composerBlock(width)))
+}
+
+// bodyRows is whatever is left for the body after the fixed rows.
+func bodyRows(height, logoRows, composerRows int) int {
+	return max(height-logoRows-composerRows-1, 1)
 }
 
 // composerBlock is the fixed bottom stack. Its last row is always the input
@@ -1446,6 +1590,11 @@ func (m *Model) statusBar(width int) string {
 		prefix = "[" + m.modeName() + "] "
 	}
 	tail := " · " + formatStatusTokens(tokens) + " · ? help"
+	if m.chatNew {
+		// The reader is scrolled up and rows arrived: say so here instead of
+		// stealing a row from the input line at the bottom.
+		tail = " · " + chatNewMark + tail
+	}
 	for len(segments) > 0 {
 		text := prefix + strings.Join(segments, " · ")
 		if width <= 0 || len([]rune(text))+len([]rune(tail)) <= width {
