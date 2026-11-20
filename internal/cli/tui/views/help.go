@@ -7,6 +7,8 @@ func RenderHelp(theme Theme) string {
 		theme.paint("Keys", theme.Primary),
 		" q    quit the TUI",
 		" a    abort the running task (idempotent)",
+		" pgup/pgdn  scroll the transcript one page (wheel: three rows)",
+		" home/end   jump to the oldest row / back to live output",
 		" l    toggle the full event log",
 		" m    memory view",
 		" s    subtask tree / DAG progress + handoff chain",

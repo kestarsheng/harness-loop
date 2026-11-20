@@ -59,6 +59,15 @@ const (
 	// have; the block hugs the header instead. Keeping it a constant makes the
 	// zero explicit and testable rather than an accident.
 	chatUserGapRows = 0
+
+	// Scrollbar glyphs. Both are one cell wide and survive NO_COLOR: the
+	// thumb is a full block, the track a light shade, so the bar reads as a
+	// bar even with every colour stripped.
+	chatScrollThumb = "█"
+	chatScrollTrack = "░"
+	// chatScrollCol is the single rightmost column reserved for the bar. The
+	// text is wrapped one column narrower so the bar never sits on a rune.
+	chatScrollCol = 1
 )
 
 // RenderChat draws the conversation transcript with the newest turns kept when
@@ -71,6 +80,70 @@ func RenderChat(messages []ChatMessage, width, maxLines int, theme Theme) string
 // RenderChatWithCursor is RenderChat with an explicit streaming cursor, letting
 // the model blink it without changing the view contract.
 func RenderChatWithCursor(messages []ChatMessage, width, maxLines int, theme Theme, cursor string) string {
+	lines := chatRows(messages, width, theme, cursor)
+	if maxLines > 0 && len(lines) > maxLines {
+		// Keep the newest turns: the transcript scrolls up off the top.
+		lines = lines[len(lines)-maxLines:]
+	}
+	return strings.TrimRight(strings.Join(lines, "\n"), "\n")
+}
+
+// RenderChatViewport draws a window onto the transcript and reports nothing;
+// RenderChatViewportSize is the variant the model calls, because it needs the
+// total row count to know how far the transcript can scroll.
+func RenderChatViewport(messages []ChatMessage, width, visible, offset int, theme Theme, cursor string) string {
+	out, _ := RenderChatViewportSize(messages, width, visible, offset, theme, cursor)
+	return out
+}
+
+// RenderChatViewportSize renders the [total-visible-offset, total-offset) window
+// of the transcript and returns it with the full row count. offset is measured
+// from the bottom, so 0 keeps the newest row on screen (auto-follow) and the
+// clamp ceiling shows the first row. The message area gives up its rightmost
+// column to the scrollbar only when the transcript actually overflows, so a
+// short conversation keeps the full width and gains no trailing padding.
+func RenderChatViewportSize(messages []ChatMessage, width, visible, offset int, theme Theme, cursor string) (string, int) {
+	if visible < 1 {
+		visible = 1
+	}
+	if width < chatMinWidth {
+		width = chatMinWidth
+	}
+	textWidth := width - chatScrollCol
+	if textWidth < chatMinWidth/2 {
+		textWidth = chatMinWidth / 2
+	}
+	rows := chatRows(messages, textWidth, theme, cursor)
+	total := len(rows)
+	if total == 0 {
+		return "", 0
+	}
+	offset = clampChatOffset(offset, total, visible)
+	start := max(0, total-visible-offset)
+	end := min(total, total-offset)
+	if end < start {
+		end = start
+	}
+	window := rows[start:end]
+	if total <= visible {
+		return strings.Join(window, "\n"), total
+	}
+	top, size := chatScrollBar(total, visible, offset)
+	out := make([]string, 0, len(window))
+	for i, row := range window {
+		thumb := i >= top && i < top+size
+		glyph := chatScrollTrack
+		if thumb {
+			glyph = chatScrollThumb
+		}
+		out = append(out, padCells(row, textWidth)+theme.scrollBar(glyph, thumb))
+	}
+	return strings.Join(out, "\n"), total
+}
+
+// chatRows renders every transcript row at width and drops the trailing blank
+// rows, so the last row is always content.
+func chatRows(messages []ChatMessage, width int, theme Theme, cursor string) []string {
 	if cursor == "" {
 		cursor = chatCursor
 	}
@@ -162,12 +235,74 @@ func RenderChatWithCursor(messages []ChatMessage, width, maxLines int, theme The
 	for len(lines) > 0 && lines[len(lines)-1] == "" {
 		lines = lines[:len(lines)-1]
 	}
+	return lines
+}
 
-	if maxLines > 0 && len(lines) > maxLines {
-		// Keep the newest turns: the transcript scrolls up off the top.
-		lines = lines[len(lines)-maxLines:]
+// clampChatOffset folds an offset into [0, total-visible]: 0 is the bottom,
+// total-visible the top, and a transcript shorter than the window cannot
+// scroll at all.
+func clampChatOffset(offset, total, visible int) int {
+	limit := chatMaxOffset(total, visible)
+	if offset < 0 {
+		return 0
 	}
-	return strings.TrimRight(strings.Join(lines, "\n"), "\n")
+	if offset > limit {
+		return limit
+	}
+	return offset
+}
+
+// chatMaxOffset is the largest scroll offset the transcript allows.
+func chatMaxOffset(total, visible int) int {
+	if total <= visible || visible < 1 {
+		return 0
+	}
+	return total - visible
+}
+
+// chatScrollBar returns the first bar row and the thumb length for an offset
+// measured from the bottom. The thumb keeps the classic proportion
+// visible*visible/total (at least one cell) and slides by the fraction of the
+// transcript that has scrolled past the top, so offset=0 parks it at the
+// bottom and the clamp ceiling parks it at the top.
+func chatScrollBar(total, visible, offset int) (top, size int) {
+	maxStart := chatMaxOffset(total, visible)
+	if maxStart == 0 {
+		return 0, visible
+	}
+	size = visible * visible / total
+	if size < 1 {
+		size = 1
+	}
+	if size > visible {
+		size = visible
+	}
+	if size >= visible {
+		return 0, visible
+	}
+	fromTop := maxStart - clampChatOffset(offset, total, visible)
+	top = (fromTop*(visible-size) + maxStart/2) / maxStart
+	top = max(0, min(top, visible-size))
+	return top, size
+}
+
+// padCells right-pads s with spaces to width cells. lipgloss measures cells, so
+// an ANSI-styled row keeps its place under the scrollbar column.
+func padCells(s string, width int) string {
+	if pad := width - lipgloss.Width(s); pad > 0 {
+		return s + strings.Repeat(" ", pad)
+	}
+	return s
+}
+
+// scrollBar paints one scrollbar cell. NO_COLOR keeps the glyph and drops the
+// colour; the thumb takes the logo accent so the position is readable.
+func (t Theme) scrollBar(glyph string, thumb bool) string {
+	style := t.Border
+	if thumb {
+		style = t.Primary
+	}
+	return t.paint(glyph, style)
 }
 
 // chatHeader paints "<label>" in style and the timestamp as dim small text. The
