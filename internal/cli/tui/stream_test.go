@@ -10,9 +10,9 @@ import (
 	"agent-platform/internal/cli/tui/views"
 )
 
-func TestSpinnerIntervalIsThirtyPercentFaster(t *testing.T) {
-	if spinnerInterval != 385*time.Millisecond {
-		t.Fatalf("spinner interval = %v, want 385ms", spinnerInterval)
+func TestSpinnerIntervalIsFortyPercentFaster(t *testing.T) {
+	if spinnerInterval != 275*time.Millisecond {
+		t.Fatalf("spinner interval = %v, want 275ms (385/1.4)", spinnerInterval)
 	}
 }
 

@@ -71,7 +71,10 @@ func TestComposerOpensWhileFocusedAndClosesOnSubmit(t *testing.T) {
 	if !strings.Contains(focused, "╭") {
 		t.Fatalf("focused composer must draw a top rule:\n%s", focused)
 	}
-	if strings.Contains(focused, "╰") {
+	if !strings.Contains(focused, views.ComposerCap) {
+		t.Fatalf("focused composer must carry the %q cap:\n%q", views.ComposerCap, focused)
+	}
+	if strings.Contains(focused, "╯") {
 		t.Fatalf("focused composer must stay open (no bottom frame):\n%s", focused)
 	}
 
@@ -86,7 +89,7 @@ func TestComposerOpensWhileFocusedAndClosesOnSubmit(t *testing.T) {
 	if !m.submitting {
 		t.Fatalf("submit did not enter the creating state: submitting=%v awaiting=%v", m.submitting, m.awaitingInput)
 	}
-	if !strings.Contains(m.View(), "╰") {
+	if !strings.Contains(m.View(), "╰") || !strings.Contains(m.View(), "╯") {
 		t.Fatalf("submitting must restore the complete frame:\n%s", m.View())
 	}
 }
@@ -190,7 +193,7 @@ func TestMouseClickOnInputMovesCaret(t *testing.T) {
 	}
 	// "你" occupies cells 2-3 and "好" cells 4-5 inside the content, after the
 	// "> " prefix: clicking the cell just left of "好" puts the caret at rune 1.
-	x := views.ComposerIndent + lipgloss.Width(promptPrefix) + 2
+	x := views.ComposerPromptColumn(0) + lipgloss.Width(promptPrefix) + 2
 	next, _ := m.Update(tea.MouseMsg{
 		X:      x,
 		Y:      top + inputRow,
@@ -285,5 +288,87 @@ func TestSeededGoalSessionStillBlinksCaret(t *testing.T) {
 	m = next.(*Model)
 	if !m.awaitingInput || !m.blinkRunning {
 		t.Fatalf("the input must come back with a blinking caret: awaiting=%v running=%v", m.awaitingInput, m.blinkRunning)
+	}
+}
+
+// TestComposerInputLineCarriesTheCap checks the visual close of the open
+// composer: the last row is the input line itself and it starts with the ╰─ cap,
+// so the field reads as finished without any row below it.
+func TestComposerInputLineCarriesTheCap(t *testing.T) {
+	m := sessionModel(t, SessionConfig{})
+	m = typeLine(t, m, "你好")
+	lines := strings.Split(m.View(), "\n")
+	last := lines[len(lines)-1]
+
+	if !strings.Contains(last, views.ComposerCap) {
+		t.Fatalf("input row must start with the %q cap: %q", views.ComposerCap, last)
+	}
+	if !strings.Contains(last, promptPrefix+"你好") {
+		t.Fatalf("last row is not the input line: %q", last)
+	}
+	if idx := strings.Index(last, views.ComposerCap); idx != views.ComposerIndent {
+		t.Fatalf("cap must sit at column %d: %q", views.ComposerIndent, last)
+	}
+	if strings.Contains(last, "╯") {
+		t.Fatalf("input row must not carry a bottom-right corner: %q", last)
+	}
+	if lines[len(lines)-1] == "" || strings.TrimSpace(last) == "" {
+		t.Fatal("the last row must hold the input, not padding")
+	}
+}
+
+// TestComposerKeepsHeightOnFocusChange makes sure blurring the composer does not
+// shift the layout: the reserved row above the rule absorbs the closed box.
+func TestComposerKeepsHeightOnFocusChange(t *testing.T) {
+	factory := func(ctx context.Context, goal string) (*harnesspb.TaskView, error) {
+		return &harnesspb.TaskView{TaskId: "task-1", Status: "running", CurrentStage: "a"}, nil
+	}
+	m := sessionModel(t, SessionConfig{CreateTask: factory})
+	focused := len(m.composerBlock(m.viewWidth()))
+
+	m = typeLine(t, m, "/task ship it")
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(*Model)
+	next, _ = m.Update(cmd())
+	m = next.(*Model)
+
+	if blurred := len(m.composerBlock(m.viewWidth())); blurred != focused {
+		t.Fatalf("composer height jumps on blur: focused=%d blurred=%d", focused, blurred)
+	}
+}
+
+// TestComposerFitsNarrowTerminals keeps the composer inside the screen width;
+// the input row must shrink rather than wrap onto an extra row.
+func TestComposerFitsNarrowTerminals(t *testing.T) {
+	for _, width := range []int{34, 40, 50} {
+		m := sizedSessionModel(t, width, 20, Options{NoColor: true, WorkDir: "/w", GitBranch: "b", ModelName: "m"})
+		m = typeLine(t, m, "这是一段很长很长的中文输入，用来确认窄终端不会溢出")
+		lines := strings.Split(m.View(), "\n")
+		for _, line := range lines {
+			if lipgloss.Width(line) > width {
+				t.Fatalf("width %d: line overflows (%d cells): %q", width, lipgloss.Width(line), line)
+			}
+		}
+		if !strings.Contains(lines[len(lines)-1], promptPrefix) {
+			// A long input wraps: the caret then sits on the last wrapped row,
+			// which is still the last row of the view and still input.
+			capAt := -1
+			for i, line := range lines {
+				if strings.Contains(line, views.ComposerCap) {
+					capAt = i
+				}
+			}
+			if capAt < 0 {
+				t.Fatalf("width %d: composer cap missing:\n%s", width, m.View())
+			}
+			for _, line := range lines[capAt:] {
+				if strings.TrimSpace(line) == "" {
+					t.Fatalf("width %d: blank row inside the input block:\n%s", width, m.View())
+				}
+			}
+			if strings.Contains(lines[len(lines)-1], "? help") {
+				t.Fatalf("width %d: status bar below the input:\n%s", width, m.View())
+			}
+		}
 	}
 }
