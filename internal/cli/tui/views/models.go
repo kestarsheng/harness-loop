@@ -58,12 +58,12 @@ func RenderModels(d ModelData, width, maxLines int, theme Theme) string {
 	}
 	title := fmt.Sprintf("Models · %d selections · %d fallbacks · %d switches · %d recovered · %d unavailable · %d rejected",
 		len(d.Selections), fallbacks, d.Switches, d.Recovered, d.Unavailable, d.Rejected)
-	lines := []string{theme.paint(title, theme.Title)}
+	lines := []string{theme.paint(title, theme.Primary)}
 	if d.Error != "" {
 		lines = append(lines, theme.paint(" "+d.Error, theme.Err))
 	}
 	if len(d.Selections) == 0 {
-		lines = append(lines, theme.paint(" no model selection recorded yet (waiting for model.selected)", theme.Muted))
+		lines = append(lines, theme.paint(" no model selection recorded yet (waiting for model.selected)", theme.Secondary))
 		return strings.Join(limitLines(lines, maxLines), "\n")
 	}
 	for _, item := range d.Selections {

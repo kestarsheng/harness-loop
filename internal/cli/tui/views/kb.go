@@ -31,23 +31,23 @@ func RenderKB(d KBData, width, maxLines int, theme Theme) string {
 	if strings.TrimSpace(d.Query) != "" {
 		title += " · " + kbTruncate(d.Query, 60)
 	}
-	lines := []string{theme.paint(title, theme.Title)}
+	lines := []string{theme.paint(title, theme.Primary)}
 	if d.Hint != "" {
-		lines = append(lines, theme.paint(" "+d.Hint, theme.Muted))
+		lines = append(lines, theme.paint(" "+d.Hint, theme.Secondary))
 	}
 	if d.Error != "" {
 		lines = append(lines, theme.paint(" "+d.Error, theme.Err))
 	}
 	switch {
 	case d.Loading:
-		lines = append(lines, theme.paint(" searching…", theme.Muted))
+		lines = append(lines, theme.paint(" searching…", theme.Secondary))
 	case !d.Loaded:
-		lines = append(lines, theme.paint(" type a query and press Enter (Esc back)", theme.Muted))
+		lines = append(lines, theme.paint(" type a query and press Enter (Esc back)", theme.Secondary))
 	case len(d.Items) == 0:
-		lines = append(lines, theme.paint(" no results", theme.Muted))
+		lines = append(lines, theme.paint(" no results", theme.Secondary))
 	default:
 		meta := fmt.Sprintf(" %d results · %.0f ms", d.Total, float64(d.Latency.Milliseconds()))
-		lines = append(lines, theme.paint(meta, theme.Muted))
+		lines = append(lines, theme.paint(meta, theme.Secondary))
 		for i, item := range d.Items {
 			head := fmt.Sprintf(" %d. %.4f  %s", i+1, item.Score, kbTitle(item))
 			if item.Source != "" && item.Source != kbTitle(item) {
@@ -55,7 +55,7 @@ func RenderKB(d KBData, width, maxLines int, theme Theme) string {
 			}
 			lines = append(lines, fit(head, width))
 			if item.Snippet != "" {
-				lines = append(lines, theme.paint(fit("    "+kbTruncate(item.Snippet, 160), width), theme.Muted))
+				lines = append(lines, theme.paint(fit("    "+kbTruncate(item.Snippet, 160), width), theme.Secondary))
 			}
 		}
 	}

@@ -12,6 +12,8 @@ import (
 const (
 	promptCursorMark = "▏"
 	maxGoalRunes     = 8192
+	// PromptPlaceholder is shown while the buffer is empty.
+	PromptPlaceholder = "Send a message…  (Enter to send · Shift+Enter newline)"
 )
 
 // PromptOptions configures the single-line goal prompt shown by the loop
@@ -44,6 +46,9 @@ type PromptModel struct {
 	cursor int
 	width  int
 	height int
+
+	history []string
+	histIdx int
 
 	errText  string
 	done     bool
@@ -112,17 +117,30 @@ func (m *PromptModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 		m.canceled = true
 		return tea.Quit
 	case tea.KeyEnter:
+		// Shift+Enter (reported by bubbletea as alt+enter) inserts a newline
+		// instead of submitting.
+		if msg.Alt {
+			m.insertRunes([]rune{'\n'}, true)
+			return nil
+		}
 		if strings.TrimSpace(string(m.value)) == "" {
 			m.errText = "goal cannot be empty"
 			return nil
 		}
+		value := m.Value()
+		m.pushHistory(value)
 		if m.embedded {
-			value := m.Value()
 			m.reset()
 			return func() tea.Msg { return promptSubmitMsg{Value: value} }
 		}
 		m.done = true
 		return tea.Quit
+	case tea.KeyCtrlJ:
+		m.insertRunes([]rune{'\n'}, true)
+	case tea.KeyUp:
+		m.historyPrev()
+	case tea.KeyDown:
+		m.historyNext()
 	case tea.KeyBackspace:
 		if m.cursor > 0 {
 			m.deleteRange(m.cursor-1, m.cursor)
@@ -150,11 +168,56 @@ func (m *PromptModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 	case tea.KeyCtrlW:
 		m.deleteWord()
 	case tea.KeySpace:
-		m.insertRunes([]rune{' '})
+		m.insertRunes([]rune{' '}, false)
 	case tea.KeyRunes:
-		m.insertRunes(msg.Runes)
+		// A paste may legitimately contain newlines; keep them as-is.
+		m.insertRunes(msg.Runes, msg.Paste)
 	}
 	return nil
+}
+
+func (m *PromptModel) pushHistory(value string) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return
+	}
+	if n := len(m.history); n > 0 && m.history[n-1] == value {
+		m.histIdx = 0
+		return
+	}
+	m.history = append(m.history, value)
+	if len(m.history) > 100 {
+		m.history = m.history[len(m.history)-100:]
+	}
+	m.histIdx = 0
+}
+
+func (m *PromptModel) historyPrev() {
+	if len(m.history) == 0 {
+		return
+	}
+	if m.histIdx < len(m.history) {
+		m.histIdx++
+	}
+	m.setValue(m.history[len(m.history)-m.histIdx])
+}
+
+func (m *PromptModel) historyNext() {
+	if m.histIdx <= 0 {
+		return
+	}
+	m.histIdx--
+	if m.histIdx == 0 {
+		m.setValue("")
+		return
+	}
+	m.setValue(m.history[len(m.history)-m.histIdx])
+}
+
+func (m *PromptModel) setValue(s string) {
+	m.value = []rune(s)
+	m.cursor = len(m.value)
+	m.errText = ""
 }
 
 func (m *PromptModel) reset() {
@@ -165,14 +228,22 @@ func (m *PromptModel) reset() {
 	m.canceled = false
 }
 
-func (m *PromptModel) insertRunes(runes []rune) {
+func (m *PromptModel) insertRunes(runes []rune, multiline bool) {
 	for _, r := range runes {
 		switch r {
-		case '\r', '\n', '\t':
+		case '\r':
+			continue
+		case '\n':
+			if !multiline {
+				r = ' '
+			}
+		case '\t':
 			r = ' '
 		}
 		if r < 0x20 || r == 0x7f {
-			continue
+			if r != '\n' {
+				continue
+			}
 		}
 		if len(m.value) >= maxGoalRunes {
 			break
@@ -195,11 +266,12 @@ func (m *PromptModel) deleteRange(from, to int) {
 }
 
 func (m *PromptModel) deleteWord() {
+	isSpace := func(r rune) bool { return r == ' ' || r == '\n' || r == '\t' }
 	start := m.cursor
-	for start > 0 && m.value[start-1] == ' ' {
+	for start > 0 && isSpace(m.value[start-1]) {
 		start--
 	}
-	for start > 0 && m.value[start-1] != ' ' {
+	for start > 0 && !isSpace(m.value[start-1]) {
 		start--
 	}
 	m.deleteRange(start, m.cursor)
@@ -212,9 +284,9 @@ func (m *PromptModel) View() string {
 	parts := []string{
 		views.RenderLogo(m.noColor),
 		"",
-		"  " + m.title + " · describe the goal for this session (single line).",
+		"  " + m.title + " · describe the goal (Enter to send, Shift+Enter for a new line).",
 		"",
-		views.RenderBox("", m.InputLine(), m.width),
+		views.RenderBoxWithTheme(views.NewTheme(m.noColor), "", m.InputLine(), m.width),
 	}
 	if m.errText != "" {
 		parts = append(parts, "", "  "+m.errText)
@@ -223,33 +295,25 @@ func (m *PromptModel) View() string {
 	return strings.Join(parts, "\n")
 }
 
-func (m *PromptModel) displayLine() string {
-	width := m.width - 8
-	if width < 20 {
-		width = 20
+// InputLine renders the multi-line composer. The cursor mark is inserted at
+// the logical position; every row after the first is indented under the "> ".
+func (m *PromptModel) InputLine() string {
+	if len(m.value) == 0 {
+		return "> " + PromptPlaceholder
 	}
-	start := 0
-	if m.cursor > width-1 {
-		start = m.cursor - (width - 1)
+	runes := make([]rune, 0, len(m.value)+1)
+	runes = append(runes, m.value[:m.cursor]...)
+	runes = append(runes, []rune(promptCursorMark)...)
+	runes = append(runes, m.value[m.cursor:]...)
+	rows := strings.Split(string(runes), "\n")
+	for i, row := range rows {
+		if i == 0 {
+			rows[i] = "> " + row
+		} else {
+			rows[i] = "  " + row
+		}
 	}
-	end := start + width
-	if end > len(m.value) {
-		end = len(m.value)
-	}
-	if start > end {
-		start = end
-	}
-	var b strings.Builder
-	if start > 0 {
-		b.WriteString("…")
-	}
-	b.WriteString(string(m.value[start:m.cursor]))
-	b.WriteString(promptCursorMark)
-	b.WriteString(string(m.value[m.cursor:end]))
-	if end < len(m.value) {
-		b.WriteString("…")
-	}
-	return b.String()
+	return strings.Join(rows, "\n")
 }
 
 // HandleKey forwards a key press from an embedding model to the same input
@@ -259,9 +323,8 @@ func (m *PromptModel) HandleKey(msg tea.KeyMsg) tea.Cmd { return m.handleKey(msg
 // Reset clears the input buffer between session tasks.
 func (m *PromptModel) Reset() { m.reset() }
 
-// InputLine renders the compact one-line composer used inside the session.
-// The leading spaces are gone: the component box supplies its own padding.
-func (m *PromptModel) InputLine() string { return "> " + m.displayLine() }
+// Empty reports whether the composer buffer holds no non-space text.
+func (m *PromptModel) Empty() bool { return strings.TrimSpace(string(m.value)) == "" }
 
 // ErrorText returns the current inline validation error.
 func (m *PromptModel) ErrorText() string { return m.errText }

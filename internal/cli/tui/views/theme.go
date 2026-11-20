@@ -2,28 +2,27 @@ package views
 
 import "github.com/charmbracelet/lipgloss"
 
+// Theme is the whole palette: Primary, Secondary, Border and Err. Every view
+// pulls one of these four styles so the TUI reads as one surface.
 type Theme struct {
 	NoColor bool
 
-	Title  lipgloss.Style
-	Accent lipgloss.Style
-	Muted  lipgloss.Style
-	OK     lipgloss.Style
-	Warn   lipgloss.Style
-	Err    lipgloss.Style
+	Primary   lipgloss.Style
+	Secondary lipgloss.Style
+	Border    lipgloss.Style
+	Err       lipgloss.Style
 }
 
 func NewTheme(noColor bool) Theme {
 	if noColor {
 		return Theme{NoColor: true}
 	}
+	dim := lipgloss.Color("8")
 	return Theme{
-		Title:  lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12")),
-		Accent: lipgloss.NewStyle().Foreground(lipgloss.Color("14")),
-		Muted:  lipgloss.NewStyle().Foreground(lipgloss.Color("8")),
-		OK:     lipgloss.NewStyle().Foreground(lipgloss.Color("10")),
-		Warn:   lipgloss.NewStyle().Foreground(lipgloss.Color("11")),
-		Err:    lipgloss.NewStyle().Foreground(lipgloss.Color("9")),
+		Primary:   lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12")),
+		Secondary: lipgloss.NewStyle().Foreground(dim),
+		Border:    lipgloss.NewStyle().Foreground(dim),
+		Err:       lipgloss.NewStyle().Foreground(lipgloss.Color("9")),
 	}
 }
 

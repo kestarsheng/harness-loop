@@ -35,6 +35,12 @@ func ClampBoxWidth(width int) int {
 // as the first inner row and may be empty. Long body lines are wrapped by
 // lipgloss, so the border never breaks.
 func RenderBox(title, body string, width int) string {
+	return RenderBoxWithTheme(Theme{NoColor: true}, title, body, width)
+}
+
+// RenderBoxWithTheme draws the same rounded box with the theme's dim border.
+// NO_COLOR keeps the glyphs and drops only the colour.
+func RenderBoxWithTheme(theme Theme, title, body string, width int) string {
 	outer := ClampBoxWidth(width)
 	rows := make([]string, 0, 2)
 	if t := strings.TrimSpace(title); t != "" {
@@ -50,5 +56,10 @@ func RenderBox(title, body string, width int) string {
 		Border(lipgloss.RoundedBorder()).
 		Padding(0, 1).
 		Width(outer - boxBorder)
+	if !theme.NoColor {
+		if color := theme.Border.GetForeground(); color != nil {
+			style = style.BorderForeground(color)
+		}
+	}
 	return style.Render(strings.Join(rows, "\n"))
 }

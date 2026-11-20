@@ -4,7 +4,7 @@ import "strings"
 
 func RenderHelp(theme Theme) string {
 	lines := []string{
-		theme.paint("Keys", theme.Title),
+		theme.paint("Keys", theme.Primary),
 		" q    quit the TUI",
 		" a    abort the running task (idempotent)",
 		" l    toggle the full event log",
@@ -32,7 +32,7 @@ func RenderHelp(theme Theme) string {
 
 func RenderMemory(theme Theme) string {
 	lines := []string{
-		theme.paint("Memory", theme.Title),
+		theme.paint("Memory", theme.Primary),
 		"",
 		" The memory view is not wired in this build: the CLI memory commands belong",
 		" to T-P1-02 and are outside T-P1-27. Stage memory injection and degradation",
@@ -57,5 +57,5 @@ func RenderFooter(mode string, width int, theme Theme) string {
 	default:
 		text = " q quit   a abort   l logs   s subtasks   x models   h health   c artifacts   k knowledge   ? help"
 	}
-	return theme.paint(fit(text, width), theme.Muted)
+	return theme.paint(fit(text, width), theme.Secondary)
 }

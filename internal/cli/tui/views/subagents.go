@@ -72,15 +72,15 @@ func subtaskTone(status string) string {
 func paintTone(theme Theme, tone, s string) string {
 	switch tone {
 	case "ok":
-		return theme.paint(s, theme.OK)
+		return theme.paint(s, theme.Primary)
 	case "err":
 		return theme.paint(s, theme.Err)
 	case "accent":
-		return theme.paint(s, theme.Accent)
+		return theme.paint(s, theme.Primary)
 	case "warn":
-		return theme.paint(s, theme.Warn)
+		return theme.paint(s, theme.Secondary)
 	default:
-		return theme.paint(s, theme.Muted)
+		return theme.paint(s, theme.Secondary)
 	}
 }
 
@@ -144,12 +144,12 @@ func RenderSubtasks(d SubagentData, width, maxLines int, theme Theme) string {
 	accepted, running, failed, queued := subtaskCounts(d.Subtasks)
 	title := fmt.Sprintf("Subtasks · %d nodes · %d accepted · %d running · %d failed · %d queued",
 		len(d.Subtasks), accepted, running, failed, queued)
-	lines := []string{theme.paint(title, theme.Title)}
+	lines := []string{theme.paint(title, theme.Primary)}
 	if d.Error != "" {
 		lines = append(lines, theme.paint(" "+d.Error, theme.Err))
 	}
 	if len(d.Subtasks) == 0 {
-		lines = append(lines, theme.paint(" no subtasks recorded yet (waiting for subtask.plan_created)", theme.Muted))
+		lines = append(lines, theme.paint(" no subtasks recorded yet (waiting for subtask.plan_created)", theme.Secondary))
 		return strings.Join(limitLines(lines, maxLines), "\n")
 	}
 	lines = append(lines, " DAG "+progressBar(accepted, len(d.Subtasks), 24))
@@ -195,12 +195,12 @@ func RenderSubtasks(d SubagentData, width, maxLines int, theme Theme) string {
 }
 
 func RenderHandoffs(d SubagentData, width, maxLines int, theme Theme) string {
-	lines := []string{theme.paint(fmt.Sprintf("Handoffs · %d links", len(d.Handoffs)), theme.Title)}
+	lines := []string{theme.paint(fmt.Sprintf("Handoffs · %d links", len(d.Handoffs)), theme.Primary)}
 	if d.Error != "" {
 		lines = append(lines, theme.paint(" "+d.Error, theme.Err))
 	}
 	if len(d.Handoffs) == 0 {
-		lines = append(lines, theme.paint(" no handoff recorded yet", theme.Muted))
+		lines = append(lines, theme.paint(" no handoff recorded yet", theme.Secondary))
 		return strings.Join(limitLines(lines, maxLines), "\n")
 	}
 	for _, link := range d.Handoffs {
@@ -247,7 +247,7 @@ func CountArtifacts(d SubagentData) int {
 
 func RenderArtifacts(d SubagentData, width, maxLines int, theme Theme) string {
 	title := fmt.Sprintf("Artifacts & checkpoints · %d artifacts · %d checkpoints", CountArtifacts(d), len(d.Checkpoints))
-	lines := []string{theme.paint(title, theme.Title)}
+	lines := []string{theme.paint(title, theme.Primary)}
 	if d.Error != "" {
 		lines = append(lines, theme.paint(" "+d.Error, theme.Err))
 	}
@@ -259,12 +259,12 @@ func RenderArtifacts(d SubagentData, width, maxLines int, theme Theme) string {
 		}
 	}
 	if len(artifactLines) == 0 {
-		lines = append(lines, theme.paint(" no artifacts recorded yet", theme.Muted))
+		lines = append(lines, theme.paint(" no artifacts recorded yet", theme.Secondary))
 	} else {
 		lines = append(lines, artifactLines...)
 	}
 	if len(d.Checkpoints) == 0 {
-		lines = append(lines, theme.paint(" no checkpoints recorded yet", theme.Muted))
+		lines = append(lines, theme.paint(" no checkpoints recorded yet", theme.Secondary))
 	} else {
 		for _, cp := range d.Checkpoints {
 			text := fmt.Sprintf(" checkpoint %s %s", shortID(cp.ID), cp.Kind)
@@ -283,7 +283,7 @@ func RenderArtifacts(d SubagentData, width, maxLines int, theme Theme) string {
 			if !cp.CreatedAt.IsZero() {
 				text += " " + cp.CreatedAt.Format("15:04:05")
 			}
-			lines = append(lines, theme.paint(fit(text, width), theme.Muted))
+			lines = append(lines, theme.paint(fit(text, width), theme.Secondary))
 		}
 	}
 	return strings.Join(limitLines(lines, maxLines), "\n")

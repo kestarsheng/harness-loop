@@ -62,7 +62,7 @@ func TestMultiTerminalSameBoardURL(t *testing.T) {
 		if strings.Contains(view, first) {
 			t.Fatalf("terminal %s must not render the board URL bar:\n%s", taskID, view)
 		}
-		if !strings.Contains(view, "harness loop") {
+		if !hasWordmark(view) {
 			t.Fatalf("terminal %s must open with the wordmark:\n%s", taskID, view)
 		}
 	}

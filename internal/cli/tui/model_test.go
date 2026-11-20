@@ -30,7 +30,7 @@ func TestTUIModel(t *testing.T) {
 
 	m := newModel()
 	view := m.View()
-	for _, want := range []string{"Harness Loop", "task 7f3a1b2c", "b 方案设计", "attempt #1", "elapsed 04:12", "tokens 38.2k/120.0k", "q quit"} {
+	for _, want := range []string{"Harness Loop", "task 7f3a1b2c", "b 方案设计", "attempt #1", "elapsed 04:12", "tokens 38.2k/120.0k", "? help"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("initial view missing %q:\n%s", want, view)
 		}
@@ -180,7 +180,7 @@ func TestTUIModelWebURLAndOpenKey(t *testing.T) {
 	if view := m.View(); strings.Contains(view, url) {
 		t.Fatalf("the monitor URL bar must be gone (T-P2-42):\n%s", view)
 	}
-	if view := m.View(); !strings.Contains(view, "harness loop") {
+	if view := m.View(); !hasWordmark(view) {
 		t.Fatalf("the wordmark must open the view:\n%s", view)
 	}
 

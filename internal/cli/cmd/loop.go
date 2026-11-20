@@ -527,7 +527,7 @@ func newAgentChatFunc(client *harnessclient.Client, target string, dialErr error
 			defer close(ch)
 			err := client.ExecuteStream(callCtx, req, func(c *agentpb.ExecuteStreamChunk) error {
 				select {
-				case ch <- tui.ChatChunk{Type: c.GetType(), Content: c.GetContent(), Agent: c.GetCurrentAgent()}:
+				case ch <- chatChunkFromProto(c):
 					return nil
 				case <-callCtx.Done():
 					return callCtx.Err()
@@ -542,6 +542,42 @@ func newAgentChatFunc(client *harnessclient.Client, target string, dialErr error
 		}()
 		return ch, nil
 	}
+}
+
+// chatChunkFromProto maps one agent-service chunk onto the TUI's flat chunk,
+// passing thinking, tool and usage metadata through so the conversation can
+// render reasoning and tool rows instead of dropping them.
+func chatChunkFromProto(c *agentpb.ExecuteStreamChunk) tui.ChatChunk {
+	cc := tui.ChatChunk{
+		Type:    c.GetType(),
+		Content: c.GetContent(),
+		Agent:   c.GetCurrentAgent(),
+	}
+	if call := c.GetToolCall(); call != nil {
+		cc.ToolName = call.GetName()
+		cc.ToolArgs = call.GetArguments()
+	}
+	if step := c.GetStep(); step != nil {
+		cc.ToolResult = step.GetResult()
+		cc.Thinking = step.GetThought()
+		cc.Usage = int64(step.GetTokensUsed())
+	}
+	if c.GetType() == "think" {
+		if cc.Thinking == "" {
+			cc.Thinking = c.GetContent()
+		}
+		if name := c.GetStep().GetAction(); name != "" && cc.ToolName == "" {
+			cc.ToolName = name
+		}
+	}
+	if c.GetType() == "tool_start" && cc.ToolName == "" {
+		cc.ToolName = c.GetStep().GetAction()
+	}
+	if c.GetType() == "tool_result" && cc.ToolName == "" {
+		cc.ToolName = c.GetStep().GetAction()
+		cc.ToolArgs = c.GetStep().GetArguments()
+	}
+	return cc
 }
 
 // tenantCallContext mirrors callContext for contexts built inside the TUI.
