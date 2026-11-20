@@ -5,15 +5,17 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"agent-platform/internal/cli/tui/views"
 )
 
 const (
-	promptCursorMark = "▏"
+	promptCursorMark = "▍"
+	promptPrefix     = "> "
 	maxGoalRunes     = 8192
-	// PromptPlaceholder is shown while the buffer is empty.
-	PromptPlaceholder = "Send a message…  (Enter to send · Shift+Enter newline)"
+	// PromptHint is rendered above the input box, never inside the buffer.
+	PromptHint = "Enter to send · Shift+Enter newline · /task <goal> for the loop"
 )
 
 // PromptOptions configures the single-line goal prompt shown by the loop
@@ -50,9 +52,10 @@ type PromptModel struct {
 	history []string
 	histIdx int
 
-	errText  string
-	done     bool
-	canceled bool
+	errText      string
+	done         bool
+	canceled     bool
+	cursorHidden bool
 }
 
 // NewPromptModel builds the goal prompt model. webURL and opts.Hyperlink are
@@ -299,16 +302,21 @@ func (m *PromptModel) View() string {
 // the logical position; every row after the first is indented under the "> ".
 func (m *PromptModel) InputLine() string {
 	if len(m.value) == 0 {
-		return "> " + PromptPlaceholder
+		if m.cursorHidden {
+			return promptPrefix
+		}
+		return promptPrefix + promptCursorMark
 	}
 	runes := make([]rune, 0, len(m.value)+1)
 	runes = append(runes, m.value[:m.cursor]...)
-	runes = append(runes, []rune(promptCursorMark)...)
+	if !m.cursorHidden {
+		runes = append(runes, []rune(promptCursorMark)...)
+	}
 	runes = append(runes, m.value[m.cursor:]...)
 	rows := strings.Split(string(runes), "\n")
 	for i, row := range rows {
 		if i == 0 {
-			rows[i] = "> " + row
+			rows[i] = promptPrefix + row
 		} else {
 			rows[i] = "  " + row
 		}
@@ -316,9 +324,57 @@ func (m *PromptModel) InputLine() string {
 	return strings.Join(rows, "\n")
 }
 
+// SetCursorByCell moves the caret from a click. row is the visual row inside
+// the input block (0 is the row with the "> " prefix) and col the display
+// column measured from the start of the prefix; contentWidth is the composer's
+// content width so wrapped rows are counted correctly. Widths come from the
+// rendered cells, so a CJK character or emoji counts as two columns and the
+// caret lands where the user actually clicked.
+func (m *PromptModel) SetCursorByCell(row, col, contentWidth int) {
+	if len(m.value) == 0 {
+		m.cursor = 0
+		return
+	}
+	if contentWidth <= 0 {
+		contentWidth = len(m.value) + 1
+	}
+	if col < len(promptPrefix) {
+		col = 0
+	} else {
+		col -= len(promptPrefix)
+	}
+	if row < 0 {
+		row = 0
+	}
+	target := row*contentWidth + col
+
+	cells, idx := 0, 0
+	for idx < len(m.value) {
+		if m.value[idx] == '\n' {
+			// A hard newline always starts a new display row.
+			cells = (cells/contentWidth + 1) * contentWidth
+			idx++
+			continue
+		}
+		w := lipgloss.Width(string(m.value[idx]))
+		if w <= 0 {
+			w = 1
+		}
+		if cells+w > target {
+			break
+		}
+		cells += w
+		idx++
+	}
+	m.cursor = idx
+}
+
 // HandleKey forwards a key press from an embedding model to the same input
 // implementation, returning whatever command the edit produced.
 func (m *PromptModel) HandleKey(msg tea.KeyMsg) tea.Cmd { return m.handleKey(msg) }
+
+// SetCursorVisible toggles the caret mark without touching the buffer.
+func (m *PromptModel) SetCursorVisible(visible bool) { m.cursorHidden = !visible }
 
 // Reset clears the input buffer between session tasks.
 func (m *PromptModel) Reset() { m.reset() }

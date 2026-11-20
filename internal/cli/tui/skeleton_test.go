@@ -10,7 +10,7 @@ import (
 
 // hasWordmark accepts either the single-line wordmark or the wide banner.
 func hasWordmark(view string) bool {
-	return strings.Contains(view, "harness loop") || strings.Contains(view, "█  █ ████")
+	return strings.Contains(view, "harness loop") || strings.Contains(view, "| |__")
 }
 
 func sizedSessionModel(t *testing.T, width, height int, opts Options) *Model {
@@ -31,17 +31,19 @@ func TestViewFixedSkeletonFillsTerminal(t *testing.T) {
 		if len(lines) != size[1] {
 			t.Fatalf("%dx%d view has %d lines, want %d", size[0], size[1], len(lines), size[1])
 		}
-		if !strings.Contains(lines[len(lines)-1], "? help") {
-			t.Fatalf("%dx%d status bar is not the last line: %q", size[0], size[1], lines[len(lines)-1])
+		// T-P2-49: the input line is the bottom row; the status bar moved above
+		// the hint and the composer.
+		if !strings.Contains(lines[len(lines)-1], promptPrefix) {
+			t.Fatalf("%dx%d input line is not the last row: %q", size[0], size[1], lines[len(lines)-1])
 		}
 		composer := false
 		for _, line := range lines[:len(lines)-1] {
-			if strings.Contains(line, "╰") && strings.Contains(line, "╯") {
+			if strings.Contains(line, "╭") {
 				composer = true
 			}
 		}
 		if !composer {
-			t.Fatalf("%dx%d composer box missing above the status bar", size[0], size[1])
+			t.Fatalf("%dx%d composer frame missing above the input", size[0], size[1])
 		}
 	}
 }
@@ -57,14 +59,20 @@ func TestStatusBarShowsModelCwdBranchTokens(t *testing.T) {
 
 func TestStatusBarDropsSegmentsOnNarrowTerminal(t *testing.T) {
 	m := sizedSessionModel(t, 30, 20, Options{NoColor: true, WorkDir: "/a/very/long/path/to/the/workspace", GitBranch: "feature/long-branch", ModelName: "model"})
-	last := ""
-	lines := strings.Split(m.View(), "\n")
-	last = lines[len(lines)-1]
-	if lipgloss.Width(last) > 30 {
-		t.Fatalf("status bar overflows narrow terminal: %q", last)
+	status := ""
+	for _, line := range strings.Split(m.View(), "\n") {
+		if strings.Contains(line, "? help") {
+			status = line
+		}
 	}
-	if !strings.Contains(last, "? help") {
-		t.Fatalf("status bar must keep the help hint: %q", last)
+	if status == "" {
+		t.Fatal("status bar missing")
+	}
+	if lipgloss.Width(status) > 30 {
+		t.Fatalf("status bar overflows narrow terminal: %q", status)
+	}
+	if !strings.Contains(status, "? help") {
+		t.Fatalf("status bar must keep the help hint: %q", status)
 	}
 }
 
@@ -83,8 +91,11 @@ func TestViewKeepsComposerWhenPanelOpen(t *testing.T) {
 	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
 	m = next.(*Model)
 	lines := strings.Split(m.View(), "\n")
-	if !strings.Contains(lines[len(lines)-1], "? help") {
-		t.Fatalf("status bar must survive the help panel: %q", lines[len(lines)-1])
+	if !strings.Contains(lines[len(lines)-1], promptPrefix) {
+		t.Fatalf("input must stay the last row under the help panel: %q", lines[len(lines)-1])
+	}
+	if !strings.Contains(m.View(), "? help") {
+		t.Fatal("status bar must survive the help panel")
 	}
 	if !strings.Contains(m.View(), "Keys") {
 		t.Fatal("help layer missing")

@@ -75,7 +75,9 @@ func TestSessionTerminalReturnsToInputAndAcceptsSecondTask(t *testing.T) {
 	next, quit := completeTask(t, m, "task-1")
 	m = next.(*Model)
 	if quit != nil {
-		t.Fatalf("terminal task must not quit a resident session, got %T", quit())
+		if _, ok := quit().(tea.QuitMsg); ok {
+			t.Fatal("terminal task must not quit a resident session")
+		}
 	}
 	if !m.awaitingInput {
 		t.Fatal("terminal task must return to the input box")
@@ -135,25 +137,34 @@ func TestSessionExitOnCompleteKeepsLegacyBehaviour(t *testing.T) {
 	}
 }
 
+// TestSessionComposerUsesComponentBox checks the T-P2-49 composer frame: the
+// focused composer is open (top rule only) and the input row sits right under
+// it, while the hint line stays above the rule.
 func TestSessionComposerUsesComponentBox(t *testing.T) {
 	m := sessionModel(t, SessionConfig{})
 	view := m.View()
-	for _, want := range []string{"╭", "╮", "╰", "╯", "Enter to send"} {
+	for _, want := range []string{"╭", "╮", "Enter to send", promptPrefix} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("session screen missing %q:\n%s", want, view)
 		}
 	}
+	if strings.Contains(view, "╰") {
+		t.Fatalf("the focused composer must stay open:\n%s", view)
+	}
 	if !hasWordmark(view) {
 		t.Fatalf("session screen missing the wordmark:\n%s", view)
 	}
-	boxed := false
-	for _, line := range strings.Split(view, "\n") {
-		if strings.Contains(line, "│") && strings.Contains(line, "> ") {
-			boxed = true
+	ruleAt, inputAt := -1, -1
+	for i, line := range strings.Split(view, "\n") {
+		if strings.Contains(line, "╭") {
+			ruleAt = i
+		}
+		if strings.Contains(line, promptPrefix) {
+			inputAt = i
 		}
 	}
-	if !boxed {
-		t.Fatalf("the session composer must sit inside the component box:\n%s", view)
+	if ruleAt < 0 || inputAt != ruleAt+1 {
+		t.Fatalf("input must sit directly under the composer rule: rule=%d input=%d", ruleAt, inputAt)
 	}
 }
 
