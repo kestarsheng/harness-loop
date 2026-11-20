@@ -1276,7 +1276,7 @@ func (m *Model) composerBlock(width int) []string {
 		return nil
 	}
 	lines := []string{""}
-	lines = append(lines, splitLines(views.RenderBox("", m.input.InputLine(), width))...)
+	lines = append(lines, splitLines(views.RenderBoxWithTheme(m.theme, "", m.input.InputLine(), width))...)
 	if errText := m.input.ErrorText(); errText != "" {
 		lines = append(lines, "  "+errText)
 	}
@@ -1305,11 +1305,11 @@ func (m *Model) statusBar(width int) string {
 	for len(segments) > 0 {
 		text := prefix + strings.Join(segments, " · ")
 		if width <= 0 || len([]rune(text))+len([]rune(tail)) <= width {
-			return m.theme.Muted.Render(text + tail)
+			return m.theme.Secondary.Render(text + tail)
 		}
 		segments = segments[:len(segments)-1]
 	}
-	return m.theme.Muted.Render(prefix + "? help")
+	return m.theme.Secondary.Render(prefix + "? help")
 }
 
 const spinnerFrames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"

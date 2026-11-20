@@ -1,6 +1,10 @@
 package views
 
-import "github.com/charmbracelet/lipgloss"
+import (
+	"strings"
+
+	"github.com/charmbracelet/lipgloss"
+)
 
 const (
 	// LogoText is the product wordmark shown at the top of the resident TUI.
@@ -31,11 +35,26 @@ func RenderLogo(noColor bool) string {
 // the single-line wordmark.
 const WordmarkWidth = 60
 
+// wordmarkArt is the "harness loop" banner. Every row is 56 columns wide, so
+// the banner still fits at WordmarkWidth.
+var wordmarkArt = []string{
+	"█  █ ████ ████ █  █ ████ ████ ████   ██   ████ ████ ████",
+	"█  █ █  █ █  █ ██ █ ██   ██   ██     ██   █  █ █  █ █  █",
+	"████ ████ ████ █ ██ ████ ████ ████   ██   █  █ █  █ ████",
+	"█  █ █  █ █  █ █  █ ████ ████ ████   ██   ████ ████ █   ",
+}
+
 // RenderWordmark renders the width-aware wordmark. Narrow terminals get the
-// single bold line; wide ones get the character-art banner.
+// single bold line; wide ones get the character-art banner. NO_COLOR keeps the
+// glyphs but drops the colour.
 func RenderWordmark(width int, noColor bool) string {
 	if width > 0 && width < WordmarkWidth {
 		return RenderLogo(noColor)
 	}
-	return RenderLogo(noColor)
+	style := LogoStyle(noColor)
+	rows := make([]string, 0, len(wordmarkArt))
+	for _, row := range wordmarkArt {
+		rows = append(rows, style.Render(row))
+	}
+	return strings.Join(rows, "\n")
 }

@@ -117,6 +117,24 @@ func TestCursorBlinks(t *testing.T) {
 	}
 }
 
+func TestFinalReRendersMarkdown(t *testing.T) {
+	fake := &fakeChat{}
+	m := sessionModel(t, SessionConfig{Chat: fake.fn})
+	m, wait := submitChat(t, m, "hi")
+	m, wait = pushChunk(t, m, wait, ChatChunk{Type: "token", Content: "**bold**"})
+	if !strings.Contains(m.View(), "**bold**") {
+		t.Fatalf("streaming tokens must stay raw markdown:\n%s", m.View())
+	}
+	m, _ = pushChunk(t, m, wait, ChatChunk{Type: "final", Content: "**bold**"})
+	view := m.View()
+	if strings.Contains(view, "**bold**") {
+		t.Fatalf("final reply must be re-rendered as markdown:\n%s", view)
+	}
+	if !strings.Contains(view, "bold") {
+		t.Fatalf("markdown text lost:\n%s", view)
+	}
+}
+
 func TestChatChunkUsageFeedsStatusBar(t *testing.T) {
 	fake := &fakeChat{}
 	m := sessionModel(t, SessionConfig{Chat: fake.fn})

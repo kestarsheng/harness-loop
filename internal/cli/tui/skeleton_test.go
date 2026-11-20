@@ -8,6 +8,11 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+// hasWordmark accepts either the single-line wordmark or the wide banner.
+func hasWordmark(view string) bool {
+	return strings.Contains(view, "harness loop") || strings.Contains(view, "█  █ ████")
+}
+
 func sizedSessionModel(t *testing.T, width, height int, opts Options) *Model {
 	t.Helper()
 	cfg := SessionConfig{}

@@ -15,10 +15,10 @@ type StreamLine struct {
 
 func RenderStream(lines []StreamLine, width, maxLines int, theme Theme) string {
 	var b strings.Builder
-	b.WriteString(theme.paint("Agent Output", theme.Title))
+	b.WriteString(theme.paint("Agent Output", theme.Primary))
 	b.WriteString("\n")
 	if len(lines) == 0 {
-		b.WriteString(theme.paint(" waiting for agent output…", theme.Muted))
+		b.WriteString(theme.paint(" waiting for agent output…", theme.Secondary))
 		return b.String()
 	}
 	start := 0

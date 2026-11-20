@@ -57,10 +57,10 @@ func RenderLogs(lines []EventLine, width, maxLines int, theme Theme) string {
 
 func renderEventLines(lines []EventLine, width, maxLines int, theme Theme, title string) string {
 	var b strings.Builder
-	b.WriteString(theme.paint(title, theme.Title))
+	b.WriteString(theme.paint(title, theme.Primary))
 	b.WriteString("\n")
 	if len(lines) == 0 {
-		b.WriteString(theme.paint(" waiting for events…", theme.Muted))
+		b.WriteString(theme.paint(" waiting for events…", theme.Secondary))
 		return b.String()
 	}
 	start := 0
@@ -71,7 +71,7 @@ func renderEventLines(lines []EventLine, width, maxLines int, theme Theme, title
 		text := line.render()
 		switch {
 		case line.Kind == "evidence" || line.Kind == "failed_criteria":
-			text = theme.paint(text, theme.Warn)
+			text = theme.paint(text, theme.Secondary)
 		case line.Error || strings.HasPrefix(line.Severity, "error"):
 			text = theme.paint(text, theme.Err)
 		}

@@ -138,10 +138,13 @@ func TestSessionExitOnCompleteKeepsLegacyBehaviour(t *testing.T) {
 func TestSessionComposerUsesComponentBox(t *testing.T) {
 	m := sessionModel(t, SessionConfig{})
 	view := m.View()
-	for _, want := range []string{"harness loop", "╭", "╮", "╰", "╯", "Enter to send"} {
+	for _, want := range []string{"╭", "╮", "╰", "╯", "Enter to send"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("session screen missing %q:\n%s", want, view)
 		}
+	}
+	if !hasWordmark(view) {
+		t.Fatalf("session screen missing the wordmark:\n%s", view)
 	}
 	boxed := false
 	for _, line := range strings.Split(view, "\n") {

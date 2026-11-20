@@ -129,7 +129,7 @@ func healthTone(level string) string {
 
 func RenderHealth(d HealthData, width, maxLines int, theme Theme) string {
 	level, reasons := HealthLevel(d)
-	lines := []string{theme.paint("Health · "+level, theme.Title)}
+	lines := []string{theme.paint("Health · "+level, theme.Primary)}
 	if d.Error != "" {
 		lines = append(lines, theme.paint(" "+d.Error, theme.Err))
 	}
@@ -159,9 +159,9 @@ func RenderHealth(d HealthData, width, maxLines int, theme Theme) string {
 	security, tool, approval, other := d.incidentCounts()
 	drawerTitle := fmt.Sprintf("Incident drawer · %d (security=%d tool=%d approval=%d other=%d)",
 		len(d.Incidents), security, tool, approval, other)
-	lines = append(lines, theme.paint(drawerTitle, theme.Title))
+	lines = append(lines, theme.paint(drawerTitle, theme.Primary))
 	if len(d.Incidents) == 0 {
-		lines = append(lines, theme.paint(" no incidents recorded (security.violation / tool.denied / approval.*)", theme.Muted))
+		lines = append(lines, theme.paint(" no incidents recorded (security.violation / tool.denied / approval.*)", theme.Secondary))
 	} else {
 		for i := len(d.Incidents) - 1; i >= 0; i-- {
 			item := d.Incidents[i]

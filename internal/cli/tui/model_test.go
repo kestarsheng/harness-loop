@@ -180,7 +180,7 @@ func TestTUIModelWebURLAndOpenKey(t *testing.T) {
 	if view := m.View(); strings.Contains(view, url) {
 		t.Fatalf("the monitor URL bar must be gone (T-P2-42):\n%s", view)
 	}
-	if view := m.View(); !strings.Contains(view, "harness loop") {
+	if view := m.View(); !hasWordmark(view) {
 		t.Fatalf("the wordmark must open the view:\n%s", view)
 	}
 

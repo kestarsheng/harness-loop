@@ -286,7 +286,7 @@ func (m *PromptModel) View() string {
 		"",
 		"  " + m.title + " · describe the goal (Enter to send, Shift+Enter for a new line).",
 		"",
-		views.RenderBox("", m.InputLine(), m.width),
+		views.RenderBoxWithTheme(views.NewTheme(m.noColor), "", m.InputLine(), m.width),
 	}
 	if m.errText != "" {
 		parts = append(parts, "", "  "+m.errText)
