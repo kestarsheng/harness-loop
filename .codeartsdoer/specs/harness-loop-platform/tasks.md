@@ -1213,8 +1213,8 @@
 | 关联需求 | REQ-123~141；design 4.13 |
 | 依赖 | T-P2-18 |
 | 涉及文件 | [M] `services/harnessloop-service/internal/service/runtime.go`（提示词常量）、[M] `pkg/config/harness_loop/models.yaml`（阶段模型覆盖） |
-| 实施要点 | 1) 提示词改为 3 节点示例 + 明确拆分判据，不再给单节点示例；2) b 阶段指定 `qwen3.7-max`；3) 多节点才算合格，fallback 单节点只能算降级；4) 与 T-P2-24 无文件交集，可并行。 |
-| 验收标准 | 真实任务 `subtask_count>=3`、`edge_count>0`、事件含多个 `subtask.started` 且 `accepted>=3`；DB 状态与事件一致。 |
+| 实施要点 | 1) 提示词改为 3 节点示例 + 明确拆分判据，不再给单节点示例；2) b 阶段指定 `qwen3.7-max`；3) 多节点才算合格，fallback 单节点只能算降级；4) **c 阶段进入时先 dispatch 子任务（或把 c 阶段 agent 限制为编排/汇总，不执行原始 goal），再等待子任务运行**；当前顺序是 `runStage(c) → attempt.Finish → DispatchCStage`，c agent 卡住时子任务永远 pending；5) d 阶段必须等子任务终态再聚合；6) 验收/演示显式开 `harness.loop.orchestrator.enabled`（租户规则或 `dev up --demo`），不得把全局默认改成 true 冒充“零配置可用”。 |
+| 验收标准 | 真实任务 `subtask_count>=3`、`edge_count>0`、事件含多个 `subtask.started` 且 `accepted>=3`；c 阶段在子任务 dispatch 后不再空转；DB 状态与事件一致；`orchestrator=on` 在当前租户可见，默认关闭语义不变。 |
 | 复杂度 | S（0.5 天） |
 
 ### T-P2-24 runtime 迁 openai-go
