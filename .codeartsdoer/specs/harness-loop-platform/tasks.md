@@ -1571,7 +1571,20 @@
 | 验收标准 | 真实 TTY：长对话右侧出现滚动条；滚轮上下可回看；PgUp/PgDn/End 有效；流式时默认贴底，上滚后不被强制拉回并出现新内容提示，按 End 回底恢复跟随；`NO_COLOR` 仍有滚动条字符；窄终端不溢出。命令：`go test ./internal/cli/... -count=1`、`go build -p 1 ./...`、depcheck 0；composer/chat/skeleton/stream/markdown 测试不回退。无 TTY 时不得宣称已目视。 |
 | 复杂度 | S~M（1 天） |
 
-> P2 合计：实施 52 个 + 测试 5 个 = **57 个任务**。
+### T-P2-53 滚动条滑块上限 2 行与拖拽/轨道点击
+
+| 字段 | 内容 |
+|---|---|
+| 目标 | 滚动条滑块（thumb）长度上限固定为 2 行（轨道保留）；支持鼠标点击轨道跳转、按住滑块上下拖动滚动；滚轮与键盘行为不变。 |
+| 关联需求 | REQ-171~175；用户 2026-11-21 实测反馈；T-P2-52 |
+| 依赖 | T-P2-52（已合入 13877e8） |
+| 涉及文件 | [M] `internal/cli/tui/views/chat.go`、[M] `internal/cli/tui/model.go`、[M] 对应 `_test.go` |
+| 实施要点 | 1) `chatScrollBar` 的 `size` 由 `visible*visible/total` 改为 `min(2, max(1, visible*visible/total))`，轨道仍占整列；2) 导出 `ScrollBarThumb(total,visible,offset) (top,size)` 供 Model 命中检测，渲染与命中同源；3) 新增 `Model.bodyRegion()`（body top = logo 行数，height = `bodyRows`）；4) `handleMouse` 在滚动条列（`X == width-1`、Y 在 body 区）处理：Press 左键 → 记录 `scrollBarDrag` 并按 Y 跳转；Motion 且拖动中 → 按 Y 更新 offset；Release → 结束；5) 映射用「thumb 中心跟随」：`fromTop = clamp(y-bodyTop-size/2, 0, visible-size)`，`offset = maxOffset - round(fromTop*maxOffset/(visible-size))`，clamp 到 `[0,chatMaxScroll]`；6) 点击/拖动回到底部时清 `↓ new`；7) 滚轮、PgUp/PgDn/End、composer 点击逻辑不变。 |
+| 技术约束 | 1) 输入行仍是 View 最后一行；2) 不新增依赖、`go.mod/go.sum` 零改动；3) `visible<=size` 时不动（无滚动空间）；4) 滚动条只在 chat pane 生效，面板打开时不抢事件；5) 禁止 sed/awk/python 批量替换中文/…/—。 |
+| 验收标准 | 真实 TTY：滑块最长 2 行、轨道保留；点击轨道跳转到对应位置；按住滑块上下拖动可连续滚动；滚轮/PgUp/PgDn/End 不变；输入行仍是最后一行。命令：`go test ./internal/cli/... -count=1`、`go build -p 1 ./...`、depcheck 0；T-P2-52 的 scroll/chat/composer 测试不回退。无 TTY 时不得宣称已目视。 |
+| 复杂度 | S（0.5 天） |
+
+> P2 合计：实施 53 个 + 测试 5 个 = **58 个任务**。
 
 ---
 
@@ -1794,6 +1807,7 @@ flowchart LR
     P49 --> P50
     P50 --> P51
     P51 --> P52
+    P52 --> P53
     P45 --> P48
     P01 --> PTT3
     P09 --> PTT4
