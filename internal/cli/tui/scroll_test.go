@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"agent-platform/internal/cli/tui/views"
 )
 
 // chatScrollModel builds a resident session whose transcript overflows the
@@ -256,5 +258,55 @@ func TestScrollIsIgnoredOutsideTheChatPane(t *testing.T) {
 	m = pressKey(t, m, tea.KeyPgUp)
 	if m.chatScroll != 0 {
 		t.Fatalf("a panel above the chat moved the transcript: offset %d", m.chatScroll)
+	}
+}
+
+func TestScrollBarThumbIsCappedAtTwoRows(t *testing.T) {
+	for _, tc := range []struct{ total, visible int }{
+		{100, 20}, {22, 20}, {1000, 40}, {60, 30},
+	} {
+		_, size := views.ScrollBarThumb(tc.total, tc.visible, 0)
+		if size > 2 {
+			t.Fatalf("total=%d visible=%d thumb=%d, want <=2", tc.total, tc.visible, size)
+		}
+		if size < 1 {
+			t.Fatalf("total=%d visible=%d thumb=%d, want >=1", tc.total, tc.visible, size)
+		}
+	}
+	if _, size := views.ScrollBarThumb(10, 20, 0); size != 20 {
+		t.Fatalf("no-overflow thumb = %d, want the whole track", size)
+	}
+}
+
+func TestScrollBarClickAndDrag(t *testing.T) {
+	m := chatScrollModel(t, 120)
+	width := m.viewWidth()
+	top, height := m.bodyRegion()
+	if m.chatTotal <= height {
+		t.Fatalf("fixture must overflow: total=%d height=%d", m.chatTotal, height)
+	}
+	maxOff := m.chatMaxScroll()
+
+	// Press near the top of the track jumps to the oldest row.
+	next, _ := m.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: width - 1, Y: top + 1})
+	m = next.(*Model)
+	if m.chatScroll != maxOff {
+		t.Fatalf("track click at top: offset=%d, want %d", m.chatScroll, maxOff)
+	}
+
+	// Drag to the bottom row follows the pointer to the newest row.
+	next, _ = m.Update(tea.MouseMsg{Action: tea.MouseActionMotion, Button: tea.MouseButtonLeft, X: width - 1, Y: top + height - 1})
+	m = next.(*Model)
+	if m.chatScroll != 0 {
+		t.Fatalf("drag to bottom: offset=%d, want 0", m.chatScroll)
+	}
+
+	// Release ends the drag; later motion must not move the window.
+	next, _ = m.Update(tea.MouseMsg{Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft, X: width - 1, Y: top + height - 1})
+	m = next.(*Model)
+	next, _ = m.Update(tea.MouseMsg{Action: tea.MouseActionMotion, Button: tea.MouseButtonLeft, X: width - 1, Y: top + 1})
+	m = next.(*Model)
+	if m.chatScroll != 0 {
+		t.Fatalf("motion after release moved offset to %d", m.chatScroll)
 	}
 }

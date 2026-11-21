@@ -266,6 +266,18 @@ func chatMaxOffset(total, visible int) int {
 // transcript that has scrolled past the top, so offset=0 parks it at the
 // bottom and the clamp ceiling parks it at the top.
 func chatScrollBar(total, visible, offset int) (top, size int) {
+	return ScrollBarThumb(total, visible, offset)
+}
+
+// scrollThumbMax caps the thumb at two rows. The transcript is scanned rather
+// than read, so a long bar did not add information; a short thumb is easier to
+// grab and keeps the track quiet.
+const scrollThumbMax = 2
+
+// ScrollBarThumb returns the first bar row and the thumb length for an offset
+// measured from the bottom. The rendered bar and the mouse hit-test share this
+// function so a drag always lands on the cell the user sees.
+func ScrollBarThumb(total, visible, offset int) (top, size int) {
 	maxStart := chatMaxOffset(total, visible)
 	if maxStart == 0 {
 		return 0, visible
@@ -273,6 +285,9 @@ func chatScrollBar(total, visible, offset int) (top, size int) {
 	size = visible * visible / total
 	if size < 1 {
 		size = 1
+	}
+	if size > scrollThumbMax {
+		size = scrollThumbMax
 	}
 	if size > visible {
 		size = visible
