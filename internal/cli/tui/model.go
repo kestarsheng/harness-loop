@@ -244,9 +244,10 @@ type Model struct {
 	// larger value means the reader is looking at history. chatTotal is the
 	// rendered row count of the last frame and chatNew marks rows that
 	// arrived while the reader was scrolled up ("↓ new" in the status bar).
-	chatScroll int
-	chatTotal  int
-	chatNew    bool
+	chatScroll    int
+	chatTotal     int
+	chatNew       bool
+	scrollBarDrag bool
 	// Spinner / thinking state. spinnerFrame drives both the braille spinner
 	// and the alternating block cursor; thinkingStarted feeds "Thinking… 3s".
 	spinnerFrame    int
@@ -873,6 +874,28 @@ func (m *Model) handleMouse(msg tea.MouseMsg) {
 			return
 		}
 	}
+	if m.chatPane() && msg.X >= m.viewWidth()-1 {
+		top, height := m.bodyRegion()
+		if height > 0 && msg.Y >= top && msg.Y < top+height {
+			switch msg.Action {
+			case tea.MouseActionPress:
+				if msg.Button == tea.MouseButtonLeft {
+					m.scrollBarDrag = true
+					m.scrollToBar(msg.Y-top, height)
+				}
+			case tea.MouseActionMotion:
+				if m.scrollBarDrag {
+					m.scrollToBar(msg.Y-top, height)
+				}
+			case tea.MouseActionRelease:
+				m.scrollBarDrag = false
+			}
+			return
+		}
+	}
+	if msg.Action == tea.MouseActionRelease {
+		m.scrollBarDrag = false
+	}
 	if msg.Button != tea.MouseButtonLeft || msg.Action != tea.MouseActionPress {
 		return
 	}
@@ -1461,6 +1484,39 @@ func (m *Model) scrollChat(delta int) {
 		return
 	}
 	m.chatScroll = max(0, min(m.chatScroll+delta, m.chatMaxScroll()))
+	if m.chatScroll == 0 {
+		m.chatNew = false
+	}
+}
+
+// bodyRegion returns the top row and height of the scrollable body. It mirrors
+// View's fixed skeleton so a mouse hit on the rightmost column can tell whether
+// it landed on the scrollbar.
+func (m *Model) bodyRegion() (top, height int) {
+	width := m.viewWidth()
+	logo := views.RenderWordmark(width, m.theme.NoColor)
+	return lineCount(logo), m.chatViewportHeight()
+}
+
+// scrollToBar maps a row inside the body to a scroll offset. The thumb centre
+// follows the pointer, so clicking the track jumps and holding the thumb drags
+// without a separate drag-start anchor.
+func (m *Model) scrollToBar(row, height int) {
+	if !m.chatPane() || m.chatTotal <= height || height < 1 {
+		return
+	}
+	maxOff := max(m.chatTotal-height, 0)
+	if maxOff == 0 {
+		return
+	}
+	_, size := views.ScrollBarThumb(m.chatTotal, height, m.chatScroll)
+	track := height - size
+	if track <= 0 {
+		return
+	}
+	fromTop := max(0, min(row-size/2, track))
+	offset := maxOff - (fromTop*maxOff+track/2)/track
+	m.chatScroll = max(0, min(offset, maxOff))
 	if m.chatScroll == 0 {
 		m.chatNew = false
 	}
