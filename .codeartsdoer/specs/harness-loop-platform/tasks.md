@@ -1245,13 +1245,13 @@
 
 | 字段 | 内容 |
 |---|---|
-| 目标 | 两终端演示闭环 + 全量验证 + CHANGELOG + `v0.3.0-p2`。 |
+| 目标 | 演示闭环（直答 + `/task` a~e + 两终端共享看板）+ 全量验证 + CHANGELOG + `v0.3.0-p2`。 |
 | 关联需求 | design 8.4；全部 P2 任务 |
-| 依赖 | T-P2-18~25、T-P2-40~42 |
+| 依赖 | T-P2-18~25、T-P2-40~53（含直答 T-P2-45、TUI T-P2-48~53、路径 T-P2-46、handoff T-P2-47） |
 | 涉及文件 | [M] `CHANGELOG.md`、[M] `docs/dev.md`、发布 tag |
-| 实施要点 | 1) 冷启动 `harness loop` → 13 项（infra+agent，不含 board）→ TUI（无 URL、后台无可见窗口、logo/组件框）；2) 第二终端 → 同一看板两张卡；3) `exit`/`stop` 隔离验证；4) 全量 build/test/depcheck；5) 合 main 打 tag。 |
-| 验收标准 | 上述 4 条演示全过；`loop` TUI 不显示 URL、后台服务无可见窗口、加粗浅蓝 logo + 组件框（T-P2-42）；`go build -p 1 ./...`、`go test ./services/... ./internal/cli/...`、depcheck 0；tag 已推。 |
-| 复杂度 | S（0.5 天） |
+| 实施要点 | 1) 冷启动 `harness loop` → 13 项（infra+agent，不含 board）→ TUI 直答（无 URL、后台无可见窗口、logo/输入框/状态栏）；2) 直答 `hi` 有 assistant 回复、不创建 task；`/task <goal>` 创建 a~e 任务；3) `/task` 真实写文件（workspace 内绝对路径，T-P2-46）与 handoff 编程任务（T-P2-47）；4) TUI 滚动条/滚轮/轨道点击可用（T-P2-52/53）；5) 第二终端 → 同一看板两张卡；6) `exit`/`loop stop` 隔离验证；7) 全量 `go build -p 1 ./...`、`go test ./services/... ./internal/cli/...`、depcheck、容器 `-race`；8) 合 main 打 tag `v0.3.0-p2`。 |
+| 验收标准 | 上述 8 步演示全过；直答有回复且不建 task；`/task` 能真实落盘产物或明确失败原因；TUI 无 URL、后台服务无可见窗口、`◇/◆` 与滚动条正常；`go build -p 1 ./...`、`go test ./services/... ./internal/cli/...`、depcheck 0、容器 `-race` 全绿；CHANGELOG 与 tag 已推。 |
+| 复杂度 | S（1 天） |
 
 ### T-P2-27 真实 token 计量（流式 usage）
 
